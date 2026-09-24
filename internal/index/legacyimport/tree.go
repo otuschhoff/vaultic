@@ -19,6 +19,97 @@ type SnapshotSource interface {
 	vaultic.BlobLoader
 }
 
+func importSnapshotMetadata(ctx context.Context, source Source, store Store, options Options) (result Result, err error) {
+	result.SnapshotMetadataOnly = true
+	publisher, ok := store.(interface {
+		ImportLegacySnapshot(context.Context, schema.ID, schema.SnapshotRecord) error
+	})
+	if !ok {
+		return result, fmt.Errorf("snapshot metadata import requires snapshot publication support")
+	}
+	legacy := legacySnapshotSource{source}
+	snapshots, err := vaultic.MemorizeList(ctx, legacy, vaultic.SnapshotFile)
+	if err != nil {
+		return result, err
+	}
+	if err := snapshots.List(ctx, vaultic.SnapshotFile, func(vaultic.ID, int64) error {
+		result.SnapshotsTotal++
+		return nil
+	}); err != nil {
+		return result, err
+	}
+	report := func() {
+		progress := Progress{SnapshotsTotal: result.SnapshotsTotal, SnapshotsCompleted: result.SnapshotsSeen,
+			SnapshotsImported: result.SnapshotsImported, SnapshotsResumed: result.SnapshotsResumed}
+		options.Telemetry.progress(progress)
+		if options.Progress != nil {
+			options.Progress(progress)
+		}
+	}
+	report()
+	err = data.ForAllSnapshots(ctx, snapshots, legacy, nil, func(id vaultic.ID, snapshot *data.Snapshot, loadErr error) error {
+		result.SnapshotsSeen++
+		defer report()
+		if loadErr != nil {
+			return recordFinding(&result, options, id, "decode-snapshot", loadErr)
+		}
+		if snapshot.Tree == nil || snapshot.Tree.IsNull() {
+			return recordFinding(&result, options, id, "snapshot-root", fmt.Errorf("snapshot has no root tree"))
+		}
+		original, err := legacy.LoadUnpacked(ctx, vaultic.SnapshotFile, id)
+		if err != nil {
+			return err
+		}
+		record := schema.SnapshotRecord{LegacyTree: schema.ID(*snapshot.Tree), OriginalJSON: original}
+		if _, err := record.MarshalBinary(); err != nil {
+			return recordFinding(&result, options, id, "decode-snapshot", err)
+		}
+		rootValue, found, err := store.Get(ctx, schema.BlobKey(record.LegacyTree))
+		if err != nil {
+			return err
+		}
+		if !found {
+			return recordFinding(&result, options, id, "snapshot-root", fmt.Errorf("root tree is absent from the blob catalog; import indexes first"))
+		}
+		root, err := schema.UnmarshalBlobRecord(rootValue)
+		if err != nil {
+			return err
+		}
+		hasTree := false
+		for _, location := range root.Locations {
+			hasTree = hasTree || location.Type == schema.BlobTree
+		}
+		if !hasTree {
+			return recordFinding(&result, options, id, "snapshot-root", fmt.Errorf("root has no tree location"))
+		}
+		value, found, err := store.Get(ctx, schema.SnapshotKey(schema.ID(id)))
+		if err != nil {
+			return err
+		}
+		if found {
+			existing, err := schema.UnmarshalSnapshotRecord(value)
+			if err != nil {
+				return err
+			}
+			if !bytes.Equal(existing.OriginalJSON, original) {
+				return fmt.Errorf("snapshot %s conflicts with stored JSON", id.String())
+			}
+			if options.Resume {
+				result.SnapshotsResumed++
+				return nil
+			}
+		}
+		if !options.DryRun {
+			if err := publisher.ImportLegacySnapshot(ctx, schema.ID(id), record); err != nil {
+				return err
+			}
+		}
+		result.SnapshotsImported++
+		return nil
+	})
+	return result, err
+}
+
 type legacySnapshotSource struct{ Source }
 
 func (source legacySnapshotSource) List(ctx context.Context, kind vaultic.FileType, visit func(vaultic.ID, int64) error) error {

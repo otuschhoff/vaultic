@@ -1,5 +1,63 @@
 # Phase 33 Production Benchmark Evidence
 
+## Historical snapshot import startup observation (2026-09-24)
+
+After historical snapshot support was committed as `c23b12067`, the user
+authorized a resumable import into the existing primary database and requested
+performance observation. A fresh committed CLI used the existing socket and
+HDD-NFS repository, with unlimited snapshot depth, resume enabled, a one-source
+error stop and a ten-minute TERM cap plus 45-second kill grace. No reset,
+activation, service installation or restart was requested or performed.
+
+Cancelling the terminal tool did not stop its child import. Observation attached
+to the surviving PID 917005 rather than launching a second importer. The import
+then reached its original cap: the recorded lifecycle is 600.038 seconds and
+the error is `load source indexes for snapshot import: load authoritative blob
+catalog: rpc error: code = Canceled desc = context canceled`. Snapshot traversal
+was never reached. All import result counts are zero, including snapshots and
+nodes; daemon engine write operations did not increase. The 143 production
+snapshots therefore remain unimported.
+
+The five-second sampler captured 52 live-process observations over the final
+255.251 seconds. These are not whole-run resource totals:
+
+| Measurement | Import CLI | VaulticDB |
+| --- | ---: | ---: |
+| Sample-window CPU seconds | 15.87 | 191.91 |
+| Mean CPU cores used | 0.062 | 0.752 |
+| First / last RSS, KiB | 1,520,712 / 2,386,812 | 598,252 / 601,596 |
+| Sampled peak RSS, KiB | 2,386,812 | 636,044 |
+| Logical `rchar` delta, bytes | 753,504,915 | 67,003,384,804 |
+
+The wider 632.583-second daemon-status window includes setup and post-run
+observation. It records 459.76 daemon CPU seconds, 506,756 main-store GETs,
+532.447 aggregate GET service seconds and 28,018,033,665 returned body bytes.
+GET counts and aggregate service are not equivalent to physical NFS reads or
+exclusive wall-clock disk wait. Kernel thread samples mostly show futex waits,
+with some daemon NFS waits; they are not Go goroutine or Rust async stack
+profiles. No CPU stack profile was collected, so exact crypto/iterator/I/O
+shares remain unmeasured. GNU time output and the shell timeout exit status
+were lost with the cancelled wrapper; lifecycle/error output establishes the
+cap, not an invented exit-code observation.
+
+The controlling path is `runIndexImport` calling `repo.LoadIndex` before
+`legacyimport.Import`. `DaemonEngine.loadBlobCatalog` serially scans all `b:`
+records through 10,000-record unary `ScanPrefix` pages and accumulates all blob
+locations by pack. It does not use the checker's parallel streaming scan.
+This is the first demonstrated bottleneck, before snapshot publication or
+durability can be measured. The next optimization should remove unnecessary
+full-catalog materialization for snapshot tree loading, or replace this unary
+startup scan with bounded streaming. Increasing pack import workers cannot
+parallelize this earlier code path. No optimization was applied in this run.
+
+There are 41 monitor snapshots, with the initial daemon collection unavailable.
+The saved analyzer accounts for that missing collection and checks zero imported
+snapshots/nodes and healthy writer state. The primary remains read-write at
+epoch 55, with zero active transactions/intents and no import process left.
+Logs, committed executable, source/binary identities, process/NFS samples and
+reproducible analysis are retained under
+`db.test/historical-snapshot-import-2026-09-24`.
+
 ## Full-check catalog streaming (r53, 2026-09-23)
 
 The matched block-scratch evidence was committed as `212cfba1c`, without

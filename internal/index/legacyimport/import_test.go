@@ -75,6 +75,97 @@ type fixedStatter struct {
 	err  error
 }
 
+type metadataOnlySource struct{ *memorySource }
+
+func (source metadataOnlySource) List(ctx context.Context, kind vaultic.FileType, visit func(vaultic.ID, int64) error) error {
+	if kind != vaultic.SnapshotFile {
+		return errors.New("metadata-only import listed non-snapshot objects")
+	}
+	return source.memorySource.List(ctx, kind, visit)
+}
+
+func (source metadataOnlySource) LoadBlob(context.Context, vaultic.BlobHandle, []byte) ([]byte, error) {
+	return nil, errors.New("metadata-only import loaded a tree blob")
+}
+
+func TestSnapshotMetadataOnlySkipsIndexesAndTraversal(t *testing.T) {
+	ctx := context.Background()
+	tree := treeJSON(t)
+	treeID := vaultic.Hash(tree)
+	source := metadataOnlySource{&memorySource{snapshots: make(map[vaultic.ID][]byte), blobs: map[vaultic.ID][]byte{treeID: tree}}}
+	for range 3 {
+		source.snapshots[vaultic.NewRandomID()] = fmt.Appendf(nil, `{"tree":"%s","custom":"preserved"}`, treeID.String())
+	}
+	store := newMemoryStore()
+	root, err := (schema.BlobRecord{Locations: []schema.BlobLocation{{Type: schema.BlobTree, Length: 1}}}).MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.values[string(schema.BlobKey(schema.ID(treeID)))] = root
+	options := Options{SnapshotMetadataOnly: true, Resume: true, DryRun: true}
+	result, err := Import(ctx, source, fixedStatter{err: errors.New("unexpected pack stat")}, store, options)
+	if err != nil || !result.SnapshotMetadataOnly || result.SnapshotsImported != 3 || len(store.values) != 1 || result.TreesVisited != 0 || result.IndexesSeen != 0 {
+		t.Fatalf("dry run: %#v %v", result, err)
+	}
+	options.DryRun = false
+	result, err = Import(ctx, source, fixedStatter{}, store, options)
+	if err != nil || result.SnapshotsImported != 3 || result.TreesVisited != 0 || len(store.values) != 4 {
+		t.Fatalf("metadata-only import: %#v %v", result, err)
+	}
+	for id, original := range source.snapshots {
+		record, err := schema.UnmarshalSnapshotRecord(store.values[string(schema.SnapshotKey(schema.ID(id)))])
+		if err != nil || !bytes.Equal(record.OriginalJSON, original) {
+			t.Fatalf("snapshot JSON changed: %v", err)
+		}
+		if _, found := store.values[string(schema.SnapshotImportCheckpointKey(schema.ID(id)))]; found {
+			t.Fatal("metadata-only import checkpointed traversal")
+		}
+	}
+	result, err = Import(ctx, source, fixedStatter{}, store, options)
+	if err != nil || result.SnapshotsResumed != 3 || result.SnapshotsImported != 0 {
+		t.Fatalf("resume: %#v %v", result, err)
+	}
+	result, err = Import(ctx, source.memorySource, fixedStatter{}, store, Options{Resume: true, SnapshotDepth: 1})
+	if err != nil || result.TreesVisited != 3 || result.SnapshotsImported != 3 {
+		t.Fatalf("later full traversal was skipped: %#v %v", result, err)
+	}
+}
+
+func TestSnapshotMetadataOnlyRejectsInvalidRoots(t *testing.T) {
+	for _, mode := range []string{"missing", "data", "conflict", "publication"} {
+		t.Run(mode, func(t *testing.T) {
+			treeID, id := vaultic.NewRandomID(), vaultic.NewRandomID()
+			original := fmt.Appendf(nil, `{"tree":"%s"}`, treeID.String())
+			source := metadataOnlySource{&memorySource{snapshots: map[vaultic.ID][]byte{id: original}}}
+			store := &failingSnapshotStore{memoryStore: newMemoryStore(), failPublication: mode == "publication"}
+			if mode != "missing" {
+				kind := schema.BlobTree
+				if mode == "data" {
+					kind = schema.BlobData
+				}
+				root, err := (schema.BlobRecord{Locations: []schema.BlobLocation{{Type: kind, Length: 1}}}).MarshalBinary()
+				if err != nil {
+					t.Fatal(err)
+				}
+				store.values[string(schema.BlobKey(schema.ID(treeID)))] = root
+			}
+			if mode == "conflict" {
+				record := schema.SnapshotRecord{LegacyTree: schema.ID(treeID), OriginalJSON: fmt.Appendf(nil, `{"tree":"%s","different":true}`, treeID.String())}
+				if err := store.memoryStore.ImportLegacySnapshot(context.Background(), schema.ID(id), record); err != nil {
+					t.Fatal(err)
+				}
+			}
+			result, err := Import(context.Background(), source, fixedStatter{}, store, Options{SnapshotMetadataOnly: true, Resume: true, MaxErrors: 1})
+			if err == nil || result.SnapshotsImported != 0 {
+				t.Fatalf("invalid import accepted: %#v %v", result, err)
+			}
+			if _, found := store.values[string(schema.SnapshotImportCheckpointKey(schema.ID(id)))]; found {
+				t.Fatal("failed metadata import checkpointed traversal")
+			}
+		})
+	}
+}
+
 type blockingStatter struct {
 	entered chan time.Duration
 	release chan struct{}

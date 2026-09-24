@@ -332,6 +332,37 @@ very large, trusted repository.
 Stage 4: import snapshot metadata
 =================================
 
+To preserve historical snapshot information after pack metadata has already
+been imported, without traversing trees, use:
+
+.. code-block:: console
+
+   $ vaultic index import \
+      --from-legacy --resume --snapshot-metadata-only \
+      --start-daemon \
+      --daemon-data-dir /srv/vaulticdb \
+      --metadata-encryption required \
+      --metadata-recovery-passphrase-file /etc/vaultic/metadata-recovery
+
+``--snapshot-metadata-only`` imports original snapshot IDs, exact JSON, and
+legacy tree-root references using targeted blob-catalog lookups. It neither
+lists/imports legacy indexes nor materializes the full authoritative catalog.
+Each root must already have a tree location in SlateDB; import pack metadata
+first if that validation fails. Publication is durable and idempotent, and
+``--resume`` skips matching snapshot records. ``--dry-run`` validates snapshot
+records and root locations without publishing them.
+
+This mode does not load tree/data payloads, create inode metadata or crawl
+debt, or write traversal checkpoints. It is not full tree/data verification;
+ordinary snapshot listing and restore still use the retained original roots.
+The JSON result includes ``snapshot_metadata_only: true``. Reset, activation,
+rebuild initialization, and traversal work budgets cannot be combined with
+this mode. Keep the original repository metadata and use compatible clients
+as described below.
+
+For a later full traversal, omit ``--snapshot-metadata-only``. Existing
+snapshot records do not skip traversal unless a traversal checkpoint exists.
+
 Rerun import without ``--snapshot-depth 0``:
 
 .. code-block:: console

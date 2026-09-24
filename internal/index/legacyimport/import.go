@@ -52,6 +52,7 @@ type Options struct {
 	WorkBudget              uint64
 	SnapshotDepth           uint
 	SnapshotWorkBudget      uint64
+	SnapshotMetadataOnly    bool
 	DeferSnapshotDurability bool
 	Progress                func(Progress)
 	Telemetry               *SchedulerTelemetry
@@ -96,6 +97,7 @@ type Finding struct {
 }
 
 type Result struct {
+	SnapshotMetadataOnly  bool      `json:"snapshot_metadata_only,omitempty"`
 	IndexesTotal          uint64    `json:"indexes_total"`
 	IndexesSeen           uint64    `json:"indexes_seen"`
 	IndexesImported       uint64    `json:"indexes_imported"`
@@ -267,6 +269,12 @@ func Import(ctx context.Context, source Source, statter PackStatter, store Store
 	}
 	if options.PacksPerTransaction > MaxPacksPerTransaction {
 		return result, fmt.Errorf("packs per transaction must not exceed %d", MaxPacksPerTransaction)
+	}
+	if options.SnapshotMetadataOnly {
+		if options.WorkBudget != 0 || options.SnapshotWorkBudget != 0 {
+			return result, fmt.Errorf("snapshot metadata-only import does not accept traversal work budgets")
+		}
+		return importSnapshotMetadata(ctx, source, store, options)
 	}
 	indexList, err := vaultic.MemorizeList(ctx, source, vaultic.IndexFile)
 	if err != nil {

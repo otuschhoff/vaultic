@@ -397,6 +397,7 @@ type indexImportOptions struct {
 	WorkBudget                 uint64
 	SnapshotDepth              uint
 	SnapshotWorkBudget         uint64
+	SnapshotMetadataOnly       bool
 	ConfirmMetadataLossRebuild bool
 	MonitorExport              importMonitorExportOptions
 }
@@ -665,6 +666,7 @@ func newIndexImportCommand(globalOptions *global.Options) *cobra.Command {
 	flags.Uint64Var(&options.WorkBudget, "work-budget", 0, "maximum blob records to examine (zero is unlimited)")
 	flags.UintVar(&options.SnapshotDepth, "snapshot-depth", math.MaxUint, "maximum tree depth to import (zero disables snapshot import)")
 	flags.Uint64Var(&options.SnapshotWorkBudget, "snapshot-work-budget", 0, "maximum snapshot nodes to examine (zero is unlimited)")
+	flags.BoolVar(&options.SnapshotMetadataOnly, "snapshot-metadata-only", false, "import only snapshot JSON and root references using existing blob locations; skip index import and tree traversal")
 	flags.BoolVar(
 		&options.ConfirmMetadataLossRebuild,
 		"confirm-metadata-loss-rebuild",
@@ -789,7 +791,7 @@ func runIndexImport(
 		log.Printf("legacy import scheduler: %s", formatLegacySchedulerStats(telemetry.Snapshot()))
 	})
 	defer stopStats()
-	if options.SnapshotDepth > 0 || options.SnapshotWorkBudget > 0 {
+	if !options.SnapshotMetadataOnly && (options.SnapshotDepth > 0 || options.SnapshotWorkBudget > 0) {
 		if err := repo.LoadIndex(ctx, printer); err != nil {
 			return result, fmt.Errorf("load source indexes for snapshot import: %w", err)
 		}
@@ -798,10 +800,10 @@ func runIndexImport(
 	progressReporter := newImportProgressReporter(started)
 	log.Printf(
 		"legacy metadata import started: pack_workers=%d batch_size=%d packs_per_transaction=%d "+
-			"transaction_bytes=%d prepared_bytes=%d publication_lanes=%d batch_timeout=%s snapshot_depth=%d resume=%t fresh=%t",
+			"transaction_bytes=%d prepared_bytes=%d publication_lanes=%d batch_timeout=%s snapshot_depth=%d resume=%t fresh=%t snapshot_metadata_only=%t",
 		options.PackWorkers, options.BatchSize, options.PacksPerTransaction, options.ImportTransactionBytes,
 		options.PreparedImportBytes, options.ImportPublicationLanes, options.ImportBatchTimeout, options.SnapshotDepth, options.Resume,
-		options.ForceResetOldIndex,
+		options.ForceResetOldIndex, options.SnapshotMetadataOnly,
 	)
 	telemetry.BeginSource()
 	result, err = legacyimport.Import(ctx, repo, repo.Backend(), store, legacyimport.Options{
@@ -812,8 +814,9 @@ func runIndexImport(
 		PreparedImportBytes: options.PreparedImportBytes, ImportBatchTimeout: options.ImportBatchTimeout,
 		WorkBudget: options.WorkBudget, SnapshotDepth: options.SnapshotDepth,
 		SnapshotWorkBudget: options.SnapshotWorkBudget, DeferSnapshotDurability: options.ForceResetOldIndex,
-		Progress:  progressReporter.Update,
-		Telemetry: telemetry,
+		SnapshotMetadataOnly: options.SnapshotMetadataOnly,
+		Progress:             progressReporter.Update,
+		Telemetry:            telemetry,
 	})
 	stopStats()
 	log.Printf("legacy import scheduler: %s", formatLegacySchedulerStats(telemetry.Snapshot()))
@@ -1016,6 +1019,9 @@ func validateIndexImportOptions(options indexImportOptions) (indexImportOptions,
 	if !options.FromLegacy {
 		return options, fmt.Errorf("no import source selected; --from-legacy is currently required")
 	}
+	if options.SnapshotMetadataOnly && (options.ForceResetOldIndex || options.Activate || options.Daemon.RebuildInitialize || options.WorkBudget != 0 || options.SnapshotWorkBudget != 0) {
+		return options, fmt.Errorf("--snapshot-metadata-only cannot be combined with reset, activation, rebuild initialization or traversal work budgets")
+	}
 	if err := validateImportMonitorExportOptions(options.MonitorExport); err != nil {
 		return options, err
 	}
@@ -1143,6 +1149,9 @@ func printIndexImportResult(printer interface {
 	P(msg string, args ...any)
 	E(msg string, args ...any)
 }, result legacyimport.Result) {
+	if result.SnapshotMetadataOnly {
+		printer.P("snapshot metadata only: tree traversal was not performed\n")
+	}
 	printer.P("imported %d indexes, %d packs, %d blobs, and %d snapshots\n", result.IndexesImported, result.PacksImported,
 		result.BlobsImported, result.SnapshotsImported)
 	for _, finding := range result.Findings {

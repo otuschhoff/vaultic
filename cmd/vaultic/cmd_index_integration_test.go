@@ -26,6 +26,89 @@ func TestIndexWorkflowsImportResumeExportCheckAndRepair(t *testing.T) {
 	testIndexWorkflows(t, false)
 }
 
+func TestIndexSnapshotMetadataOnly(t *testing.T) {
+	env, socket, _, client := phase34M2IndexFixture(t)
+	repositoryIdentity := repositoryID(t, env)
+	defer feature.TestSetFlag(t, feature.Flag, feature.SlateDBAuthoritative, true)()
+	options := indexImportOptions{Daemon: indexDaemonOptions{Socket: socket}, FromLegacy: true, Resume: true, Activate: true}
+	err := withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		_, err := runIndexImport(ctx, options, globalOptions, globalOptions.Term)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := daemon.NewSchemaStore(client)
+	profile := phase34M2Profile("legacy_import", "rpc", "scan", 0)
+	controller := phase34M2IndexController(t, profile, repositoryIdentity)
+	options.Daemon.ResponseDeliveryForTesting = controller.ResponseDelivery("scan")
+	options.Activate = false
+	options.SnapshotMetadataOnly = true
+	options.SnapshotDepth = ^uint(0)
+	counter := &listCountingBackend{calls: map[backend.FileType]int{}}
+	env.globalOptions.BackendTestHook = func(inner backend.Backend) (backend.Backend, error) {
+		counter.Backend = inner
+		return counter, nil
+	}
+	for _, mode := range []string{"dry-run", "publish", "resume"} {
+		options.DryRun = mode == "dry-run"
+		err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+			result, err := runIndexImport(ctx, options, globalOptions, globalOptions.Term)
+			if err != nil {
+				return err
+			}
+			if !result.SnapshotMetadataOnly || result.SnapshotsSeen != 1 || result.IndexesTotal != 0 || result.TreesVisited != 0 {
+				t.Fatalf("%s result: %#v", mode, result)
+			}
+			if mode == "resume" && result.SnapshotsResumed != 1 {
+				t.Fatalf("resume result: %#v", result)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("%s: %v", mode, err)
+		}
+		entries, _, err := store.ScanPrefix(context.Background(), []byte("s:"), nil, 10)
+		if err != nil || (mode == "dry-run" && len(entries) != 0) || (mode != "dry-run" && len(entries) != 1) {
+			t.Fatalf("%s snapshots=%d err=%v", mode, len(entries), err)
+		}
+		for _, entry := range entries {
+			key, err := schema.ParseKey(entry.Key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, found, err := store.Get(context.Background(), schema.SnapshotImportCheckpointKey(key.ID)); err != nil || found {
+				t.Fatalf("metadata-only import published traversal checkpoint: found=%t err=%v", found, err)
+			}
+		}
+	}
+	if counter.calls[backend.IndexFile] != 0 || controller.Observation().Started != 0 {
+		t.Fatalf("metadata-only import scanned indexes/catalog: indexes=%d scans=%d", counter.calls[backend.IndexFile], controller.Observation().Started)
+	}
+	for _, mode := range []string{"reset", "activate", "rebuild", "work-budget", "snapshot-work-budget"} {
+		invalid := options
+		switch mode {
+		case "reset":
+			invalid.ForceResetOldIndex = true
+		case "activate":
+			invalid.Activate = true
+		case "rebuild":
+			invalid.Daemon.RebuildInitialize = true
+		case "work-budget":
+			invalid.WorkBudget = 1
+		case "snapshot-work-budget":
+			invalid.SnapshotWorkBudget = 1
+		}
+		err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+			_, err := runIndexImport(ctx, invalid, globalOptions, globalOptions.Term)
+			return err
+		})
+		if err == nil {
+			t.Fatalf("metadata-only accepted incompatible %s", mode)
+		}
+	}
+}
+
 func TestIndexWorkflowsS3CompatibleMetadata(t *testing.T) {
 	if os.Getenv("VAULTICDB_TEST_S3_ENDPOINT") == "" {
 		t.Skip("VAULTICDB_TEST_S3_ENDPOINT is not configured")
