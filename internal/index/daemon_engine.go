@@ -7,7 +7,10 @@ import (
 	"iter"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/otuschhoff/vaultic/internal/debug"
 	"github.com/otuschhoff/vaultic/internal/index/analytics"
@@ -468,14 +471,18 @@ func (engine *DaemonEngine) Load(
 	if err := engine.recoverPendingSnapshots(ctx, repo); err != nil {
 		return err
 	}
-	pendingPacks, projection, recoveryProjection, err := engine.loadCatalog(ctx, progress)
+	pendingPacks, projections, err := engine.loadCatalog(ctx, progress)
 	if err != nil {
 		return err
 	}
-	projection.Finalize()
-	engine.legacy.master.Insert(projection)
+	for _, projection := range projections {
+		projection.index.Finalize()
+		engine.legacy.master.Insert(projection.index)
+		if len(pendingPacks) > 0 {
+			engine.legacy.master.Insert(projection.recovery)
+		}
+	}
 	if len(pendingPacks) > 0 {
-		engine.legacy.master.Insert(recoveryProjection)
 		engine.mu.Lock()
 		for id := range pendingPacks {
 			engine.pendingPacks[id] = struct{}{}
@@ -485,10 +492,21 @@ func (engine *DaemonEngine) Load(
 	return nil
 }
 
-func (engine *DaemonEngine) loadCatalog(ctx context.Context, progress vaultic.Counter) (pending map[vaultic.ID]struct{}, projection, recovery *legacyindex.Index, resultErr error) {
+type catalogProjection struct {
+	index    *legacyindex.Index
+	recovery *legacyindex.Index
+}
+
+type catalogProgress struct {
+	records    atomic.Uint64
+	locations  atomic.Uint64
+	partitions atomic.Uint64
+}
+
+func (engine *DaemonEngine) loadCatalog(ctx context.Context, progress vaultic.Counter) (pending map[vaultic.ID]struct{}, projections []catalogProjection, resultErr error) {
 	session, err := engine.store.BeginReadSession(ctx)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("open authoritative catalog read session: %w", err)
+		return nil, nil, fmt.Errorf("open authoritative catalog read session: %w", err)
 	}
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -498,22 +516,41 @@ func (engine *DaemonEngine) loadCatalog(ctx context.Context, progress vaultic.Co
 	ctx = session.Context()
 	pending, err = engine.loadPendingPacks(ctx, session)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
-	projection, recovery, err = engine.loadBlobCatalog(ctx, session, pending, progress)
-	if err != nil {
-		return nil, nil, nil, err
+	const workers = 4
+	projections = make([]catalogProjection, workers)
+	counts := &catalogProgress{}
+	group, scanCtx := errgroup.WithContext(ctx)
+	for worker := range workers {
+		group.Go(func() error {
+			index, recovery, err := engine.loadBlobCatalog(scanCtx, session, pending, progress, worker, workers, counts)
+			if err != nil {
+				return err
+			}
+			projections[worker] = catalogProjection{index: index, recovery: recovery}
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return nil, nil, fmt.Errorf("load authoritative catalog after %d records, %d locations, %d/256 partitions: %w",
+			counts.records.Load(), counts.locations.Load(), counts.partitions.Load(), err)
 	}
 	if err := session.Validate(ctx); err != nil {
-		return nil, nil, nil, fmt.Errorf("validate authoritative catalog read session: %w", err)
+		return nil, nil, fmt.Errorf("validate authoritative catalog read session: %w", err)
 	}
-	return pending, projection, recovery, nil
+	return pending, projections, nil
 }
 
-func (engine *DaemonEngine) loadBlobCatalog(ctx context.Context, session *daemon.ReadSession, pending map[vaultic.ID]struct{}, progress vaultic.Counter) (*legacyindex.Index, *legacyindex.Index, error) {
+func (engine *DaemonEngine) loadBlobCatalog(ctx context.Context, session *daemon.ReadSession, pending map[vaultic.ID]struct{}, progress vaultic.Counter, firstPartition, stride int, counts *catalogProgress) (*legacyindex.Index, *legacyindex.Index, error) {
 	projection := legacyindex.NewCatalogBuilder()
 	recovery := legacyindex.NewCatalogBuilder()
-	err := session.ScanRange(ctx, []byte("b:"), 10_000, func(entries []daemon.KeyValue) error {
+	consume := func(entries []daemon.KeyValue) error {
+		var records, locations uint64
+		defer func() {
+			counts.records.Add(records)
+			counts.locations.Add(locations)
+		}()
 		for _, entry := range entries {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -549,12 +586,17 @@ func (engine *DaemonEngine) loadBlobCatalog(ctx context.Context, session *daemon
 					return err
 				}
 				progress.Add(1)
+				locations++
 			}
+			records++
 		}
 		return nil
-	})
-	if err != nil {
-		return nil, nil, fmt.Errorf("load authoritative blob catalog: %w", err)
+	}
+	for partition := firstPartition; partition < 256; partition += stride {
+		if err := session.ScanRange(ctx, []byte{'b', ':', byte(partition)}, 10_000, consume); err != nil {
+			return nil, nil, fmt.Errorf("load authoritative blob catalog partition %02x: %w", partition, err)
+		}
+		counts.partitions.Add(1)
 	}
 	return projection.Build(), recovery.Build(), nil
 }

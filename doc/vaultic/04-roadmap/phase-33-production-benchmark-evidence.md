@@ -1,5 +1,39 @@
 # Phase 33 Production Benchmark Evidence
 
+## Four catalog workers reach cwalk, r3 (2026-09-24)
+
+The third candidate uses four private compact builders, each scanning disjoint
+blob-key partitions under the same pinned read session. Worker failure cancels
+and joins the group; all projections remain private until completion and final
+validation. Per-chunk counters report processed records, locations and completed
+partitions on interrupted startup. Native multi-page lookup/cancellation tests
+and affected-package race tests passed, including concurrent counter updates.
+
+Production r3 used the same explicit cwalk, 52-root scope, ten-minute cap and
+unchanged primary. Catalog reads plateaued near 205s; the 180s stack is still
+in catalog loading, while both 360s and 550s stacks prove the command reached
+`Archiver.prepareCWalkManifest -> BuildDirectoryManifest -> cwalk.Walker.Run`.
+Thus startup now reaches source traversal within the feedback window, unlike
+both single-consumer candidates and the original hour-long unary attempt.
+This is not a completed-backup runtime ratio: no snapshot was published.
+
+The newly reached cwalk manifest pass failed to respond to TERM within the
+45-second grace. Timeout killed the process group at 645.007s (exit 137).
+GNU time then reported wrapper-only CPU/RSS and the CPU profile was not cleanly
+finalized; those totals must not be treated as backup resources. The saved
+analyzer instead reports the 640.621s sampled CLI window: 1,044.78 CPU seconds
+and 30,146,520 KiB sampled peak RSS. Daemon status spans 645.738s with 733.20
+CPU seconds, 42,226 GETs, 96.971324 aggregate service seconds and
+43,176,477,462 logical body bytes. All 143 snapshot IDs remain unchanged,
+engine writes/commits are zero, and the original primary remains healthy at
+epoch 55 with no active transactions/intents or remaining backup process.
+
+The cwalk stacks show directory reads in the external walker and the caller
+waiting in `Walker.Run`; authoritative reconciliation workers are still idle.
+The next required resilience work is cancellation and bounded manifest
+preparation while retaining cwalk. Artifacts and corrected sampled-resource
+analysis are under `db.test/backup-parallel4-2026-09-24-r3`.
+
 ## Direct compact backup projection, r2 (2026-09-24)
 
 The second candidate removes the full `map[PackID][]Blob` staging copy. A
