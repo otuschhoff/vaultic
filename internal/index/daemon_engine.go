@@ -468,11 +468,7 @@ func (engine *DaemonEngine) Load(
 	if err := engine.recoverPendingSnapshots(ctx, repo); err != nil {
 		return err
 	}
-	pendingPacks, err := engine.loadPendingPacks(ctx)
-	if err != nil {
-		return err
-	}
-	byPack, err := engine.loadBlobCatalog(ctx, progress)
+	pendingPacks, byPack, err := engine.loadCatalog(ctx, progress)
 	if err != nil {
 		return err
 	}
@@ -498,22 +494,45 @@ func (engine *DaemonEngine) Load(
 	return nil
 }
 
-func (engine *DaemonEngine) loadBlobCatalog(ctx context.Context, progress vaultic.Counter) (map[vaultic.ID]pack.Blobs, error) {
+func (engine *DaemonEngine) loadCatalog(ctx context.Context, progress vaultic.Counter) (pending map[vaultic.ID]struct{}, byPack map[vaultic.ID]pack.Blobs, resultErr error) {
+	session, err := engine.store.BeginReadSession(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open authoritative catalog read session: %w", err)
+	}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		resultErr = errors.Join(resultErr, session.Close(cleanupCtx))
+	}()
+	ctx = session.Context()
+	pending, err = engine.loadPendingPacks(ctx, session)
+	if err != nil {
+		return nil, nil, err
+	}
+	byPack, err = engine.loadBlobCatalog(ctx, session, progress)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := session.Validate(ctx); err != nil {
+		return nil, nil, fmt.Errorf("validate authoritative catalog read session: %w", err)
+	}
+	return pending, byPack, nil
+}
+
+func (engine *DaemonEngine) loadBlobCatalog(ctx context.Context, session *daemon.ReadSession, progress vaultic.Counter) (map[vaultic.ID]pack.Blobs, error) {
 	byPack := make(map[vaultic.ID]pack.Blobs)
-	var after []byte
-	for {
-		entries, done, err := engine.store.ScanPrefix(ctx, []byte("b:"), after, 10_000)
-		if err != nil {
-			return nil, fmt.Errorf("load authoritative blob catalog: %w", err)
-		}
+	err := session.ScanRange(ctx, []byte("b:"), 10_000, func(entries []daemon.KeyValue) error {
 		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			parsed, err := schema.ParseKey(entry.Key)
 			if err != nil || parsed.Kind != schema.KeyBlob {
-				return nil, fmt.Errorf("load authoritative blob catalog: invalid blob key")
+				return fmt.Errorf("invalid blob key")
 			}
 			record, err := schema.UnmarshalBlobRecord(entry.Value)
 			if err != nil {
-				return nil, fmt.Errorf("load authoritative blob catalog: %w", err)
+				return err
 			}
 			for _, location := range record.Locations {
 				blobType := vaultic.DataBlob
@@ -528,46 +547,40 @@ func (engine *DaemonEngine) loadBlobCatalog(ctx context.Context, progress vaulti
 				})
 				progress.Add(1)
 			}
-			after = append(after[:0], entry.Key...)
 		}
-		if done {
-			return byPack, nil
-		}
-		if len(entries) == 0 {
-			return nil, fmt.Errorf("load authoritative blob catalog: scan made no progress")
-		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("load authoritative blob catalog: %w", err)
 	}
+	return byPack, nil
 }
 
-func (engine *DaemonEngine) loadPendingPacks(ctx context.Context) (map[vaultic.ID]struct{}, error) {
+func (engine *DaemonEngine) loadPendingPacks(ctx context.Context, session *daemon.ReadSession) (map[vaultic.ID]struct{}, error) {
 	pending := make(map[vaultic.ID]struct{})
-	var after []byte
-	for {
-		entries, done, err := engine.store.ScanPrefix(ctx, []byte("p:"), after, 10_000)
-		if err != nil {
-			return nil, fmt.Errorf("scan authoritative pack catalog: %w", err)
-		}
+	err := session.ScanRange(ctx, []byte("p:"), 10_000, func(entries []daemon.KeyValue) error {
 		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			parsed, parseErr := schema.ParseKey(entry.Key)
 			if parseErr != nil || parsed.Kind != schema.KeyPack {
-				return nil, fmt.Errorf("scan authoritative pack catalog: invalid pack key")
+				return fmt.Errorf("invalid pack key")
 			}
 			record, decodeErr := schema.UnmarshalPackRecord(entry.Value)
 			if decodeErr != nil {
-				return nil, fmt.Errorf("scan authoritative pack catalog: %w", decodeErr)
+				return decodeErr
 			}
 			if record.Lifecycle == schema.PackExportPending {
 				pending[vaultic.ID(parsed.ID)] = struct{}{}
 			}
-			after = append(after[:0], entry.Key...)
 		}
-		if done {
-			return pending, nil
-		}
-		if len(entries) == 0 {
-			return nil, fmt.Errorf("scan authoritative pack catalog: scan made no progress")
-		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("scan authoritative pack catalog: %w", err)
 	}
+	return pending, nil
 }
 
 func (engine *DaemonEngine) recoverPendingSnapshots(ctx context.Context, repo vaultic.LoaderUnpacked) error {

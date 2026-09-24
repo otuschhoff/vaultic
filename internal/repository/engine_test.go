@@ -4,16 +4,117 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sync/atomic"
 	"testing"
 
 	"github.com/otuschhoff/vaultic/internal/backend"
 	"github.com/otuschhoff/vaultic/internal/backend/mem"
 	"github.com/otuschhoff/vaultic/internal/feature"
 	enginepkg "github.com/otuschhoff/vaultic/internal/index"
+	"github.com/otuschhoff/vaultic/internal/index/daemon"
+	"github.com/otuschhoff/vaultic/internal/index/schema"
 	legacyindex "github.com/otuschhoff/vaultic/internal/repository/index"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
+
+type catalogLoadCounter struct {
+	vaultic.Counter
+	count  atomic.Uint64
+	cancel context.CancelFunc
+}
+
+func (counter *catalogLoadCounter) Add(amount uint64) {
+	if counter.count.Add(amount) >= 1000 && counter.cancel != nil {
+		counter.cancel()
+	}
+}
+
+func TestAuthoritativeCatalogLoadStreamsAndCleansUp(t *testing.T) {
+	ctx := context.Background()
+	client, err := daemon.Ensure(ctx, daemon.Options{
+		Socket: gcTestSocket(t), RepositoryID: t.Name(), DaemonPath: testGCDaemonPath(t),
+		DataDir: t.TempDir(), ObjectStore: "memory",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close(context.Background()) })
+	if !client.Limits().ScanStream {
+		t.Fatal("native daemon must support streaming")
+	}
+	store := daemon.NewSchemaStore(client)
+	expected := make(map[vaultic.BlobHandle][]schema.BlobLocation)
+	for packNumber := range 2 {
+		packID := schema.ID(vaultic.Hash(fmt.Appendf(nil, "pack-%d", packNumber)))
+		published := daemon.PublishedPack{PackID: packID,
+			Record: schema.PackRecord{Type: schema.PackMixed, BlobCount: 6001, PayloadSize: 600100, Lifecycle: schema.PackExportPending},
+			Blobs:  make(map[schema.ID]schema.BlobRecord),
+		}
+		for ordinal := range 6001 {
+			blobID := vaultic.Hash(fmt.Appendf(nil, "blob-%d-%d", packNumber, ordinal))
+			if ordinal == 0 {
+				blobID = vaultic.Hash([]byte("shared-blob"))
+			}
+			kind, blobType := schema.BlobData, vaultic.DataBlob
+			if ordinal%2 != 0 {
+				kind, blobType = schema.BlobTree, vaultic.TreeBlob
+			}
+			location := schema.BlobLocation{PackID: packID, Type: kind, Offset: uint64(ordinal * 100), Length: 100, UncompressedSize: 123}
+			published.Blobs[schema.ID(blobID)] = schema.BlobRecord{Locations: []schema.BlobLocation{location}}
+			handle := vaultic.BlobHandle{ID: blobID, Type: blobType}
+			expected[handle] = append(expected[handle], location)
+		}
+		if err := store.PublishPack(ctx, published); err != nil {
+			t.Fatal(err)
+		}
+	}
+	repo := newEngineTestRepository(t, mem.New())
+	for _, canceled := range []bool{true, false} {
+		engine := enginepkg.NewDaemonEngine(client)
+		loadCtx, cancel := context.WithCancel(ctx)
+		counter := &catalogLoadCounter{Counter: vaultic.NoopCounter}
+		if canceled {
+			counter.cancel = cancel
+		}
+		err := engine.Load(loadCtx, repo, counter, nil)
+		cancel()
+		if canceled {
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("canceled catalog: %v", err)
+			}
+		} else if err != nil || counter.count.Load() != 12002 {
+			t.Fatalf("load: count=%d err=%v", counter.count.Load(), err)
+		}
+		for handle, locations := range expected {
+			actual := engine.Lookup(handle)
+			if canceled {
+				if len(actual) != 0 {
+					t.Fatal("canceled load installed a partial projection")
+				}
+				continue
+			}
+			if len(actual) != len(locations) {
+				t.Fatalf("lookup %v: got %d locations, want %d", handle, len(actual), len(locations))
+			}
+			for _, location := range locations {
+				found := false
+				for _, blob := range actual {
+					found = found || blob.PackID() == vaultic.ID(location.PackID) && blob.Blob.Offset == uint(location.Offset) &&
+						blob.Blob.Length == uint(location.Length) && blob.Blob.UncompressedLength == uint(location.UncompressedSize)
+				}
+				if !found {
+					t.Fatalf("lookup %v missing location %+v", handle, location)
+				}
+			}
+		}
+		status, err := client.WriterStatus(ctx)
+		if err != nil || status.ActiveTransactions != 0 || status.ActiveWriteIntents != 0 {
+			t.Fatalf("catalog session leaked: status=%+v err=%v", status, err)
+		}
+	}
+}
 
 func newEngineTestRepository(t *testing.T, be backend.Backend) *Repository {
 	t.Helper()

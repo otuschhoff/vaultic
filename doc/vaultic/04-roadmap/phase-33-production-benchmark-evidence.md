@@ -1,5 +1,43 @@
 # Phase 33 Production Benchmark Evidence
 
+## Backup catalog streaming, r1 (2026-09-24)
+
+The first backup optimization replaces unary pending-pack/blob catalog pages
+with the existing renewed read-session streaming API. Both catalogs use one
+pinned snapshot, final generation validation precedes projection installation,
+and bounded cancellation-independent rollback closes the session before backup
+writes. Streaming validation and legacy-daemon fallback remain in the shared
+API. A native 12,002-location test covers mixed types, shared blob locations,
+pending-export projection, cancellation without partial installation, retry,
+and zero remaining transactions/intents. Focused index, read-session, repository
+and backup/cwalk race tests passed; final native regression passed in 2.961s.
+
+A fresh profile CLI from `4ab4f5a93` plus the recorded patch ran the unchanged
+52-root scope with explicit `--use-cwalk --cwalk-concurrency=32`. The diagnostic
+retained the ten-minute cap, 45-second grace, HDD-NFS primary and unchanged
+daemon; no builds/tests overlapped. It timed out after 603.101s, still loading
+the catalog. All four captured stacks remained in that phase. Both inventories
+retain the same 143 snapshot IDs, with zero engine writes/commits, and the
+primary remained PID 431717, epoch 55, healthy with no transactions/intents.
+
+CLI CPU was 497.90 + 75.74s, peak RSS 38,989,088 KiB, and swaps zero.
+The 603.918s daemon window recorded 605.14 CPU seconds, 38,706 main-store GETs,
+101.002503 aggregate GET-service seconds and 38,922,261,970 logical body bytes.
+The prior ten-minute unary attempt recorded 504,245 GETs and 531.009527 service
+seconds, but neither completed and record progress was unavailable: these
+figures demonstrate changed request behavior, not an end-to-end speedup ratio.
+The streaming run is now approximately one CLI core busy; its CPU profile
+attributes 64.44% cumulatively to the catalog consumer, including map growth,
+copying and decoding. The intermediate per-pack blob map reached about 37 GiB
+RSS before it could be copied into the compact lookup projection.
+
+The next bounded candidate is direct construction of a private compact
+projection, avoiding the full duplicate intermediate representation while
+retaining all-or-nothing installation. Parallel scan consumption and explicit
+record progress remain separate opportunities. Artifacts, source patch,
+profiles, samples, analyzer, identities and checksums are under
+`db.test/backup-stream-2026-09-24-r1`.
+
 ## Authorized 60-minute backup attempt (2026-09-24)
 
 After committing the socket-routing fix as `d350e4983`, a fresh profile CLI
