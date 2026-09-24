@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -47,6 +48,81 @@ func TestSchemaStoreImportsHistoricalSnapshot(t *testing.T) {
 	record.OriginalJSON = []byte(fmt.Sprintf(`{"tree":"%x"}`, treeID))
 	if err := store.ImportLegacySnapshot(ctx, snapshotID, record); err == nil {
 		t.Fatal("conflicting snapshot accepted")
+	}
+	batch := []LegacySnapshotImport{
+		{SnapshotID: daemonTestID(94), Record: record},
+		{SnapshotID: snapshotID, Record: record},
+	}
+	if err := store.ImportLegacySnapshots(ctx, batch); err == nil {
+		t.Fatal("batch containing a conflict accepted")
+	}
+	if _, found, err := store.Get(ctx, schema.SnapshotKey(batch[0].SnapshotID)); err != nil || found {
+		t.Fatalf("failed batch published a partial snapshot: found=%t err=%v", found, err)
+	}
+	batch[1].SnapshotID = daemonTestID(95)
+	batch[1].Record.LegacyTree = daemonTestID(96)
+	batch[1].Record.OriginalJSON = fmt.Appendf(nil, `{"tree":"%x"}`, batch[1].Record.LegacyTree)
+	if err := store.ImportLegacySnapshots(ctx, batch); err == nil {
+		t.Fatal("batch containing a missing root accepted")
+	}
+	if _, found, err := store.Get(ctx, schema.SnapshotKey(batch[0].SnapshotID)); err != nil || found {
+		t.Fatalf("missing-root batch published a partial snapshot: found=%t err=%v", found, err)
+	}
+	batch[1].Record = record
+	for index := len(batch); index < MaxLegacySnapshotsPerTransaction; index++ {
+		batch = append(batch, LegacySnapshotImport{SnapshotID: daemonTestID(byte(100 + index)), Record: record})
+	}
+	before, err := client.WriterStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := store.ImportLegacySnapshots(ctx, batch); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after, err := client.WriterStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Attribution.DurableWait.Attempts != before.Attribution.DurableWait.Attempts+1 {
+		t.Fatalf("batch and idempotent replay must use one durable wait: before=%d after=%d", before.Attribution.DurableWait.Attempts, after.Attribution.DurableWait.Attempts)
+	}
+	for _, snapshot := range batch {
+		value, found, err := store.Get(ctx, schema.SnapshotKey(snapshot.SnapshotID))
+		if err != nil || !found {
+			t.Fatalf("batched snapshot missing: %v", err)
+		}
+		stored, err := schema.UnmarshalSnapshotRecord(value)
+		if err != nil || !bytes.Equal(stored.OriginalJSON, snapshot.Record.OriginalJSON) {
+			t.Fatalf("batched snapshot changed: %v", err)
+		}
+	}
+}
+
+func TestLegacySnapshotBatchLimits(t *testing.T) {
+	store := &SchemaStore{}
+	ctx := context.Background()
+	if err := store.ImportLegacySnapshots(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	treeID := daemonTestID(1)
+	record := schema.SnapshotRecord{LegacyTree: treeID, OriginalJSON: fmt.Appendf(nil, `{"tree":"%x","padding":"%s"}`, treeID, strings.Repeat("a", MaxLegacySnapshotTransactionBytes/2))}
+	for _, scenario := range []struct {
+		name  string
+		batch []LegacySnapshotImport
+	}{
+		{name: "count", batch: make([]LegacySnapshotImport, MaxLegacySnapshotsPerTransaction+1)},
+		{name: "bytes", batch: []LegacySnapshotImport{{SnapshotID: daemonTestID(2), Record: record}, {SnapshotID: daemonTestID(3), Record: record}}},
+		{name: "duplicate", batch: []LegacySnapshotImport{{SnapshotID: daemonTestID(2), Record: record}, {SnapshotID: daemonTestID(2), Record: record}}},
+		{name: "zero-id", batch: []LegacySnapshotImport{{Record: record}}},
+		{name: "invalid-record", batch: []LegacySnapshotImport{{SnapshotID: daemonTestID(2), Record: schema.SnapshotRecord{LegacyTree: treeID}}}},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			if err := store.ImportLegacySnapshots(ctx, scenario.batch); err == nil {
+				t.Fatal("invalid batch accepted before transaction start")
+			}
+		})
 	}
 }
 

@@ -15,53 +15,92 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+const MaxLegacySnapshotsPerTransaction = 32
+const MaxLegacySnapshotTransactionBytes = 1 << 20
+
+type LegacySnapshotImport struct {
+	SnapshotID schema.ID
+	Record     schema.SnapshotRecord
+}
+
 func (store *SchemaStore) ImportLegacySnapshot(ctx context.Context, snapshotID schema.ID, record schema.SnapshotRecord) error {
-	if record.LegacyTree == (schema.ID{}) || snapshotID == (schema.ID{}) {
-		return fmt.Errorf("invalid legacy snapshot identity")
+	return store.ImportLegacySnapshots(ctx, []LegacySnapshotImport{{SnapshotID: snapshotID, Record: record}})
+}
+
+func (store *SchemaStore) ImportLegacySnapshots(ctx context.Context, snapshots []LegacySnapshotImport) error {
+	if len(snapshots) == 0 {
+		return nil
 	}
-	encoded, err := record.MarshalBinary()
-	if err != nil {
-		return err
+	if len(snapshots) > MaxLegacySnapshotsPerTransaction {
+		return fmt.Errorf("legacy snapshot batch exceeds %d records", MaxLegacySnapshotsPerTransaction)
+	}
+	encoded := make([][]byte, len(snapshots))
+	seen := make(map[schema.ID]struct{}, len(snapshots))
+	var encodedBytes uint64
+	for index, snapshot := range snapshots {
+		if snapshot.Record.LegacyTree == (schema.ID{}) || snapshot.SnapshotID == (schema.ID{}) {
+			return fmt.Errorf("invalid legacy snapshot identity")
+		}
+		if _, found := seen[snapshot.SnapshotID]; found {
+			return fmt.Errorf("duplicate legacy snapshot identity in batch")
+		}
+		seen[snapshot.SnapshotID] = struct{}{}
+		value, err := snapshot.Record.MarshalBinary()
+		if err != nil {
+			return err
+		}
+		encoded[index] = value
+		encodedBytes += uint64(len(value))
+		if len(snapshots) > 1 && encodedBytes > MaxLegacySnapshotTransactionBytes {
+			return fmt.Errorf("legacy snapshot batch exceeds %d encoded bytes", MaxLegacySnapshotTransactionBytes)
+		}
 	}
 	transaction, err := store.client.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer rollbackTransaction(ctx, transaction)
-	key := schema.SnapshotKey(snapshotID)
-	value, found, err := transaction.Get(ctx, key)
-	if err != nil {
-		return err
-	}
-	if found {
-		existing, err := schema.UnmarshalSnapshotRecord(value)
+	puts := make([]Mutation, 0, len(snapshots))
+	for index, snapshot := range snapshots {
+		key := schema.SnapshotKey(snapshot.SnapshotID)
+		value, found, err := transaction.Get(ctx, key)
 		if err != nil {
 			return err
 		}
-		if !bytes.Equal(existing.OriginalJSON, record.OriginalJSON) {
-			return fmt.Errorf("snapshot import conflicts with existing snapshot")
+		if found {
+			existing, err := schema.UnmarshalSnapshotRecord(value)
+			if err != nil {
+				return err
+			}
+			if !bytes.Equal(existing.OriginalJSON, snapshot.Record.OriginalJSON) {
+				return fmt.Errorf("snapshot import conflicts with existing snapshot")
+			}
+			continue
 		}
+		rootValue, rootFound, err := transaction.Get(ctx, schema.BlobKey(snapshot.Record.LegacyTree))
+		if err != nil {
+			return err
+		}
+		if !rootFound {
+			return fmt.Errorf("legacy snapshot root is absent from the blob catalog")
+		}
+		root, err := schema.UnmarshalBlobRecord(rootValue)
+		if err != nil {
+			return err
+		}
+		hasTree := false
+		for _, location := range root.Locations {
+			hasTree = hasTree || location.Type == schema.BlobTree
+		}
+		if !hasTree {
+			return fmt.Errorf("legacy snapshot root has no tree location")
+		}
+		puts = append(puts, Mutation{Key: key, Value: encoded[index]})
+	}
+	if len(puts) == 0 {
 		return nil
 	}
-	rootValue, rootFound, err := transaction.Get(ctx, schema.BlobKey(record.LegacyTree))
-	if err != nil {
-		return err
-	}
-	if !rootFound {
-		return fmt.Errorf("legacy snapshot root is absent from the blob catalog")
-	}
-	root, err := schema.UnmarshalBlobRecord(rootValue)
-	if err != nil {
-		return err
-	}
-	hasTree := false
-	for _, location := range root.Locations {
-		hasTree = hasTree || location.Type == schema.BlobTree
-	}
-	if !hasTree {
-		return fmt.Errorf("legacy snapshot root has no tree location")
-	}
-	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), []Mutation{{Key: key, Value: encoded}}, nil); err != nil {
+	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), puts, nil); err != nil {
 		return err
 	}
 	return transaction.Commit(ctx)

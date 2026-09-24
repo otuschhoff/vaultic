@@ -352,6 +352,14 @@ first if that validation fails. Publication is durable and idempotent, and
 ``--resume`` skips matching snapshot records. ``--dry-run`` validates snapshot
 records and root locations without publishing them.
 
+Publication groups up to 32 snapshots or 1 MiB of encoded snapshot records in
+one durable transaction. A single larger record is handled alone, subject to
+the daemon's existing RPC limits. Root locations and immutable record conflicts
+are checked inside the transaction before publication. Imported counts advance
+only after commit; interruption or failure can require replaying the pending
+batch, while previously committed batches remain resumable. No durability is
+deferred past a successful command return.
+
 This mode does not load tree/data payloads, create inode metadata or crawl
 debt, or write traversal checkpoints. It is not full tree/data verification;
 ordinary snapshot listing and restore still use the retained original roots.

@@ -1,5 +1,55 @@
 # Phase 33 Production Benchmark Evidence
 
+## Snapshot metadata-only import (2026-09-24)
+
+A fresh profile CLI built from `3f0544b9f` imported all 143 historical snapshot
+records into the existing primary using `--snapshot-metadata-only --resume`.
+The repository and database remained on HDD-backed NFS. The run retained the
+ten-minute TERM cap plus 45-second grace and stopped on the first source error.
+No build/test workload overlapped measurement, and no daemon installation,
+restart, reset, activation, or authority change occurred.
+
+| Measurement | Publication | Dry-run resume verification |
+| --- | ---: | ---: |
+| Exit status | 0 | 0 |
+| Wall time, seconds | 15.34 | 2.34 |
+| CLI user / system CPU, seconds | 1.98 / 0.26 | 0.53 / 0.11 |
+| Peak CLI RSS, KiB | 209,728 | 176,308 |
+| Snapshots seen | 143 | 143 |
+| Snapshots imported / resumed | 143 / 0 | 0 / 143 |
+| Daemon engine write-operation delta | 143 | 0 |
+
+Both commands reported zero errors, warnings, trees/nodes visited, imported
+packs/blobs, and crawl debt. The resume check revalidated matching stored JSON
+and root locations without additional writes. These are preserved historical
+snapshot records, not verified inode identities or full tree/data verification;
+no traversal checkpoints were created by this mode. Full traversal still uses
+the old catalog preload. The earlier 600-second timeout and this run therefore
+have different scopes and do not establish a like-for-like full-import speedup.
+
+The publication daemon-status window was 16.307 seconds, including setup and
+final collection, with 5.65 daemon CPU seconds. There were 143 commit requests
+with 11.115136 aggregate service seconds, including 143 durable waits totaling
+10.694801 seconds. Admission lock hold totaled 11.929311 seconds but admission
+wait was only 0.000079 seconds. These nested timings overlap; they must not be
+added or interpreted as independent wall-clock phases. They point to per-record
+durability, not CPU or admission contention, as the next measured optimization
+target. Bounded transactional snapshot batching merits evaluation while retaining
+root validation, immutability, durable publication and retry semantics.
+
+The same window recorded 786 main-store GETs, 2.632275 aggregate GET service
+seconds, and 1,794,691,842 returned body bytes, plus 286 WAL PUTs totaling
+194,667 bytes. These are logical object-store counters, not physical NFS I/O.
+The resume check has different work and warmer caches and is not a matched
+performance control. No full differential checker or payload restore was run
+as part of this measurement.
+
+The primary remained PID 431717, read-write at epoch 55, with zero active
+transactions/intents after publication and resume. Binary hashes were unchanged
+through the run. Commands, committed candidate, timings, one-second telemetry,
+before/after writer status, reproducible `analyze.cjs`/`analysis.json`, and
+checksums are retained under `db.test/snapshot-metadata-only-2026-09-24`.
+
 ## Historical snapshot import startup observation (2026-09-24)
 
 After historical snapshot support was committed as `c23b12067`, the user

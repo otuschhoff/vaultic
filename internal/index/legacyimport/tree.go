@@ -46,6 +46,25 @@ func importSnapshotMetadata(ctx context.Context, source Source, store Store, opt
 			options.Progress(progress)
 		}
 	}
+	batchPublisher, batched := store.(interface {
+		ImportLegacySnapshots(context.Context, []daemon.LegacySnapshotImport) error
+	})
+	pending := make([]daemon.LegacySnapshotImport, 0, daemon.MaxLegacySnapshotsPerTransaction)
+	var pendingBytes uint64
+	flush := func() error {
+		if len(pending) == 0 {
+			return nil
+		}
+		if err := batchPublisher.ImportLegacySnapshots(ctx, pending); err != nil {
+			return err
+		}
+		result.SnapshotsImported += uint64(len(pending))
+		clear(pending)
+		pending = pending[:0]
+		pendingBytes = 0
+		report()
+		return nil
+	}
 	report()
 	err = data.ForAllSnapshots(ctx, snapshots, legacy, nil, func(id vaultic.ID, snapshot *data.Snapshot, loadErr error) error {
 		result.SnapshotsSeen++
@@ -61,7 +80,8 @@ func importSnapshotMetadata(ctx context.Context, source Source, store Store, opt
 			return err
 		}
 		record := schema.SnapshotRecord{LegacyTree: schema.ID(*snapshot.Tree), OriginalJSON: original}
-		if _, err := record.MarshalBinary(); err != nil {
+		encoded, err := record.MarshalBinary()
+		if err != nil {
 			return recordFinding(&result, options, id, "decode-snapshot", err)
 		}
 		rootValue, found, err := store.Get(ctx, schema.BlobKey(record.LegacyTree))
@@ -100,6 +120,20 @@ func importSnapshotMetadata(ctx context.Context, source Source, store Store, opt
 			}
 		}
 		if !options.DryRun {
+			if batched {
+				size := uint64(len(encoded))
+				if len(pending) > 0 && pendingBytes+size > daemon.MaxLegacySnapshotTransactionBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				pending = append(pending, daemon.LegacySnapshotImport{SnapshotID: schema.ID(id), Record: record})
+				pendingBytes += size
+				if len(pending) == daemon.MaxLegacySnapshotsPerTransaction || pendingBytes >= daemon.MaxLegacySnapshotTransactionBytes {
+					return flush()
+				}
+				return nil
+			}
 			if err := publisher.ImportLegacySnapshot(ctx, schema.ID(id), record); err != nil {
 				return err
 			}
@@ -107,6 +141,9 @@ func importSnapshotMetadata(ctx context.Context, source Source, store Store, opt
 		result.SnapshotsImported++
 		return nil
 	})
+	if err == nil {
+		err = flush()
+	}
 	return result, err
 }
 

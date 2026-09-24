@@ -166,6 +166,106 @@ func TestSnapshotMetadataOnlyRejectsInvalidRoots(t *testing.T) {
 	}
 }
 
+type batchedSnapshotStore struct {
+	*memoryStore
+	batchSizes    []int
+	failBatch     int
+	beforePublish func()
+}
+
+func (store *batchedSnapshotStore) ImportLegacySnapshots(ctx context.Context, snapshots []daemon.LegacySnapshotImport) error {
+	store.batchSizes = append(store.batchSizes, len(snapshots))
+	if store.beforePublish != nil {
+		store.beforePublish()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if store.failBatch == len(store.batchSizes) {
+		return errors.New("injected snapshot batch failure")
+	}
+	var size int
+	for _, snapshot := range snapshots {
+		encoded, err := snapshot.Record.MarshalBinary()
+		if err != nil {
+			return err
+		}
+		size += len(encoded)
+	}
+	if len(snapshots) > daemon.MaxLegacySnapshotsPerTransaction || (len(snapshots) > 1 && size > daemon.MaxLegacySnapshotTransactionBytes) {
+		return errors.New("snapshot batch exceeded bounds")
+	}
+	for _, snapshot := range snapshots {
+		if err := store.memoryStore.ImportLegacySnapshot(ctx, snapshot.SnapshotID, snapshot.Record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func TestSnapshotMetadataOnlyBatches(t *testing.T) {
+	for _, scenario := range []struct {
+		name         string
+		count        int
+		padding      int
+		failBatch    int
+		cancel       bool
+		wantSizes    []int
+		wantImported uint64
+	}{
+		{name: "count-limit-and-tail", count: 143, wantSizes: []int{32, 32, 32, 32, 15}, wantImported: 143},
+		{name: "byte-limit", count: 3, padding: 600 << 10, wantSizes: []int{1, 1, 1}, wantImported: 3},
+		{name: "oversized-single", count: 2, padding: 1100 << 10, wantSizes: []int{1, 1}, wantImported: 2},
+		{name: "failed-first", count: 35, failBatch: 1, wantSizes: []int{32}},
+		{name: "failed-tail", count: 35, failBatch: 2, wantSizes: []int{32, 3}, wantImported: 32},
+		{name: "cancelled-tail", count: 3, cancel: true, wantSizes: []int{3}},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			treeID := vaultic.NewRandomID()
+			source := metadataOnlySource{&memorySource{snapshots: make(map[vaultic.ID][]byte)}}
+			for range scenario.count {
+				source.snapshots[vaultic.NewRandomID()] = fmt.Appendf(nil, `{"tree":"%s","padding":"%s"}`, treeID, strings.Repeat("a", scenario.padding))
+			}
+			store := &batchedSnapshotStore{memoryStore: newMemoryStore(), failBatch: scenario.failBatch}
+			root, err := (schema.BlobRecord{Locations: []schema.BlobLocation{{Type: schema.BlobTree, Length: 1}}}).MarshalBinary()
+			if err != nil {
+				t.Fatal(err)
+			}
+			store.values[string(schema.BlobKey(schema.ID(treeID)))] = root
+			options := Options{SnapshotMetadataOnly: true, Resume: true, DryRun: true}
+			result, err := Import(ctx, source, fixedStatter{}, store, options)
+			if err != nil || result.SnapshotsImported != uint64(scenario.count) || len(store.batchSizes) != 0 || len(store.values) != 1 {
+				t.Fatalf("dry run published a batch: %#v %v", result, err)
+			}
+			options.DryRun = false
+			if scenario.cancel {
+				store.beforePublish = cancel
+			}
+			options.Progress = func(progress Progress) {
+				if progress.SnapshotsImported > uint64(len(store.values)-1) {
+					t.Fatal("reported snapshots before publication")
+				}
+			}
+			result, err = Import(ctx, source, fixedStatter{}, store, options)
+			if (err != nil) != (scenario.failBatch > 0 || scenario.cancel) || result.SnapshotsImported != scenario.wantImported || !slices.Equal(store.batchSizes, scenario.wantSizes) {
+				t.Fatalf("batch result=%#v sizes=%v err=%v", result, store.batchSizes, err)
+			}
+			if uint64(len(store.values)) != scenario.wantImported+1 {
+				t.Fatal("uncommitted snapshots or traversal checkpoints persisted")
+			}
+			store.failBatch = 0
+			store.beforePublish = nil
+			store.batchSizes = nil
+			result, err = Import(context.Background(), source, fixedStatter{}, store, options)
+			if err != nil || result.SnapshotsResumed != scenario.wantImported || result.SnapshotsImported != uint64(scenario.count)-scenario.wantImported {
+				t.Fatalf("retry: %#v %v", result, err)
+			}
+		})
+	}
+}
+
 type blockingStatter struct {
 	entered chan time.Duration
 	release chan struct{}
