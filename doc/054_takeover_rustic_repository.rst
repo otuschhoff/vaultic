@@ -304,6 +304,17 @@ pack aggregates. ``--include-crawl-debt`` includes individual deferred or
 unknown facts in the report. Add ``--fail-on-warning`` in automation when
 expected incompleteness should produce exit status 2.
 
+Packs still marked imported from legacy indexes are reported separately as
+``imported_packs`` ("inherited legacy packs" in text output). This is
+informational, not an export warning or evidence of damaged data.
+``pending_exports`` counts packs explicitly marked export-pending and pending
+snapshot export checkpoints; it excludes packs merely marked imported.
+Unknown tier, retention and usage accounting are also informational: legacy
+indexes do not establish those facts. These states alone do not trigger
+``--fail-on-warning``. Actual pending exports, crawl debt and other warning
+conditions still do. Earlier releases counted imported packs as pending-export
+warnings, so automation comparing these counters must account for this change.
+
 For an unattended import, ``--batch-size N`` limits mutations per daemon RPC;
 zero uses the negotiated daemon limit. ``--pack-workers N`` bounds concurrent
 pack preparation; zero uses up to eight available CPUs. ``--pack-timeout

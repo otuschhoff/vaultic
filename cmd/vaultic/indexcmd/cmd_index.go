@@ -1490,8 +1490,10 @@ func runIndexCheck(ctx context.Context, options indexCheckOptions, globalOptions
 			result.AggregateMismatch,
 		)
 		printer.P("analytics consistency mismatches: %d\n", result.AnalyticsMismatch)
+		printer.P("inherited legacy packs (informational): %d; pending exports: %d; failed exports: %d; warnings: %d\n",
+			result.ImportedPacks, result.PendingExports, result.FailedExports, result.Warnings)
 		printer.P(
-			"packs: unknown tier %d; retention unknown %d; usage unaccounted %d\n",
+			"pack metadata (informational): unknown tier %d; retention unknown %d; usage unaccounted %d\n",
 			result.UnknownTierPacks,
 			result.RetentionUnknownPacks,
 			result.UsageUnaccountedPacks,

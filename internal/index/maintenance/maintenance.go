@@ -283,6 +283,7 @@ type CheckResult struct {
 	PathVersionMismatch       uint64           `json:"path_version_mismatches"`
 	UnresolvedSnapshots       uint64           `json:"unresolved_snapshots"`
 	PendingCrawlDebt          uint64           `json:"pending_crawl_debt"`
+	ImportedPacks             uint64           `json:"imported_packs"`
 	PendingExports            uint64           `json:"pending_exports"`
 	FailedExports             uint64           `json:"failed_exports"`
 	ExportCheckpoints         uint64           `json:"export_checkpoints"`
@@ -1002,6 +1003,7 @@ func mergeValidationResult(result, local *CheckResult, maxFindings uint) {
 	result.PathVersionMismatch += local.PathVersionMismatch
 	result.UnresolvedSnapshots += local.UnresolvedSnapshots
 	result.PendingCrawlDebt += local.PendingCrawlDebt
+	result.ImportedPacks += local.ImportedPacks
 	result.PendingExports += local.PendingExports
 	result.FailedExports += local.FailedExports
 	result.ExportCheckpoints += local.ExportCheckpoints
@@ -2048,7 +2050,10 @@ func checkPackRecordState(id vaultic.ID, record schema.PackRecord, result *Check
 		addFinding(result, maxFindings, Finding{Kind: "unknown_pack_type", Key: id.String()})
 	case schema.PackData, schema.PackTree:
 	}
-	if record.Lifecycle == schema.PackImported || record.Lifecycle == schema.PackExportPending {
+	switch record.Lifecycle {
+	case schema.PackImported:
+		result.ImportedPacks++
+	case schema.PackExportPending:
 		result.PendingExports++
 		result.Warnings++
 	}

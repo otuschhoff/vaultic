@@ -1821,6 +1821,42 @@ func TestCheckFindsLocationAndAggregateDrift(t *testing.T) {
 	}
 }
 
+func TestCheckDistinguishesImportedPacksFromPendingExports(t *testing.T) {
+	var imported CheckResult
+	checkPackRecordState(vaultic.ID{}, schema.PackRecord{Type: schema.PackData, Lifecycle: schema.PackImported}, &imported, 10)
+	if imported.ImportedPacks != 1 || imported.PendingExports != 0 || imported.HasWarnings() || !imported.Clean() {
+		t.Fatalf("inherited pack reported as pending export: %#v", imported)
+	}
+	if imported.UnknownTierPacks != 1 || imported.RetentionUnknownPacks != 1 || imported.UsageUnaccountedPacks != 1 {
+		t.Fatalf("inherited pack lost informational counters: %#v", imported)
+	}
+	var pending CheckResult
+	checkPackRecordState(vaultic.ID{}, schema.PackRecord{Type: schema.PackTree, Lifecycle: schema.PackExportPending}, &pending, 10)
+	if pending.ImportedPacks != 0 || pending.PendingExports != 1 || pending.Warnings != 1 || !pending.HasWarnings() {
+		t.Fatalf("pending export no longer warns: %#v", pending)
+	}
+	var combined CheckResult
+	mergeValidationResult(&combined, &imported, 10)
+	mergeValidationResult(&combined, &pending, 10)
+	if combined.ImportedPacks != 1 || combined.PendingExports != 1 || combined.Warnings != 1 {
+		t.Fatalf("merged lifecycle counters: %#v", combined)
+	}
+	for _, lifecycle := range []schema.PackLifecycle{schema.PackImported, schema.PackExportPending} {
+		store, _, _ := newMemoryStore(t, lifecycle)
+		result, err := CheckWithOptions(context.Background(), nil, store, CheckOptions{SlateDBOnly: true, MaxFindings: 10})
+		if err != nil || !result.Clean() {
+			t.Fatalf("catalog check: %#v %v", result, err)
+		}
+		if lifecycle == schema.PackImported {
+			if result.ImportedPacks != 1 || result.PendingExports != 0 || result.HasWarnings() {
+				t.Fatalf("catalog misclassified inherited pack: %#v", result)
+			}
+		} else if result.ImportedPacks != 0 || result.PendingExports != 1 || !result.HasWarnings() {
+			t.Fatalf("catalog lost pending-export warning: %#v", result)
+		}
+	}
+}
+
 func TestCheckTreatsUnresolvedImportedMetadataAsWarnings(t *testing.T) {
 	store, _, blobID := newMemoryStore(t, schema.PackPublished)
 	source := &memoryDestination{}

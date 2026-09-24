@@ -1,5 +1,45 @@
 # Phase 33 Production Benchmark Evidence
 
+## Full index check after snapshot import (r54, 2026-09-24)
+
+A fresh profile CLI from committed `3725db870` reran the full differential
+index check against the primary after the 143 historical snapshot records were
+imported. It used the existing HDD-NFS repository and scratch path, 32 workers
+and RPC slots, 96 GiB memory/scratch limits, and a ten-minute TERM cap plus
+45-second kill grace. No build/test workload overlapped the measurement.
+
+The check completed in 305.21 seconds with exit status 0 and full coverage
+marked complete. It detected 143 legacy snapshots and 143 SlateDB snapshots,
+with zero snapshot mismatches, unresolved snapshots or snapshot-commit
+mismatches. Historical records passed schema validation and their root IDs
+resolved to catalog records containing tree locations. This verifies snapshot
+membership, stored metadata and root catalog references, not recursive tree
+traversal, pack payload integrity or a production restore.
+
+Compared with pre-import r53, only two numeric result counters changed:
+
+| Counter | r53 | r54 |
+| --- | ---: | ---: |
+| SlateDB snapshots | 0 | 143 |
+| Snapshot mismatches | 143 | 0 |
+
+Both sides still contain 379,934,385 blob locations. All location, pack,
+aggregate and reference mismatch counters remain zero. The existing 419,530
+warnings remain, along with 419,530 pending exports and unknown tier,
+retention and usage-accounting pack counts. Exit status 0 is not a
+warning-free verdict; this run did not enable `--fail-on-warning`.
+
+CLI user/system CPU was 2,883.36/249.16 seconds, peak RSS was 82,149,368 KiB,
+and peak scratch use was 39,886,207,390 bytes, with zero swaps. Wall time is
+close to r53's 304.50 seconds, but these are not matched performance repeats.
+The primary remained PID 431717, read-write at epoch 55, with no active
+transactions/intents and zero additional engine writes. Scratch was empty
+after completion; CLI and daemon executable identities were verified.
+
+The command, build identity, full JSON verdict, progress/telemetry, resource
+samples, before/after health, reproducible analyzer and checksums are retained
+under `db.test/phase33-production-2026-09-24-stream32-historical-snapshots-full-r54`.
+
 ## Snapshot metadata-only import (2026-09-24)
 
 A fresh profile CLI built from `3f0544b9f` imported all 143 historical snapshot
