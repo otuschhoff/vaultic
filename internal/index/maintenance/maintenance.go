@@ -1691,7 +1691,11 @@ func checkPackCatalog(
 		}
 		return nil
 	}
-	if legacyIterator != nil {
+	streamCatalog := legacyIterator == nil
+	if limited, ok := store.(*limitedStore); ok && cap(limited.semaphore) > 1 {
+		streamCatalog = true
+	}
+	if !streamCatalog {
 		err = scan(ctx, store, []byte("p:"), visit)
 	} else {
 		err = scanRange(ctx, store, []byte("p:"), scanPageSize, func(entries []daemon.KeyValue) error {

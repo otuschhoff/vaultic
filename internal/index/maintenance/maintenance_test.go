@@ -10,6 +10,7 @@ import (
 	"runtime/pprof"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1585,8 +1586,9 @@ func TestExportIsDeterministicCheckpointedAndResumable(t *testing.T) {
 
 type catalogRangeStore struct {
 	*memoryStore
-	ranges int
-	cancel context.CancelFunc
+	ranges  int
+	cancel  context.CancelFunc
+	omitKey []byte
 }
 
 func (store *catalogRangeStore) ScanRange(ctx context.Context, prefix []byte, _ uint32, consume func([]daemon.KeyValue) error) error {
@@ -1595,6 +1597,9 @@ func (store *catalogRangeStore) ScanRange(ctx context.Context, prefix []byte, _ 
 		return fmt.Errorf("unexpected catalog prefix %q", prefix)
 	}
 	return scanRange(ctx, store.memoryStore, prefix, 1, func(entries []daemon.KeyValue) error {
+		if len(entries) == 1 && bytes.Equal(entries[0].Key, store.omitKey) {
+			return nil
+		}
 		if store.cancel != nil {
 			store.cancel()
 		}
@@ -1681,6 +1686,83 @@ func TestPackCatalogRangeMatchesPagination(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestFullPackCatalogStreamingAdmission(t *testing.T) {
+	for _, mode := range []string{"complete", "omitted", "cancel"} {
+		t.Run(mode, func(t *testing.T) {
+			base, packID, _ := newMemoryStore(t, schema.PackImported)
+			before := vaultic.ID{}
+			after := vaultic.ID{}
+			for index := range after {
+				after[index] = 255
+			}
+			if mode == "omitted" {
+				base.values[string(schema.PackKey(schema.ID(before)))] = bytes.Clone(base.values[string(schema.PackKey(schema.ID(packID)))])
+			}
+			var expected CheckResult
+			var expectedAggregates map[schema.AggregateKind]schema.PackAggregate
+			var expectedTiers map[schema.PackTier]schema.PackAggregate
+			for _, slots := range []int{1, 2} {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				scratch, err := newCheckScratch(t.TempDir(), 1<<20)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer scratch.close()
+				legacy, err := newLocationMultisetSpool(ctx, scratch, 1<<20, 2)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer legacy.close()
+				slatedb, err := newLocationMultisetSpool(ctx, scratch, 1<<20, 2)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer slatedb.close()
+				for _, tuple := range []locationTuple{{BlobID: before, Type: 1, Length: 42}, {BlobID: packID}, {BlobID: after}} {
+					if err := legacy.add(tuple); err != nil {
+						t.Fatal(err)
+					}
+				}
+				wrapper := &catalogRangeStore{memoryStore: base}
+				if mode == "omitted" {
+					wrapper.omitKey = schema.PackKey(schema.ID(before))
+				}
+				if mode == "cancel" {
+					wrapper.cancel = cancel
+				}
+				store := &limitedStore{Store: wrapper, semaphore: make(chan struct{}, slots)}
+				var actual CheckResult
+				aggregates, tiers, err := checkPackCatalog(ctx, store, legacy, slatedb, true, &actual, 100)
+				if len(store.semaphore) != 0 || wrapper.ranges != slots-1 {
+					t.Fatalf("slots=%d retained=%d ranges=%d", slots, len(store.semaphore), wrapper.ranges)
+				}
+				switch {
+				case slots == 2 && mode == "omitted":
+					if err == nil || !strings.Contains(err.Error(), "pack scan omitted existing pack") {
+						t.Fatalf("omitted existing pack: %v", err)
+					}
+				case slots == 2 && mode == "cancel":
+					if !errors.Is(err, context.Canceled) {
+						t.Fatalf("cancel: %v", err)
+					}
+				default:
+					if err != nil {
+						t.Fatal(err)
+					}
+					if slots == 2 && (!reflect.DeepEqual(actual, expected) || !reflect.DeepEqual(aggregates, expectedAggregates) || !reflect.DeepEqual(tiers, expectedTiers)) {
+						t.Fatal("streaming changed catalog results")
+					}
+					if mode == "complete" && actual.MissingPacks != 1 {
+						t.Fatalf("missing packs=%d", actual.MissingPacks)
+					}
+				}
+				expected, expectedAggregates, expectedTiers = actual, aggregates, tiers
+			}
+		})
 	}
 }
 

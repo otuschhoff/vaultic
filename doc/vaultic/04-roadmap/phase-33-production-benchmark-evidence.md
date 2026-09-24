@@ -1,5 +1,75 @@
 # Phase 33 Production Benchmark Evidence
 
+## Full-check catalog streaming (r53, 2026-09-23)
+
+The matched block-scratch evidence was committed as `212cfba1c`, without
+pushing. This working-tree candidate enables full-check pack catalog streaming
+only when the checker store exposes its RPC limiter with more than one slot.
+A stream holds one slot while its callback may issue a missing-pack `Get`;
+single-slot and unknown stores therefore retain pagination. SlateDB-only
+streaming is unchanged. No RPC, memory or scratch limit is raised, and no
+missing-pack verification is skipped or moved outside admission accounting.
+
+Tests exercise actual one-slot/two-slot admission, exact catalog results and
+aggregates, missing contributions before and after scanned packs, omitted
+existing-pack detection, cancellation and released permits. Existing pagination,
+malformed-record and checker tests pass. Full maintenance race tests (9.890s),
+affected CLI `Test(Check|Index)` race tests (20.727s), formatting, editor
+diagnostics and isolated profile build passed before the diagnostic. The first
+new test compile required a missing standard-library import; its rerun passed.
+
+R53 used the same HDD-NFS repository and scratch, 32 loader workers/RPCs,
+at most four comparison tasks, 96 GiB memory/scratch budgets and ten-minute
+TERM cap with 45-second kill grace. No build/test workload overlapped it.
+There was no daemon installation, restart or cache reset.
+
+| Measurement | Prior block r50/r51 | r53 streaming |
+| --- | ---: | ---: |
+| Wall seconds including cleanup | 324.75 / 321.67 | 304.50 |
+| CLI CPU seconds | 3,202.00 / 3,140.33 | 3,117.63 |
+| Legacy scan | 75s / 72s | 75s |
+| Encryption audit | 14s / 14s | 14s |
+| SlateDB scan | 70s / 70s | 70s |
+| SlateDB finalization | 9s / 9s | 10s |
+| Catalog join | 41s / 43s | 23s |
+| Partitioned merge plus comparison | 84s / 82s | 80s |
+| Peak RSS, KiB | 81,942,052 / 82,213,332 | 80,545,028 |
+| Peak scratch bytes | 39,874,827,674 / 39,902,974,248 | 39,871,140,044 |
+| Recorded scratch read/write bytes | 104,546,699,652 / 104,544,992,400 | 104,546,041,540 |
+| Completed merge groups | 96 / 95 | 94 |
+
+Against the prior two-run mean, catalog time decreased 45.2%, elapsed time
+5.8% and CLI CPU 1.7%. Scratch traffic is effectively unchanged, with zero
+swaps. This is one candidate observation against earlier controls, not a
+fresh matched sequence or repeatable speedup acceptance. Cache state and
+run variability remain confounders; no cold-cache or native RADOS claim is made.
+
+Exact logical results match both controls excluding resource telemetry,
+consistency session ID and separately recorded encrypted objects (161 in all
+three). Both sides contain 379,934,385 locations, with zero location, pack,
+aggregate or reference mismatches. Full scope completed but is not clean:
+143 missing SlateDB snapshots and 419,530 warnings/pending exports remain.
+Checker exit 2 is the same metadata-difference verdict; harness exit 1 is its
+known final accepted-exit gate. No metadata repair was performed.
+
+Per-partition blob counts/chunks/ranges match across all 256 partitions.
+Aggregate stream telemetry now also includes the 419,530 pack records in
+42 chunks: 376,766,240 records, 37,811 chunks and 257 completed ranges total.
+Reported stream bytes are 35,623,707,627. The added catalog range must not be
+interpreted as expanded blob coverage or compared blindly with blob-only
+aggregate telemetry from the controls.
+
+The saved analyzer checks exact logical parity, unchanged limits, blob scope,
+expected catalog telemetry, exit codes, cleanup, zero swaps and daemon health.
+Artifacts, executable, tested patch, validation logs and comparison are under
+`db.test/phase33-full-catalog-stream-2026-09-23`; raw output is under
+`db.test/phase33-production-2026-09-23-stream32-full-catalog-stream-full-r53`.
+The measured CLI SHA256 is
+`f33983e390ca2a0fd82c4f34ebd0a3df6f71d38e321cc58d187dba51c2191bf1`.
+Raw and supplemental manifests verified, scratch is empty, and the adopted
+daemon remains PID 431717, epoch 55, read-write with zero transactions/intents
+and unchanged executable. Source, tests and this evidence remain uncommitted.
+
 ## Block scratch matched repeats (r49-r52, 2026-09-23)
 
 The block-scratch implementation, tests and initial r48 evidence were committed
