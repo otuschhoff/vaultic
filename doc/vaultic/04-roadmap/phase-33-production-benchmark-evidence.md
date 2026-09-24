@@ -1,5 +1,57 @@
 # Phase 33 Production Benchmark Evidence
 
+## Authoritative backup startup (2026-09-24)
+
+A real backup attempt used the saved `cdot` job's 52 readable source roots,
+host `ncl1-1-ps`, paths grouping, one-filesystem traversal, and existing
+exclusions. It used the primary HDD-NFS repository and daemon, with authoritative
+metadata enabled and no deferred commit or metadata bypass. A profile CLI was
+built from `63454280b` plus the recorded explicit-socket routing patch. No
+build/test workload overlapped measurement; the daemon was not changed.
+
+Preflight exposed that ordinary password unlock ignored the global
+`--metadata-daemon-socket` option. A temporary socket alias was rejected by
+endpoint permission checks and removed before backup. The CLI routing fix
+honors the explicit socket when attaching the metadata engine, retaining all
+endpoint validation. The encrypted native-daemon regression passed under the
+race detector, including password unlock before storing a key-in-DB master key.
+
+The backup reached the ten-minute TERM cap and exited 124 after 600.30 seconds.
+It did not reach file processing or publish a snapshot. The before/after
+inventories contain the same 143 snapshot IDs; daemon engine writes and commit
+requests both increased by zero. The primary remained PID 431717, read-write
+at epoch 55, with no active transactions/intents or remaining backup process.
+
+| Measurement | Value |
+| --- | ---: |
+| CLI user / system CPU, seconds | 29.86 / 7.77 |
+| CLI peak RSS, KiB | 2,321,456 |
+| Daemon status window, seconds | 601.082 |
+| Daemon CPU, seconds | 457.52 |
+| Main-store GET requests | 504,245 |
+| Main-store GET aggregate service, seconds | 531.009527 |
+| Main-store GET-body bytes | 27,943,016,751 |
+
+A non-disruptive goroutine capture at 60 seconds places startup in
+`loadBackupParent -> LoadIndex -> DaemonEngine.loadBlobCatalog -> ScanPrefix`.
+The cancellation error confirms that phase was still active at timeout.
+The loader serially fetches 10,000-record `b:` pages and materializes every
+location by pack before archiving. The CPU profile attributes 77.51% of its
+36.42 sampled CPU seconds cumulatively to this loader; total CLI utilization
+was only about 6% of one core. Daemon utilization averaged about 0.76 cores.
+
+This identifies full-catalog preload as the immediate backup startup bottleneck,
+not source traversal or file-read concurrency. Logical GET-body bytes do not
+prove physical HDD/NFS saturation, and CPU/service durations overlap. No
+archiving throughput or new-snapshot durability performance was measured.
+The next candidate is bounded catalog streaming or context-aware on-demand
+lookup; simply omitting `LoadIndex` is unsafe while lookup uses its projection.
+
+The command, source patch, binary hashes, before/after inventories and status,
+five-second samples, goroutine capture, CPU profile, reproducible analyzer,
+resource timings and checksums are retained under
+`db.test/authoritative-backup-2026-09-24`.
+
 ## Full index check after snapshot import (r54, 2026-09-24)
 
 A fresh profile CLI from committed `3725db870` reran the full differential

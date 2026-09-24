@@ -372,6 +372,9 @@ func metadataDaemonOptions(globalOptions Options, repositoryID string) daemon.Op
 }
 
 func attachEngine(ctx context.Context, s *repository.Repository, globalOptions Options, printer vaultic.Printer) error {
+	if globalOptions.MetadataDaemonSocket != "" {
+		ctx = repository.WithDaemonOptions(ctx, metadataDaemonOptions(globalOptions, s.Config().ID))
+	}
 	if err := applyRepoConfig(s, globalOptions); err != nil {
 		return err
 	}

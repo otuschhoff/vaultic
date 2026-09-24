@@ -286,7 +286,7 @@ func (globalOptions *Options) addRepositoryAccessFlags(f *pflag.FlagSet) {
 	)
 	f.StringVar(&globalOptions.MasterKeyCommand, "key-command", "", "shell `command` to obtain the master key from (default: $VAULTIC_KEY_COMMAND)")
 	f.BoolVar(&globalOptions.MetadataKeyInDB, "metadata-key-in-db", false, "unlock the repository master key from encrypted SlateDB metadata")
-	f.StringVar(&globalOptions.MetadataDaemonSocket, "metadata-daemon-socket", "", "private vaulticdb Unix socket for key-in-DB unlock")
+	f.StringVar(&globalOptions.MetadataDaemonSocket, "metadata-daemon-socket", "", "private vaulticdb Unix socket for authoritative metadata and key-in-DB unlock")
 	f.StringVar(&globalOptions.MetadataDaemonPath, "metadata-daemon-path", "", "start this vaulticdb binary for key-in-DB unlock")
 	f.StringVar(&globalOptions.MetadataDaemonDataDir, "metadata-daemon-data-dir", "", "local vaulticdb data directory for key-in-DB unlock")
 	f.StringVar(&globalOptions.MetadataDaemonObjectStore, "metadata-daemon-object-store", "", "vaulticdb object store for key-in-DB unlock")

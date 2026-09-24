@@ -76,6 +76,20 @@ func TestRepositoryOpensWithEncryptedMasterKeyInDB(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close(ctx)
+	passwordOptions := environment.globalOptions
+	passwordOptions.MetadataDaemonSocket = daemonOptions.Socket
+	passwordOptions.MetadataEncryptionMode = "required"
+	passwordOptions.MetadataPassphraseFile = passphraseFile
+	passwordOpened, err := global.OpenRepository(context.Background(), passwordOptions, printer)
+	if err != nil {
+		t.Fatalf("open authoritative repository with password and explicit socket: %v", err)
+	}
+	if _, ok := passwordOpened.Engine().(*metadataindex.DaemonEngine); !ok {
+		t.Fatalf("password unlock selected metadata engine %T", passwordOpened.Engine())
+	}
+	if err := passwordOpened.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if err := client.StoreMasterKey(ctx, masterKey); err != nil {
 		t.Fatal(err)
 	}
