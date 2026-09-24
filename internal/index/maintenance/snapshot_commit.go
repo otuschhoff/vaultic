@@ -24,6 +24,9 @@ func snapshotCommitMutations(ctx context.Context, store Store) ([]daemon.Mutatio
 		if err != nil {
 			return err
 		}
+		if record.LegacyTree != (schema.ID{}) {
+			return nil
+		}
 		rootKey := schema.DirectoryRevisionKey(record.RootFSID, record.RootInode, record.RootRevision)
 		value, err := (schema.SnapshotCommitRecord{
 			SnapshotTimeUnixNano: snapshotJSONTimeUnixNano(record.OriginalJSON),
@@ -51,6 +54,9 @@ func checkSnapshotCommitIndex(ctx context.Context, store Store, result *CheckRes
 		record, err := schema.UnmarshalSnapshotRecord(entry.Value)
 		if err != nil {
 			return err
+		}
+		if record.LegacyTree != (schema.ID{}) {
+			return nil
 		}
 		key := schema.SnapshotCommitKey(record.CommitSequence, parsed.ID)
 		expected, err := (schema.SnapshotCommitRecord{
@@ -91,6 +97,11 @@ func checkSnapshotCommitIndex(ctx context.Context, store Store, result *CheckRes
 			snapshot, decodeErr := schema.UnmarshalSnapshotRecord(value)
 			if decodeErr != nil {
 				return decodeErr
+			}
+			if snapshot.LegacyTree != (schema.ID{}) {
+				result.SnapshotCommitMismatch++
+				addFinding(result, maxFindings, Finding{Kind: "stale_snapshot_commit", Key: vaultic.ID(parsed.ID).String()})
+				return nil
 			}
 			expected, encodeErr := (schema.SnapshotCommitRecord{
 				SnapshotTimeUnixNano: snapshotJSONTimeUnixNano(snapshot.OriginalJSON),

@@ -89,6 +89,14 @@ func TestIndexGCDiscoversRevalidatesAndSweepsRealBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	legacySnapshotPath := filepath.Join(env.repo, "snapshots", retained.String())
+	legacySnapshot, err := os.ReadFile(legacySnapshotPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(legacySnapshotPath); err != nil {
+		t.Fatal(err)
+	}
 	packsBefore := listPacks(env.globalOptions, t)
 
 	// --discover-only must not delete or repack anything.
@@ -174,6 +182,9 @@ func TestIndexGCDiscoversRevalidatesAndSweepsRealBackup(t *testing.T) {
 
 	// index check must report a fully consistent, non-drifted catalog: gc
 	// automatically re-exports and prunes stale legacy indexes internally.
+	if err := os.WriteFile(legacySnapshotPath, legacySnapshot, 0600); err != nil {
+		t.Fatal(err)
+	}
 	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
 		_, runErr := runIndexCheck(ctx, indexCheckOptions{Daemon: daemonOptions, MaxFindings: 10}, globalOptions, globalOptions.Term)
 		return runErr

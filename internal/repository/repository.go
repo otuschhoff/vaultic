@@ -15,6 +15,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/feature"
 	enginepkg "github.com/otuschhoff/vaultic/internal/index"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
+	"github.com/otuschhoff/vaultic/internal/index/schema"
 	"github.com/otuschhoff/vaultic/internal/repository/crypto"
 	"github.com/otuschhoff/vaultic/internal/repository/index"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
@@ -616,6 +617,22 @@ func (r *Repository) Checker() *Checker {
 
 // LoadUnpacked loads and decrypts the file with the given type and ID.
 func (r *Repository) LoadUnpacked(ctx context.Context, t vaultic.FileType, id vaultic.ID) ([]byte, error) {
+	if t == vaultic.SnapshotFile {
+		if engine, ok := r.engine.(*enginepkg.DaemonEngine); ok {
+			value, found, err := engine.SchemaStore().Get(ctx, schema.SnapshotKey(schema.ID(id)))
+			if err != nil {
+				return nil, err
+			}
+			if found {
+				record, err := schema.UnmarshalSnapshotRecord(value)
+				return record.OriginalJSON, err
+			}
+		}
+	}
+	return r.LoadLegacyUnpacked(ctx, t, id)
+}
+
+func (r *Repository) LoadLegacyUnpacked(ctx context.Context, t vaultic.FileType, id vaultic.ID) ([]byte, error) {
 	debug.Log("load %v with id %v", t, id)
 
 	if t == vaultic.ConfigFile {

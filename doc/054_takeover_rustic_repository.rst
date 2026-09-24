@@ -355,6 +355,38 @@ records describe what Rustic observed during an old backup; they cannot prove
 the current filesystem identity, parent inode, ``ctime``, or freshness. Missing
 identities and incomplete relationships remain explicit crawl debt.
 
+Historical snapshots retain their original snapshot IDs, exact JSON (including
+unknown fields), and immutable legacy root-tree IDs in SlateDB. They do not
+receive invented filesystem IDs, inode numbers, or normalized commit sequences.
+Snapshot listing and restoration can read this preserved metadata and traverse
+the original tree/data blobs; importing does not duplicate pack payloads.
+The root must have a tree location in the blob catalog before publication.
+
+The snapshot record is published durably before its traversal checkpoint.
+A resumable import also upgrades older traversal-only checkpoints to historical
+snapshot records without repeating their inode traversal. Dry runs do not
+publish either record. Read/decode failures during a new traversal prevent its
+snapshot publication and checkpoint; an interrupted publication can be retried.
+Depth-limited traversal still leaves explicit crawl debt and is not a full
+verification of every historical tree or data blob.
+
+Normal snapshot listing combines legacy and SlateDB membership without
+duplicates. Differential ``index check`` continues to compare the actual
+legacy inventory against SlateDB, so a missing legacy JSON copy remains a
+reported difference even when the snapshot can be restored from SlateDB.
+Historical snapshots have no normalized snapshot-commit/path-history entries
+and are excluded from live-inode retained-reference analytics. Garbage
+collection still walks their original tree references and retains their data.
+A live baseline does not rewrite historical identities or certify old metadata
+as currently verified.
+
+Deploy compatible Vaultic clients before importing this new record form. The
+normalized snapshot encoding is unchanged, but older readers reject historical
+records and older snapshot enumeration does not include SlateDB-only snapshots.
+Do not mix old destructive clients with this format or remove the legacy
+snapshot copies as part of migration. Keep those copies for compatibility and
+recovery, and validate representative restores before garbage collection.
+
 Run ``index check`` again and preserve its output. Do not activate while it
 reports actual legacy/SlateDB differences. Crawl-debt warnings are expected
 until a live baseline backup reconciles them.

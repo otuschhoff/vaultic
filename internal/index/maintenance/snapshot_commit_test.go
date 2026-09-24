@@ -2,10 +2,47 @@ package maintenance
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/otuschhoff/vaultic/internal/index/schema"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
+
+func TestHistoricalSnapshotRootValidation(t *testing.T) {
+	for _, mode := range []string{"tree", "missing", "data"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			store := &memoryStore{values: make(map[string][]byte)}
+			snapshotID, treeID := deterministicID(85), deterministicID(86)
+			original := []byte(fmt.Sprintf(`{"tree":"%s"}`, treeID.String()))
+			store.set(t, schema.SnapshotKey(schema.ID(snapshotID)), schema.SnapshotRecord{LegacyTree: schema.ID(treeID), OriginalJSON: original})
+			if mode != "missing" {
+				kind := schema.BlobTree
+				if mode == "data" {
+					kind = schema.BlobData
+				}
+				store.set(t, schema.BlobKey(schema.ID(treeID)), schema.BlobRecord{Locations: []schema.BlobLocation{{Type: kind, Length: 1}}})
+			}
+			scratch, err := newCheckScratch(t.TempDir(), 1<<20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer scratch.close()
+			source := &memoryDestination{snapshots: map[vaultic.ID][]byte{snapshotID: original}}
+			var result CheckResult
+			if err := checkSnapshots(ctx, source, store, scratch, 1<<16, false, &result, 10); err != nil {
+				t.Fatal(err)
+			}
+			if result.LegacySnapshots != 1 || result.SlateDBSnapshots != 1 || result.UnresolvedSnapshots != 0 || result.SnapshotCommitMismatch != 0 {
+				t.Fatalf("incorrect historical coverage: %#v", result)
+			}
+			if (result.SnapshotMismatch != 0) != (mode != "tree") {
+				t.Fatalf("unexpected snapshot mismatches: %#v", result)
+			}
+		})
+	}
+}
 
 func TestSnapshotCommitIndexRebuildAndDriftDetection(t *testing.T) {
 	store := &memoryStore{values: make(map[string][]byte)}
@@ -15,6 +52,10 @@ func TestSnapshotCommitIndexRebuildAndDriftDetection(t *testing.T) {
 	store.set(t, schema.SnapshotKey(schema.ID(snapshotID)), schema.SnapshotRecord{
 		CommitSequence: 11, RootFSID: 0, RootInode: 0, RootRevision: 7,
 		OriginalJSON: []byte(`{"time":"2026-08-29T12:34:56Z","tree":"x"}`),
+	})
+	legacyID, legacyTree := deterministicID(83), deterministicID(84)
+	store.set(t, schema.SnapshotKey(schema.ID(legacyID)), schema.SnapshotRecord{
+		LegacyTree: schema.ID(legacyTree), OriginalJSON: []byte(fmt.Sprintf(`{"tree":"%x"}`, legacyTree[:])),
 	})
 
 	result := CheckResult{}

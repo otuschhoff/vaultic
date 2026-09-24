@@ -191,6 +191,9 @@ type DirectoryNode struct {
 // ResolveSnapshotRoot resolves a snapshot through its immutable root revision,
 // never through a mutable current-directory pointer.
 func ResolveSnapshotRoot(snapshot SnapshotRecord, revisions map[string][]byte) (DirectoryRevision, error) {
+	if snapshot.LegacyTree != (ID{}) {
+		return DirectoryRevision{}, fmt.Errorf("%w: historical snapshot uses a legacy tree, not an inode revision", ErrMalformed)
+	}
 	key := DirectoryRevisionKey(snapshot.RootFSID, snapshot.RootInode, snapshot.RootRevision)
 	encoded, ok := revisions[string(key)]
 	if !ok {

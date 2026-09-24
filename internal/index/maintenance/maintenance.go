@@ -1454,7 +1454,13 @@ func checkSnapshots(
 	}
 	defer func() { err = errors.Join(err, legacy.close()) }()
 	if !slatedbOnly {
-		if err := source.List(ctx, vaultic.SnapshotFile, func(id vaultic.ID, _ int64) error {
+		list := source.List
+		if raw, ok := source.(interface {
+			ListLegacy(context.Context, vaultic.FileType, func(vaultic.ID, int64) error) error
+		}); ok {
+			list = raw.ListLegacy
+		}
+		if err := list(ctx, vaultic.SnapshotFile, func(id vaultic.ID, _ int64) error {
 			return legacy.add(locationTuple{BlobID: id})
 		}); err != nil {
 			return err
@@ -1479,11 +1485,27 @@ func checkSnapshots(
 			return err
 		}
 		rootKey := schema.DirectoryRevisionKey(record.RootFSID, record.RootInode, record.RootRevision)
-		if _, found, getErr := store.Get(ctx, rootKey); getErr != nil {
+		if record.LegacyTree != (schema.ID{}) {
+			rootKey = schema.BlobKey(record.LegacyTree)
+		}
+		if value, found, getErr := store.Get(ctx, rootKey); getErr != nil {
 			return getErr
 		} else if !found {
 			result.SnapshotMismatch++
 			addFinding(result, maxFindings, Finding{Kind: "missing_snapshot_root", Key: id.String()})
+		} else if record.LegacyTree != (schema.ID{}) {
+			blob, err := schema.UnmarshalBlobRecord(value)
+			if err != nil {
+				return err
+			}
+			hasTree := false
+			for _, location := range blob.Locations {
+				hasTree = hasTree || location.Type == schema.BlobTree
+			}
+			if !hasTree {
+				result.SnapshotMismatch++
+				addFinding(result, maxFindings, Finding{Kind: "invalid_snapshot_root_type", Key: id.String()})
+			}
 		}
 		return nil
 	})

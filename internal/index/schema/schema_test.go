@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -1241,6 +1242,19 @@ func TestSchemaRecordRoundTripsAndMalformedInput(t *testing.T) {
 	}
 	if _, err := UnmarshalDirectoryRevision(append(encodedDirectory, 0)); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("directory trailing data returned %v", err)
+	}
+	legacyJSON := []byte(fmt.Sprintf(`{"tree":"%x","hostname":"historical"}`, id1))
+	legacySnapshot := SnapshotRecord{LegacyTree: id1, OriginalJSON: legacyJSON, JSONHash: ID(sha256.Sum256(legacyJSON))}
+	roundTrip(t, legacySnapshot, UnmarshalSnapshotRecord)
+	for _, invalid := range []SnapshotRecord{
+		{LegacyTree: id1, OriginalJSON: legacyJSON, CommitSequence: 1},
+		{LegacyTree: id1, OriginalJSON: legacyJSON, RootInode: 1},
+		{LegacyTree: id2, OriginalJSON: legacyJSON},
+		{LegacyTree: id1, OriginalJSON: []byte(`{}`)},
+	} {
+		if _, err := invalid.MarshalBinary(); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("invalid legacy snapshot accepted: %v", err)
+		}
 	}
 	json := []byte(`{"time":"now"}`)
 	roundTrip(

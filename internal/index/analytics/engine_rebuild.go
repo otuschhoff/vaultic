@@ -409,6 +409,9 @@ func retainedReferencesForIdentity(
 		if err != nil {
 			return err
 		}
+		if snapshot.LegacyTree != (schema.ID{}) {
+			return nil
+		}
 		var visit func([]byte, int) (bool, error)
 		visit = func(key []byte, depth int) (bool, error) {
 			if depth > 1024 {

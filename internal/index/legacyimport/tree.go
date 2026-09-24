@@ -19,8 +19,29 @@ type SnapshotSource interface {
 	vaultic.BlobLoader
 }
 
+type legacySnapshotSource struct{ Source }
+
+func (source legacySnapshotSource) List(ctx context.Context, kind vaultic.FileType, visit func(vaultic.ID, int64) error) error {
+	if legacy, ok := source.Source.(interface {
+		ListLegacy(context.Context, vaultic.FileType, func(vaultic.ID, int64) error) error
+	}); ok {
+		return legacy.ListLegacy(ctx, kind, visit)
+	}
+	return source.Source.List(ctx, kind, visit)
+}
+
+func (source legacySnapshotSource) LoadUnpacked(ctx context.Context, kind vaultic.FileType, id vaultic.ID) ([]byte, error) {
+	if legacy, ok := source.Source.(interface {
+		LoadLegacyUnpacked(context.Context, vaultic.FileType, vaultic.ID) ([]byte, error)
+	}); ok {
+		return legacy.LoadLegacyUnpacked(ctx, kind, id)
+	}
+	return source.Source.LoadUnpacked(ctx, kind, id)
+}
+
 type TreeStore interface {
 	Store
+	ImportLegacySnapshot(context.Context, schema.ID, schema.SnapshotRecord) error
 	AllocateRevisionBlock(context.Context, uint64) (uint64, error)
 	WriteMutableBatch(context.Context, []daemon.Mutation, [][]byte, bool) error
 	PublishRevisionBatch(context.Context, []byte, []byte, []byte, uint64, []daemon.Mutation, [][]byte) error
@@ -68,7 +89,7 @@ func importSnapshots(
 	result *Result,
 	reportProgress func(),
 ) error {
-	return data.ForAllSnapshots(ctx, snapshots, source, nil, func(snapshotID vaultic.ID, snapshot *data.Snapshot, loadErr error) error {
+	return data.ForAllSnapshots(ctx, snapshots, legacySnapshotSource{source}, nil, func(snapshotID vaultic.ID, snapshot *data.Snapshot, loadErr error) error {
 		result.SnapshotsSeen++
 		defer reportProgress()
 		if loadErr != nil {
@@ -79,6 +100,29 @@ func importSnapshots(
 				return err
 			}
 			return recordFinding(result, options, snapshotID, "decode-snapshot", loadErr)
+		}
+		if snapshot.Tree == nil || snapshot.Tree.IsNull() {
+			if err := writeDebt(ctx, debtWrite{
+				store: store, options: options, result: result, snapshot: snapshotID,
+				pathHint: "snapshot-root", reason: schema.DebtMissingDirectory, errorClass: "snapshot-root-missing",
+			}); err != nil {
+				return err
+			}
+			return recordFinding(result, options, snapshotID, "snapshot-root", fmt.Errorf("snapshot has no root tree"))
+		}
+		originalJSON, err := (legacySnapshotSource{source}).LoadUnpacked(ctx, vaultic.SnapshotFile, snapshotID)
+		if err != nil {
+			return err
+		}
+		record := schema.SnapshotRecord{LegacyTree: schema.ID(*snapshot.Tree), OriginalJSON: originalJSON}
+		if _, err := record.MarshalBinary(); err != nil {
+			return err
+		}
+		publish := func() error {
+			if options.DryRun {
+				return nil
+			}
+			return store.ImportLegacySnapshot(ctx, schema.ID(snapshotID), record)
 		}
 		checkpointKey := schema.SnapshotImportCheckpointKey(schema.ID(snapshotID))
 		if options.Resume {
@@ -91,19 +135,11 @@ func importSnapshots(
 					return fmt.Errorf("decode snapshot checkpoint for %s: %w", snapshotID.Str(), err)
 				}
 				result.SnapshotsResumed++
-				return nil
+				return publish()
 			}
-		}
-		if snapshot.Tree == nil || snapshot.Tree.IsNull() {
-			if err := writeDebt(ctx, debtWrite{
-				store: store, options: options, result: result, snapshot: snapshotID,
-				pathHint: "snapshot-root", reason: schema.DebtMissingDirectory, errorClass: "snapshot-root-missing",
-			}); err != nil {
-				return err
-			}
-			return recordFinding(result, options, snapshotID, "snapshot-root", fmt.Errorf("snapshot has no root tree"))
 		}
 		beforeTrees, beforeNodes, beforeDebts := result.TreesVisited, result.NodesImported, result.CrawlDebtCreated
+		beforeErrors := result.ErrorsSeen
 		importer := treeImporter{
 			ctx:            ctx,
 			source:         source,
@@ -115,21 +151,20 @@ func importSnapshots(
 			pendingCurrent: make(map[string]struct{}),
 			reportProgress: reportProgress,
 		}
-		_, _, err := importer.importTree(*snapshot.Tree, nil, "", 0)
+		_, _, err = importer.importTree(*snapshot.Tree, nil, "", 0)
 		if err != nil {
 			return err
 		}
 		if err := importer.flushRevisions(); err != nil {
 			return err
 		}
-		if err := importer.writeDebt(debtWrite{
-			store: store, options: options, result: result, snapshot: snapshotID, work: *snapshot.Tree,
-			pathHint: "snapshot-root", reason: schema.DebtMissingInode,
-			errorClass: "legacy-snapshot-root-has-no-inode-identity",
-		}); err != nil {
+		if err := importer.flushDebt(); err != nil {
 			return err
 		}
-		if err := importer.flushDebt(); err != nil {
+		if result.ErrorsSeen != beforeErrors {
+			return nil
+		}
+		if err := publish(); err != nil {
 			return err
 		}
 		if !options.DryRun {

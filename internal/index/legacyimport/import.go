@@ -282,7 +282,7 @@ func Import(ctx context.Context, source Source, statter PackStatter, store Store
 	splitStore, splitCapable := store.(SplitStore)
 	useStage3 := options.PublicationLanes > 1 && !options.DryRun && splitCapable
 	if options.SnapshotDepth > 0 || options.SnapshotWorkBudget > 0 {
-		snapshotList, err = vaultic.MemorizeList(ctx, source, vaultic.SnapshotFile)
+		snapshotList, err = vaultic.MemorizeList(ctx, legacySnapshotSource{source}, vaultic.SnapshotFile)
 		if err != nil {
 			return result, err
 		}

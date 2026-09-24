@@ -1313,8 +1313,14 @@ func legacyInventoryDigest(ctx context.Context, source LegacySource, scratch *ch
 		return "", err
 	}
 	defer func() { err = errors.Join(err, spool.close()) }()
+	list := source.List
+	if raw, ok := source.(interface {
+		ListLegacy(context.Context, vaultic.FileType, func(vaultic.ID, int64) error) error
+	}); ok {
+		list = raw.ListLegacy
+	}
 	for kind, fileType := range []vaultic.FileType{vaultic.IndexFile, vaultic.SnapshotFile} {
-		if err := source.List(ctx, fileType, func(id vaultic.ID, size int64) error {
+		if err := list(ctx, fileType, func(id vaultic.ID, size int64) error {
 			if size < 0 {
 				return fmt.Errorf("negative legacy inventory size for %s", id.String())
 			}

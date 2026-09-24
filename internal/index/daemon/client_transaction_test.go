@@ -3,12 +3,52 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 )
+
+func TestSchemaStoreImportsHistoricalSnapshot(t *testing.T) {
+	ctx := context.Background()
+	client, err := Ensure(ctx, Options{Socket: testSocket(t), RepositoryID: "historical-snapshots", DaemonPath: daemonBinary(t), DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(ctx)
+	store := NewSchemaStore(client)
+	snapshotID, treeID := daemonTestID(91), daemonTestID(92)
+	record := schema.SnapshotRecord{LegacyTree: treeID, OriginalJSON: []byte(fmt.Sprintf(`{"tree":"%x","unknown":{"preserved":true}}`, treeID))}
+	if err := store.ImportLegacySnapshot(ctx, snapshotID, record); err == nil {
+		t.Fatal("missing root accepted")
+	}
+	packID := daemonTestID(93)
+	if err := store.PublishPack(ctx, PublishedPack{
+		PackID: packID, Record: schema.PackRecord{Type: schema.PackTree, BlobCount: 1, PayloadSize: 10, Lifecycle: schema.PackExportPending},
+		Blobs: map[schema.ID]schema.BlobRecord{treeID: {Locations: []schema.BlobLocation{{PackID: packID, Length: 10, Type: schema.BlobTree}}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := store.ImportLegacySnapshot(ctx, snapshotID, record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	value, found, err := store.Get(ctx, schema.SnapshotKey(snapshotID))
+	if err != nil || !found {
+		t.Fatalf("snapshot missing: %v", err)
+	}
+	decoded, err := schema.UnmarshalSnapshotRecord(value)
+	if err != nil || decoded.LegacyTree != treeID || !bytes.Equal(decoded.OriginalJSON, record.OriginalJSON) || decoded.CommitSequence != 0 {
+		t.Fatalf("historical snapshot changed: %#v %v", decoded, err)
+	}
+	record.OriginalJSON = []byte(fmt.Sprintf(`{"tree":"%x"}`, treeID))
+	if err := store.ImportLegacySnapshot(ctx, snapshotID, record); err == nil {
+		t.Fatal("conflicting snapshot accepted")
+	}
+}
 
 func TestSchemaStorePublishesAuthoritativePacksAndDuplicateLocations(t *testing.T) {
 	client, err := Ensure(

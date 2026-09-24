@@ -11,6 +11,8 @@ import (
 	"github.com/otuschhoff/vaultic/internal/backend/appendonly"
 	"github.com/otuschhoff/vaultic/internal/debug"
 	"github.com/otuschhoff/vaultic/internal/errors"
+	enginepkg "github.com/otuschhoff/vaultic/internal/index"
+	"github.com/otuschhoff/vaultic/internal/index/schema"
 	"github.com/otuschhoff/vaultic/internal/repository/crypto"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	"github.com/otuschhoff/vaultic/internal/telemetry"
@@ -184,6 +186,50 @@ func (r *Repository) KeyID() vaultic.ID {
 
 // List runs fn for all files of type t in the repo.
 func (r *Repository) List(ctx context.Context, t vaultic.FileType, fn func(vaultic.ID, int64) error) error {
+	engine, authoritative := r.engine.(*enginepkg.DaemonEngine)
+	if t != vaultic.SnapshotFile || !authoritative {
+		return r.ListLegacy(ctx, t, fn)
+	}
+	if err := r.ListLegacy(ctx, t, fn); err != nil {
+		return err
+	}
+	var after []byte
+	for {
+		entries, done, err := engine.SchemaStore().ScanPrefix(ctx, []byte("s:"), after, 1000)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			parsed, err := schema.ParseKey(entry.Key)
+			if err != nil || parsed.Kind != schema.KeySnapshot {
+				return fmt.Errorf("invalid snapshot key %x", entry.Key)
+			}
+			record, err := schema.UnmarshalSnapshotRecord(entry.Value)
+			if err != nil {
+				return err
+			}
+			id := vaultic.ID(parsed.ID)
+			_, err = r.be.Stat(ctx, backend.Handle{Type: backend.SnapshotFile, Name: id.String()})
+			if err != nil && !r.be.IsNotExist(err) {
+				return err
+			}
+			if err != nil {
+				if err := fn(id, int64(len(record.OriginalJSON))); err != nil {
+					return err
+				}
+			}
+			after = append(after[:0], entry.Key...)
+		}
+		if done {
+			return nil
+		}
+		if len(entries) == 0 {
+			return fmt.Errorf("snapshot scan made no progress")
+		}
+	}
+}
+
+func (r *Repository) ListLegacy(ctx context.Context, t vaultic.FileType, fn func(vaultic.ID, int64) error) error {
 	dependency := r.accounting.StartDependency(ctx, "repository")
 	err := r.be.List(ctx, backend.FileType(t), func(fi backend.FileInfo) error {
 		id, err := vaultic.ParseID(fi.Name)

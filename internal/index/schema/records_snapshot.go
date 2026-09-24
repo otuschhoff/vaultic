@@ -3,6 +3,8 @@ package schema
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 )
@@ -325,11 +327,35 @@ type SnapshotRecord struct {
 	RootInode, RootRevision uint64
 	OriginalJSON            []byte
 	JSONHash                ID
+	LegacyTree              ID
+}
+
+func (record SnapshotRecord) validateScope() error {
+	if record.LegacyTree == (ID{}) {
+		if record.CommitSequence == 0 || record.RootRevision == 0 {
+			return fmt.Errorf("%w: invalid snapshot scope", ErrMalformed)
+		}
+		return nil
+	}
+	if record.CommitSequence != 0 || record.RootFSID != 0 || record.RootInode != 0 || record.RootRevision != 0 {
+		return fmt.Errorf("%w: legacy snapshot has normalized identity", ErrMalformed)
+	}
+	var snapshot struct {
+		Tree string `json:"tree"`
+	}
+	if err := json.Unmarshal(record.OriginalJSON, &snapshot); err != nil {
+		return fmt.Errorf("%w: invalid legacy snapshot JSON", ErrMalformed)
+	}
+	tree, err := hex.DecodeString(snapshot.Tree)
+	if err != nil || !bytes.Equal(tree, record.LegacyTree[:]) {
+		return fmt.Errorf("%w: legacy snapshot tree mismatch", ErrMalformed)
+	}
+	return nil
 }
 
 func (record SnapshotRecord) MarshalBinary() ([]byte, error) {
-	if record.CommitSequence == 0 || record.RootRevision == 0 {
-		return nil, fmt.Errorf("%w: invalid snapshot scope", ErrMalformed)
+	if err := record.validateScope(); err != nil {
+		return nil, err
 	}
 	e := newEncoder()
 	e.u64(record.CommitSequence)
@@ -344,6 +370,9 @@ func (record SnapshotRecord) MarshalBinary() ([]byte, error) {
 		return nil, fmt.Errorf("%w: snapshot JSON hash mismatch", ErrMalformed)
 	}
 	e.id(hash)
+	if record.LegacyTree != (ID{}) {
+		e.id(record.LegacyTree)
+	}
 	return e.finish()
 }
 
@@ -371,7 +400,15 @@ func UnmarshalSnapshotRecord(data []byte) (SnapshotRecord, error) {
 	if record.JSONHash, err = d.id(); err != nil {
 		return record, err
 	}
-	if record.CommitSequence == 0 || record.RootRevision == 0 || ID(sha256.Sum256(record.OriginalJSON)) != record.JSONHash {
+	if record.RootRevision == 0 {
+		if record.LegacyTree, err = d.id(); err != nil {
+			return SnapshotRecord{}, err
+		}
+	}
+	if err := record.validateScope(); err != nil {
+		return SnapshotRecord{}, err
+	}
+	if ID(sha256.Sum256(record.OriginalJSON)) != record.JSONHash {
 		return SnapshotRecord{}, fmt.Errorf("%w: invalid snapshot scope or hash", ErrMalformed)
 	}
 	return record, d.done()

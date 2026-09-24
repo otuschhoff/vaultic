@@ -15,6 +15,58 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+func (store *SchemaStore) ImportLegacySnapshot(ctx context.Context, snapshotID schema.ID, record schema.SnapshotRecord) error {
+	if record.LegacyTree == (schema.ID{}) || snapshotID == (schema.ID{}) {
+		return fmt.Errorf("invalid legacy snapshot identity")
+	}
+	encoded, err := record.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	transaction, err := store.client.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer rollbackTransaction(ctx, transaction)
+	key := schema.SnapshotKey(snapshotID)
+	value, found, err := transaction.Get(ctx, key)
+	if err != nil {
+		return err
+	}
+	if found {
+		existing, err := schema.UnmarshalSnapshotRecord(value)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(existing.OriginalJSON, record.OriginalJSON) {
+			return fmt.Errorf("snapshot import conflicts with existing snapshot")
+		}
+		return nil
+	}
+	rootValue, rootFound, err := transaction.Get(ctx, schema.BlobKey(record.LegacyTree))
+	if err != nil {
+		return err
+	}
+	if !rootFound {
+		return fmt.Errorf("legacy snapshot root is absent from the blob catalog")
+	}
+	root, err := schema.UnmarshalBlobRecord(rootValue)
+	if err != nil {
+		return err
+	}
+	hasTree := false
+	for _, location := range root.Locations {
+		hasTree = hasTree || location.Type == schema.BlobTree
+	}
+	if !hasTree {
+		return fmt.Errorf("legacy snapshot root has no tree location")
+	}
+	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), []Mutation{{Key: key, Value: encoded}}, nil); err != nil {
+		return err
+	}
+	return transaction.Commit(ctx)
+}
+
 func (store *SchemaStore) ExportCheckpointRoot(ctx context.Context, snapshotID schema.ID) ([]byte, error) {
 	value, found, err := store.Get(ctx, schema.ExportCheckpointKey(snapshotID))
 	if err != nil {
@@ -681,9 +733,11 @@ func (store *SchemaStore) ForgetSnapshot(ctx context.Context, snapshotID schema.
 	if enabled, enabledErr := store.analyticsEnabled(ctx); enabledErr != nil {
 		return enabledErr
 	} else if enabled {
-		identities, err = store.snapshotIdentities(ctx, rootKey)
-		if err != nil {
-			return err
+		if record.LegacyTree == (schema.ID{}) {
+			identities, err = store.snapshotIdentities(ctx, rootKey)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	backoff := 100 * time.Microsecond
@@ -760,6 +814,9 @@ func (store *SchemaStore) forgetSnapshotOnce(
 		}
 	}
 	deletes := [][]byte{schema.SnapshotKey(snapshotID), schema.SnapshotCommitKey(record.CommitSequence, snapshotID)}
+	if record.LegacyTree != (schema.ID{}) {
+		deletes = [][]byte{schema.SnapshotKey(snapshotID), schema.SnapshotImportCheckpointKey(snapshotID)}
+	}
 	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), puts, deletes); err != nil {
 		return fail(err)
 	}

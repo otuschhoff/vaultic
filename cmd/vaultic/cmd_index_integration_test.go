@@ -266,7 +266,7 @@ func testIndexWorkflows(t *testing.T, s3Metadata bool) {
 	if _, err := os.Stat(daemonPath); err != nil {
 		t.Skipf("compiled vaulticdb unavailable: %v", err)
 	}
-	socket := filepath.Join(env.base, "vaulticdb.sock")
+	socket := daemon.DefaultSocket(repositoryID(t, env))
 	daemonConfig := daemon.Options{
 		Socket: socket, RepositoryID: repositoryID(t, env), DaemonPath: daemonPath,
 		DataDir: filepath.Join(env.base, "vaulticdb"), ObjectStore: "local",
@@ -478,6 +478,33 @@ func testIndexWorkflows(t *testing.T, s3Metadata bool) {
 	}
 
 	assertIntrospectionAnswersWithoutListing(t, env, daemonOptions)
+	snapshotIDs := testListSnapshots(t, env.globalOptions, 1)
+	snapshotID := snapshotIDs[0]
+	value, found, err := store.Get(context.Background(), schema.SnapshotKey(schema.ID(snapshotID)))
+	if err != nil || !found {
+		t.Fatalf("imported snapshot missing: %v", err)
+	}
+	snapshot, err := schema.UnmarshalSnapshotRecord(value)
+	if err != nil || snapshot.LegacyTree == (schema.ID{}) || snapshot.CommitSequence != 0 {
+		t.Fatalf("import did not preserve historical root: %#v %v", snapshot, err)
+	}
+	if err := os.Remove(filepath.Join(env.repo, "snapshots", snapshotID.String())); err != nil {
+		t.Fatal(err)
+	}
+	if ids := testListSnapshots(t, env.globalOptions, 1); ids[0] != snapshotID {
+		t.Fatalf("stored snapshot ID changed: %v", ids)
+	}
+	restored := filepath.Join(env.base, "historical-restore")
+	testRunRestore(t, env.globalOptions, restored, snapshotID.String()+":"+toPathInSnapshot(filepath.Dir(env.testdata)))
+	difference := directoriesContentsDiff(t, env.testdata, filepath.Join(restored, filepath.Base(env.testdata)))
+	test.Assert(t, difference == "", "historical restore differs: %s", difference)
+	if err := check(); !errors.Is(err, errIndexDifferences) {
+		t.Fatalf("legacy inventory difference was hidden: %v", err)
+	}
+	if err := store.ForgetSnapshot(context.Background(), schema.ID(snapshotID)); err != nil {
+		t.Fatal(err)
+	}
+	testListSnapshots(t, env.globalOptions, 0)
 	assertCompareDetectsMissingAndExtraObjects(t, env, daemonOptions)
 }
 

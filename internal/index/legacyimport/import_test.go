@@ -118,6 +118,35 @@ type deferredSnapshotStore struct {
 	events []string
 }
 
+func (store *deferredSnapshotStore) ImportLegacySnapshot(ctx context.Context, id schema.ID, record schema.SnapshotRecord) error {
+	store.events = append(store.events, "snapshot:durable=true")
+	return store.memoryStore.ImportLegacySnapshot(ctx, id, record)
+}
+
+type failingSnapshotStore struct {
+	*memoryStore
+	failPublication bool
+	failCheckpoint  bool
+}
+
+func (store *failingSnapshotStore) ImportLegacySnapshot(ctx context.Context, id schema.ID, record schema.SnapshotRecord) error {
+	if store.failPublication {
+		return errors.New("snapshot publication failed")
+	}
+	return store.memoryStore.ImportLegacySnapshot(ctx, id, record)
+}
+
+func (store *failingSnapshotStore) Put(ctx context.Context, key, value []byte, durable bool) error {
+	parsed, err := schema.ParseKey(key)
+	if err != nil {
+		return err
+	}
+	if store.failCheckpoint && parsed.Kind == schema.KeySnapshotImportCheckpoint {
+		return errors.New("snapshot checkpoint failed")
+	}
+	return store.memoryStore.Put(ctx, key, value, durable)
+}
+
 func (store *deferredSnapshotStore) AllocateRevisionBlock(ctx context.Context, count uint64) (uint64, error) {
 	store.events = append(store.events, fmt.Sprintf("reserve:%d", count))
 	return store.memoryStore.AllocateRevisionBlock(ctx, count)
@@ -154,6 +183,14 @@ func (store *deferredSnapshotStore) Put(ctx context.Context, key, value []byte, 
 }
 
 func newMemoryStore() *memoryStore { return &memoryStore{values: make(map[string][]byte)} }
+func (store *memoryStore) ImportLegacySnapshot(ctx context.Context, snapshotID schema.ID, record schema.SnapshotRecord) error {
+	encoded, err := record.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	return store.Put(ctx, schema.SnapshotKey(snapshotID), encoded, true)
+}
+
 func (store *memoryStore) Get(_ context.Context, key []byte) ([]byte, bool, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -3101,6 +3138,11 @@ func TestImportSnapshotsPreservesUnknownFactsAndResumes(t *testing.T) {
 		store.revisionsWritten != 1 {
 		t.Fatalf("unexpected tree import result: %#v, revisions=%d", result, store.revisionsWritten)
 	}
+	imported, err := schema.UnmarshalSnapshotRecord(store.values[string(schema.SnapshotKey(schema.ID(snapshotID)))])
+	if err != nil || imported.LegacyTree != schema.ID(rootTreeID) || !bytes.Equal(imported.OriginalJSON, snapshotJSON) || imported.RootRevision != 0 {
+		t.Fatalf("historical snapshot was not preserved: %#v, %v", imported, err)
+	}
+	delete(store.values, string(schema.SnapshotKey(schema.ID(snapshotID))))
 	finalProgress := updates[len(updates)-1]
 	if finalProgress.SnapshotsCompleted != 1 || finalProgress.SnapshotsTotal != 1 ||
 		finalProgress.SnapshotsImported != 1 {
@@ -3135,6 +3177,9 @@ func TestImportSnapshotsPreservesUnknownFactsAndResumes(t *testing.T) {
 	if result.SnapshotsResumed != 1 || store.revisionsWritten != 1 {
 		t.Fatalf("snapshot resume replayed revisions: %#v, revisions=%d", result, store.revisionsWritten)
 	}
+	if _, found := store.values[string(schema.SnapshotKey(schema.ID(snapshotID)))]; !found {
+		t.Fatal("resume did not upgrade traversal-only checkpoint")
+	}
 }
 
 func TestSnapshotDeferredPublicationsPrecedeDurableCheckpoint(t *testing.T) {
@@ -3163,9 +3208,46 @@ func TestSnapshotDeferredPublicationsPrecedeDurableCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"reserve:1024", "revisions:deferred=2", "checkpoint:durable=true"}
+	want := []string{"reserve:1024", "revisions:deferred=2", "snapshot:durable=true", "checkpoint:durable=true"}
 	if !slices.Equal(store.events, want) || result.SnapshotsImported != 1 || store.getCalls != 1 {
 		t.Fatalf("events = %v, result = %#v", store.events, result)
+	}
+}
+
+func TestHistoricalSnapshotImportFailureAndResume(t *testing.T) {
+	for _, mode := range []string{"dry-run", "missing-tree", "publication", "checkpoint"} {
+		t.Run(mode, func(t *testing.T) {
+			tree := treeJSON(t)
+			treeID, snapshotID := vaultic.Hash(tree), vaultic.NewRandomID()
+			original := []byte(fmt.Sprintf(`{"tree":"%s","custom":{"keep":true}}`, treeID.String()))
+			source := &memorySource{snapshots: map[vaultic.ID][]byte{snapshotID: original}, blobs: map[vaultic.ID][]byte{treeID: tree}}
+			store := &failingSnapshotStore{memoryStore: newMemoryStore(), failPublication: mode == "publication", failCheckpoint: mode == "checkpoint"}
+			if mode == "missing-tree" {
+				delete(source.blobs, treeID)
+			}
+			result, err := Import(context.Background(), source, fixedStatter{}, store, Options{Resume: true, SnapshotDepth: 1, DryRun: mode == "dry-run"})
+			if (err != nil) != (mode == "publication" || mode == "checkpoint") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if mode == "missing-tree" && result.ErrorsSeen == 0 {
+				t.Fatal("missing tree was not reported")
+			}
+			_, published := store.values[string(schema.SnapshotKey(schema.ID(snapshotID)))]
+			_, checkpointed := store.values[string(schema.SnapshotImportCheckpointKey(schema.ID(snapshotID)))]
+			if checkpointed || published != (mode == "checkpoint") {
+				t.Fatalf("published=%t checkpointed=%t", published, checkpointed)
+			}
+			store.failPublication, store.failCheckpoint = false, false
+			source.blobs[treeID] = tree
+			result, err = Import(context.Background(), source, fixedStatter{}, store, Options{Resume: true, SnapshotDepth: 1})
+			if err != nil || result.SnapshotsImported != 1 {
+				t.Fatalf("retry did not complete: %#v %v", result, err)
+			}
+			stored, err := schema.UnmarshalSnapshotRecord(store.values[string(schema.SnapshotKey(schema.ID(snapshotID)))])
+			if err != nil || !bytes.Equal(stored.OriginalJSON, original) {
+				t.Fatalf("retry lost original JSON: %v", err)
+			}
+		})
 	}
 }
 
