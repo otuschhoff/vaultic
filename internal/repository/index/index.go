@@ -69,6 +69,44 @@ func NewIndex() *Index {
 	}
 }
 
+type CatalogBuilder struct {
+	index *Index
+	packs map[vaultic.ID]uint32
+}
+
+func NewCatalogBuilder() *CatalogBuilder {
+	return &CatalogBuilder{index: NewIndex(), packs: make(map[vaultic.ID]uint32)}
+}
+
+func (builder *CatalogBuilder) Add(packID vaultic.ID, blob pack.Blob) error {
+	if builder.index == nil {
+		return errors.New("catalog builder is already finished")
+	}
+	if blob.Type != vaultic.DataBlob && blob.Type != vaultic.TreeBlob {
+		return errors.New("catalog blob has invalid type")
+	}
+	if blob.Offset > math.MaxUint32 || blob.Length > math.MaxUint32 || blob.UncompressedLength > math.MaxUint32 {
+		return errors.New("catalog blob offset or length exceeds uint32")
+	}
+	ordinal, found := builder.packs[packID]
+	if !found {
+		if uint64(len(builder.index.packs)) >= math.MaxUint32 {
+			return errors.New("catalog pack count exceeds uint32")
+		}
+		ordinal = builder.index.addToPacks(packID)
+		builder.packs[packID] = ordinal
+	}
+	builder.index.store(ordinal, blob)
+	return nil
+}
+
+func (builder *CatalogBuilder) Build() *Index {
+	result := builder.index
+	builder.index = nil
+	builder.packs = nil
+	return result
+}
+
 // addToPacks saves the given pack ID and return the index.
 // This procedere allows to use pack IDs which can be easily garbage collected after.
 func (idx *Index) addToPacks(id vaultic.ID) uint32 {

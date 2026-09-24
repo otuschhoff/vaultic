@@ -1,5 +1,40 @@
 # Phase 33 Production Benchmark Evidence
 
+## Direct compact backup projection, r2 (2026-09-24)
+
+The second candidate removes the full `map[PackID][]Blob` staging copy. A
+single-owner catalog builder writes directly into the existing compact index,
+reuses one ordinal per pack, validates types and 32-bit offset/length bounds,
+and releases its pack map when finished. Normal and pending-export projections
+remain separate and private until the entire read session validates and closes;
+cancellation still installs neither. The native multi-page parity/cancellation
+test passed, as did full compact-index, index-engine and backup-package race
+tests. Builder tests cover ordinal reuse, duplicate locations, invalid-input
+non-mutation and finish semantics.
+
+A 65,536-location synthetic benchmark, three repetitions, measured the old
+map-then-copy path at 14.48-14.82ms and 17.47MB/2,082 allocations, versus direct
+construction at 9.40-9.56ms and 9.07MB/673 allocations. This is a local allocation
+and construction benchmark, not a backup runtime measurement.
+
+Production r2 used the same ten-minute cwalk-enabled 52-root scope, unchanged
+primary and settings, from `22d7eab89` plus its recorded patch. It timed out at
+602.401s in catalog loading, with unchanged 143 snapshot IDs and zero writes or
+commits. CLI CPU was 570.81s and peak RSS 26,634,612 KiB, versus r1's 573.64s
+and 38,989,088 KiB. R2 consumed 36,147,888,989 logical body bytes versus r1's
+38,922,261,970: memory is lower, but less catalog data was reached, so there is
+no demonstrated production runtime win or exact equal-scope memory percentage.
+The 603.174s daemon window recorded 562.19 CPU seconds, 36,060 GETs and
+80.576054 aggregate GET-service seconds. No sampler errors or leaked sessions
+occurred; the original primary stayed healthy at epoch 55.
+
+The new CPU profile shows compact `indexMap.add` at 30.79% cumulative and its
+preallocation at 11.89%, with map lookup and protobuf/schema decoding also
+material. One scan/build consumer remains CPU-active at about one core.
+The next bounded candidate is independent parallel scan/build workers sharing
+the same pinned snapshot but not their mutable projections. Artifacts are in
+`db.test/backup-compact-2026-09-24-r2`.
+
 ## Backup catalog streaming, r1 (2026-09-24)
 
 The first backup optimization replaces unary pending-pack/blob catalog pages

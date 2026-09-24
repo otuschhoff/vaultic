@@ -468,18 +468,9 @@ func (engine *DaemonEngine) Load(
 	if err := engine.recoverPendingSnapshots(ctx, repo); err != nil {
 		return err
 	}
-	pendingPacks, byPack, err := engine.loadCatalog(ctx, progress)
+	pendingPacks, projection, recoveryProjection, err := engine.loadCatalog(ctx, progress)
 	if err != nil {
 		return err
-	}
-	projection := legacyindex.NewIndex()
-	recoveryProjection := legacyindex.NewIndex()
-	for packID, blobs := range byPack {
-		if _, pending := pendingPacks[packID]; pending {
-			recoveryProjection.StorePack(packID, blobs)
-		} else {
-			projection.StorePack(packID, blobs)
-		}
 	}
 	projection.Finalize()
 	engine.legacy.master.Insert(projection)
@@ -494,10 +485,10 @@ func (engine *DaemonEngine) Load(
 	return nil
 }
 
-func (engine *DaemonEngine) loadCatalog(ctx context.Context, progress vaultic.Counter) (pending map[vaultic.ID]struct{}, byPack map[vaultic.ID]pack.Blobs, resultErr error) {
+func (engine *DaemonEngine) loadCatalog(ctx context.Context, progress vaultic.Counter) (pending map[vaultic.ID]struct{}, projection, recovery *legacyindex.Index, resultErr error) {
 	session, err := engine.store.BeginReadSession(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open authoritative catalog read session: %w", err)
+		return nil, nil, nil, fmt.Errorf("open authoritative catalog read session: %w", err)
 	}
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -507,20 +498,21 @@ func (engine *DaemonEngine) loadCatalog(ctx context.Context, progress vaultic.Co
 	ctx = session.Context()
 	pending, err = engine.loadPendingPacks(ctx, session)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	byPack, err = engine.loadBlobCatalog(ctx, session, progress)
+	projection, recovery, err = engine.loadBlobCatalog(ctx, session, pending, progress)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if err := session.Validate(ctx); err != nil {
-		return nil, nil, fmt.Errorf("validate authoritative catalog read session: %w", err)
+		return nil, nil, nil, fmt.Errorf("validate authoritative catalog read session: %w", err)
 	}
-	return pending, byPack, nil
+	return pending, projection, recovery, nil
 }
 
-func (engine *DaemonEngine) loadBlobCatalog(ctx context.Context, session *daemon.ReadSession, progress vaultic.Counter) (map[vaultic.ID]pack.Blobs, error) {
-	byPack := make(map[vaultic.ID]pack.Blobs)
+func (engine *DaemonEngine) loadBlobCatalog(ctx context.Context, session *daemon.ReadSession, pending map[vaultic.ID]struct{}, progress vaultic.Counter) (*legacyindex.Index, *legacyindex.Index, error) {
+	projection := legacyindex.NewCatalogBuilder()
+	recovery := legacyindex.NewCatalogBuilder()
 	err := session.ScanRange(ctx, []byte("b:"), 10_000, func(entries []daemon.KeyValue) error {
 		for _, entry := range entries {
 			if err := ctx.Err(); err != nil {
@@ -535,25 +527,36 @@ func (engine *DaemonEngine) loadBlobCatalog(ctx context.Context, session *daemon
 				return err
 			}
 			for _, location := range record.Locations {
+				if location.Offset > math.MaxUint32 {
+					return fmt.Errorf("catalog blob offset exceeds uint32")
+				}
 				blobType := vaultic.DataBlob
 				if location.Type == schema.BlobTree {
 					blobType = vaultic.TreeBlob
+				} else if location.Type != schema.BlobData {
+					return fmt.Errorf("invalid catalog blob type %d", location.Type)
 				}
 				packID := vaultic.ID(location.PackID)
-				byPack[packID] = append(byPack[packID], pack.Blob{
+				builder := projection
+				if _, found := pending[packID]; found {
+					builder = recovery
+				}
+				if err := builder.Add(packID, pack.Blob{
 					BlobHandle: vaultic.BlobHandle{ID: vaultic.ID(parsed.ID), Type: blobType},
 					Offset:     uint(location.Offset), Length: uint(location.Length),
 					UncompressedLength: uint(location.UncompressedSize),
-				})
+				}); err != nil {
+					return err
+				}
 				progress.Add(1)
 			}
 		}
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("load authoritative blob catalog: %w", err)
+		return nil, nil, fmt.Errorf("load authoritative blob catalog: %w", err)
 	}
-	return byPack, nil
+	return projection.Build(), recovery.Build(), nil
 }
 
 func (engine *DaemonEngine) loadPendingPacks(ctx context.Context, session *daemon.ReadSession) (map[vaultic.ID]struct{}, error) {
