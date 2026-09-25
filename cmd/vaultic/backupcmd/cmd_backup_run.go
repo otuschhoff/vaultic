@@ -192,9 +192,29 @@ func (run *backupRun) close() {
 		run.closeRepo()
 	}
 	if run.repo != nil {
+		provider, reportsLookups := run.repo.Engine().(interface {
+			BlobLookupStats() (enginepkg.BlobLookupStats, bool)
+		})
 		if err := run.repo.Close(); err != nil {
 			run.printer.E("close backup repository: %v", err)
 		}
+		if reportsLookups {
+			if stats, enabled := provider.BlobLookupStats(); enabled {
+				run.reportMetadataLookupStats(stats)
+			}
+		}
+	}
+}
+
+func (run *backupRun) reportMetadataLookupStats(stats enginepkg.BlobLookupStats) {
+	if run.globalOptions.JSON {
+		run.term.Print(ui.ToJSONString(struct {
+			MessageType string `json:"message_type"`
+			enginepkg.BlobLookupStats
+		}{MessageType: "metadata_lookup_stats", BlobLookupStats: stats}))
+	} else if !run.globalOptions.Quiet {
+		run.printer.V("metadata lookup cache: %d hits, %d misses, %d evictions, peak %d/%d entries; %d size RPCs for %d handles\n",
+			stats.CacheHits, stats.CacheMisses, stats.Evictions, stats.PeakEntries, stats.Capacity, stats.SizeRPCs, stats.SizeHandles)
 	}
 }
 
@@ -341,7 +361,7 @@ func loadBackupParent(run *backupRun) error {
 	}
 	if run.options.MetadataOnDemand {
 		return run.repo.LoadBackupIndex(run.ctx, run.printer, enginepkg.BackupLookupOptions{
-			ScratchDirectory: run.options.MetadataScratch, CacheBytes: 64 << 20, Concurrency: 4,
+			ScratchDirectory: run.options.MetadataScratch, CacheBytes: run.options.MetadataCacheMiB << 20, Concurrency: 4,
 		})
 	}
 	return run.repo.LoadIndex(run.ctx, run.printer)

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 	legacyindex "github.com/otuschhoff/vaultic/internal/repository/index"
@@ -31,16 +33,82 @@ type blobLookupBatch struct {
 }
 
 type CachedBlobLookup struct {
-	ctx     context.Context
-	cancel  context.CancelCauseFunc
-	session blobLookupSession
-	local   *LegacyEngine
-	cache   *lru.Cache[vaultic.BlobHandle, vaultic.BlobSize]
-	slots   chan struct{}
-	mutex   sync.Mutex
-	pending map[vaultic.BlobHandle]blobLookupResult
-	workers sync.WaitGroup
-	written *writtenBlobStore
+	ctx      context.Context
+	cancel   context.CancelCauseFunc
+	session  blobLookupSession
+	local    *LegacyEngine
+	cache    *lru.Cache[vaultic.BlobHandle, vaultic.BlobSize]
+	slots    chan struct{}
+	mutex    sync.Mutex
+	pending  map[vaultic.BlobHandle]blobLookupResult
+	workers  sync.WaitGroup
+	written  *writtenBlobStore
+	stats    blobLookupCounters
+	capacity int
+}
+
+type blobLookupCounters struct {
+	hits                   atomic.Uint64
+	negativeHits           atomic.Uint64
+	misses                 atomic.Uint64
+	evictions              atomic.Uint64
+	peakEntries            atomic.Uint64
+	sizeRPCs               atomic.Uint64
+	sizeHandles            atomic.Uint64
+	sizeRPCNanoseconds     atomic.Uint64
+	locationRPCs           atomic.Uint64
+	locationRPCNanoseconds atomic.Uint64
+}
+
+type BlobLookupStats struct {
+	CacheHits              uint64 `json:"cache_hits"`
+	NegativeHits           uint64 `json:"negative_hits"`
+	CacheMisses            uint64 `json:"cache_misses"`
+	Evictions              uint64 `json:"evictions"`
+	PeakEntries            uint64 `json:"peak_entries"`
+	Capacity               int    `json:"capacity"`
+	AccountedCapacityBytes int    `json:"accounted_capacity_bytes"`
+	SizeRPCs               uint64 `json:"size_rpcs"`
+	SizeHandles            uint64 `json:"size_handles"`
+	SizeRPCNanoseconds     uint64 `json:"size_rpc_nanoseconds"`
+	LocationRPCs           uint64 `json:"location_rpcs"`
+	LocationRPCNanoseconds uint64 `json:"location_rpc_nanoseconds"`
+}
+
+func (lookup *CachedBlobLookup) Stats() BlobLookupStats {
+	return BlobLookupStats{
+		CacheHits: lookup.stats.hits.Load(), NegativeHits: lookup.stats.negativeHits.Load(), CacheMisses: lookup.stats.misses.Load(),
+		Evictions: lookup.stats.evictions.Load(), PeakEntries: lookup.stats.peakEntries.Load(), Capacity: lookup.capacity,
+		AccountedCapacityBytes: lookup.capacity * blobLookupCacheEntryBytes,
+		SizeRPCs:               lookup.stats.sizeRPCs.Load(), SizeHandles: lookup.stats.sizeHandles.Load(),
+		SizeRPCNanoseconds: lookup.stats.sizeRPCNanoseconds.Load(), LocationRPCs: lookup.stats.locationRPCs.Load(),
+		LocationRPCNanoseconds: lookup.stats.locationRPCNanoseconds.Load(),
+	}
+}
+
+func (lookup *CachedBlobLookup) cachedSize(handle vaultic.BlobHandle) (vaultic.BlobSize, bool) {
+	size, found := lookup.cache.Get(handle)
+	if found {
+		lookup.stats.hits.Add(1)
+		if !size.Found {
+			lookup.stats.negativeHits.Add(1)
+		}
+	} else {
+		lookup.stats.misses.Add(1)
+	}
+	return size, found
+}
+
+func (lookup *CachedBlobLookup) cacheSize(handle vaultic.BlobHandle, size vaultic.BlobSize) {
+	if lookup.cache.Add(handle, size) {
+		lookup.stats.evictions.Add(1)
+	}
+	entries := uint64(lookup.cache.Len())
+	for peak := lookup.stats.peakEntries.Load(); entries > peak; peak = lookup.stats.peakEntries.Load() {
+		if lookup.stats.peakEntries.CompareAndSwap(peak, entries) {
+			break
+		}
+	}
 }
 
 func (lookup *CachedBlobLookup) Error() error {
@@ -85,7 +153,7 @@ func (lookup *CachedBlobLookup) localSizes(ctx context.Context, handles []vaulti
 		if sizes[ordinal].Found {
 			continue
 		}
-		if size, cached := lookup.cache.Get(handle); cached && size.Found {
+		if size, cached := lookup.cachedSize(handle); cached && size.Found {
 			sizes[ordinal] = size
 			continue
 		}
@@ -98,7 +166,7 @@ func (lookup *CachedBlobLookup) localSizes(ctx context.Context, handles []vaulti
 		}
 		if len(blobs) != 0 {
 			sizes[ordinal] = vaultic.BlobSize{Size: blobs[0].PlaintextLength(), Found: true}
-			lookup.cache.Add(handle, sizes[ordinal])
+			lookup.cacheSize(handle, sizes[ordinal])
 		}
 	}
 	return sizes, nil
@@ -188,7 +256,10 @@ func (lookup *CachedBlobLookup) LookupContext(ctx context.Context, handle vaulti
 	stop := context.AfterFunc(lookup.ctx, func() { cancel(context.Cause(lookup.ctx)) })
 	defer stop()
 	defer cancel(nil)
+	started := time.Now()
+	lookup.stats.locationRPCs.Add(1)
 	blobs, err := provider.LookupContext(rpcCtx, handle)
+	lookup.stats.locationRPCNanoseconds.Add(uint64(time.Since(started)))
 	if cause := context.Cause(lookup.ctx); cause != nil {
 		return nil, cause
 	}
@@ -222,7 +293,8 @@ func NewCachedBlobLookup(session blobLookupSession, local *LegacyEngine, budgetB
 	}
 	ctx, cancel := context.WithCancelCause(session.Context())
 	return &CachedBlobLookup{ctx: ctx, cancel: cancel, session: session, local: local, cache: cache,
-		slots: make(chan struct{}, concurrency), pending: make(map[vaultic.BlobHandle]blobLookupResult)}, nil
+		slots: make(chan struct{}, concurrency), pending: make(map[vaultic.BlobHandle]blobLookupResult),
+		capacity: budgetBytes / blobLookupCacheEntryBytes}, nil
 }
 
 func (lookup *CachedBlobLookup) LookupSizesContext(ctx context.Context, handles []vaultic.BlobHandle) ([]vaultic.BlobSize, error) {
@@ -247,7 +319,7 @@ func (lookup *CachedBlobLookup) LookupSizesContext(ctx context.Context, handles 
 		if results[ordinal].Found {
 			continue
 		}
-		size, found := lookup.cache.Get(handle)
+		size, found := lookup.cachedSize(handle)
 		if !found {
 			cached = false
 			break
@@ -289,7 +361,7 @@ func (lookup *CachedBlobLookup) LookupSizesContext(ctx context.Context, handles 
 		if results[ordinal].Found {
 			continue
 		}
-		if size, found := lookup.cache.Get(handle); found {
+		if size, found := lookup.cachedSize(handle); found {
 			results[ordinal] = size
 			continue
 		}
@@ -348,7 +420,11 @@ func (lookup *CachedBlobLookup) LookupSizesContext(ctx context.Context, handles 
 func (lookup *CachedBlobLookup) fetch(handles []vaultic.BlobHandle, batch *blobLookupBatch) {
 	defer lookup.workers.Done()
 	defer func() { <-lookup.slots }()
+	started := time.Now()
+	lookup.stats.sizeRPCs.Add(1)
+	lookup.stats.sizeHandles.Add(uint64(len(handles)))
 	sizes, err := lookup.session.LookupBlobSizesContext(lookup.ctx, handles)
+	lookup.stats.sizeRPCNanoseconds.Add(uint64(time.Since(started)))
 	if err == nil && len(sizes) != len(handles) {
 		err = fmt.Errorf("blob lookup returned %d results for %d handles", len(sizes), len(handles))
 	}
@@ -366,7 +442,7 @@ func (lookup *CachedBlobLookup) fetch(handles []vaultic.BlobHandle, batch *blobL
 	}
 	for ordinal, handle := range handles {
 		if err == nil {
-			lookup.cache.Add(handle, sizes[ordinal])
+			lookup.cacheSize(handle, sizes[ordinal])
 		}
 		delete(lookup.pending, handle)
 	}

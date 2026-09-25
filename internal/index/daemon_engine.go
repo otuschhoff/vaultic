@@ -977,6 +977,13 @@ func (engine *DaemonEngine) Close() error {
 	return engine.closeErr
 }
 
+func (engine *DaemonEngine) BlobLookupStats() (BlobLookupStats, bool) {
+	if engine.lookup == nil {
+		return BlobLookupStats{}, false
+	}
+	return engine.lookup.Stats(), true
+}
+
 func schemaPack(
 	id vaultic.ID,
 	blobs pack.Blobs,

@@ -72,6 +72,9 @@ func TestCachedBlobLocationLookup(t *testing.T) {
 		}
 		defer lookup.Close()
 		blobs, err := lookup.LookupContext(t.Context(), handle)
+		if stats := lookup.Stats(); stats.LocationRPCs != 1 || stats.LocationRPCNanoseconds == 0 {
+			t.Fatalf("location counters=%+v", stats)
+		}
 		if !errors.Is(err, failure) {
 			t.Fatalf("location err=%v", err)
 		}
@@ -94,6 +97,34 @@ func (session *testBlobLookupSession) Context() context.Context { return session
 
 func (session *testBlobLookupSession) LookupBlobSizesContext(ctx context.Context, handles []vaultic.BlobHandle) ([]vaultic.BlobSize, error) {
 	return session.query(ctx, handles)
+}
+
+func TestCachedBlobLookupStats(t *testing.T) {
+	positive, negative, third := vaultic.NewRandomBlobHandle(), vaultic.NewRandomBlobHandle(), vaultic.NewRandomBlobHandle()
+	session := &testBlobLookupSession{ctx: t.Context(), query: func(_ context.Context, handles []vaultic.BlobHandle) ([]vaultic.BlobSize, error) {
+		results := make([]vaultic.BlobSize, len(handles))
+		for ordinal, handle := range handles {
+			results[ordinal] = vaultic.BlobSize{Found: handle == positive, Size: 42}
+		}
+		return results, nil
+	}}
+	lookup, err := NewCachedBlobLookup(session, NewLegacyEngine(), 2*blobLookupCacheEntryBytes, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lookup.Close()
+	for _, handles := range [][]vaultic.BlobHandle{{positive, negative}, {positive, negative}, {third}} {
+		if _, err := lookup.LookupSizesContext(t.Context(), handles); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lookup.Close()
+	stats := lookup.Stats()
+	if stats.CacheHits != 2 || stats.NegativeHits != 1 || stats.CacheMisses != 5 || stats.Evictions != 1 ||
+		stats.PeakEntries != 2 || stats.Capacity != 2 || stats.AccountedCapacityBytes != 2*blobLookupCacheEntryBytes ||
+		stats.SizeRPCs != 2 || stats.SizeHandles != 3 || stats.SizeRPCNanoseconds == 0 || stats.LocationRPCs != 0 {
+		t.Fatalf("unexpected closed cache stats: %+v", stats)
+	}
 }
 
 func TestCachedBlobLookupEvictionAndOverlay(t *testing.T) {

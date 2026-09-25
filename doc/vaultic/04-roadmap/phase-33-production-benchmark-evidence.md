@@ -1,5 +1,67 @@
 # Phase 33 Production Benchmark Evidence
 
+## Cache budget and measured cold-lookup cost, R22 (2026-09-25)
+
+Backup now exposes `--metadata-cache-mib` with the existing64MiB default,
+positive/platform-overflow validation, and no change to the four RPC slots or
+lookup semantics. New atomic counters track actual LRU probes (positive/negative
+hits and misses), evictions, peak occupancy, provider size/location calls,
+requested handles and aggregate provider-call nanoseconds. Counts survive Close.
+After repository cleanup joins workers, JSON backup output emits one
+`metadata_lookup_stats` record, including cancellation paths. Text mode has a
+verbose summary. These are component measurements, not a total RSS cap, and
+rechecks mean the probe counts must not be interpreted as unique requests.
+Timed provider calls include errors/cancellation but exclude slot waiting.
+
+A two-entry regression verifies exact probe counts, positive and negative hits,
+eviction, peak/capacity and RPC/handle accounting after Close. Location success
+and failure accounting, canceled-command JSON after engine close, default budget,
+zero/negative/overflow rejection and a valid1MiB budget are covered. Cache/CLI
+tests passed three race repetitions; full archiver/backup/index/repository-index
+race gates, three native encrypted spill-overlay repetitions, and the new-code
+lint gate passed. Editor diagnostics are clean.
+
+R22 used the same52 source roots, cwalk32, two file readers, exclusions,600s cap
+and45s termination grace as R21, explicitly setting `--metadata-cache-mib=64`.
+The daemon PID1184230/epoch56 and binary/configuration were unchanged. Artifacts,
+candidate, source patch, profiles, counters and reproducible analysis are in
+`/volume2/NASDA2/rustic/db.test/backup-cache-metrics-20260925-r22-KpZPk3`.
+The profiling-enabled CLI SHA256 is
+`e62597388ccc91f4f13251cc7a68b2df216a84b03dcb6f841947165d1543da84`.
+
+| Cache/RPC observation | R22 |
+| --- | --- |
+| Capacity |349,525 entries /67,108,800 accounted bytes|
+| Peak occupancy |45,100 entries /8,659,200 accounted bytes (12.9%)|
+| Evictions |0|
+| LRU probe hits /negative hits /misses |53,701 /11,766 /183,208|
+| Size RPCs /requested handles |45,104 /45,104|
+| Mean handles per size RPC |1|
+| Aggregate size RPC time |2388.748s, overlapping across four slots|
+| Mean size RPC duration |52.961ms|
+| Location RPCs |0|
+
+Final progress at606s was21,434 files and28,226,857,074 logical bytes versus
+R21's18,047 files and23,696,605,565 bytes at603s. CLI CPU was210s and peak RSS
+986,408KiB, versus179.42s and1,047,500KiB. The capped wrapper ended with exit124
+at607.572s. The daemon used1349.37 CPU seconds and236,521 metadata-object GETs
+transferred649,906,425,032 bytes. These repeated runs have cache-warmth, prior-write
+and reached-data confounders; instrumentation does not establish a speedup.
+
+All143 snapshot IDs were unchanged; no snapshot completed. There were11,774
+engine writes and8,957 commits. Post-run role remained read-write at epoch56,
+with zero active transactions/intents, empty encrypted scratch and no sampler
+errors. Final lookup counters were emitted despite cancellation.
+
+Decision: retain64MiB as the default, not a larger budget. Zero evictions at13%
+occupancy rules out capacity pressure in this measured window. Zero location
+RPCs rules out a location cache as an explanation or remedy for this workload.
+Four almost continuously occupied size slots, each sending one cold handle,
+identify first-time admission lookup cost as the immediate target. Investigate
+small bounded cross-call batches and daemon read amplification rather than
+retaining more already-cached results. Longer/different workloads still need
+their own cache-pressure measurements. On-demand remains experimental.
+
 ## Approved deployment, absolute paths and on-demand R21 (2026-09-25)
 
 The user approved the production daemon update. The release built from

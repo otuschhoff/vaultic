@@ -3,11 +3,13 @@ package backupcmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -21,15 +23,73 @@ import (
 	"github.com/otuschhoff/vaultic/internal/index/reconcile"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	rtest "github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/ui"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 type backupCloseEngine struct {
 	*enginepkg.LegacyEngine
 	close func() error
+	stats *enginepkg.BlobLookupStats
 }
 
 func (engine *backupCloseEngine) Close() error { return engine.close() }
+
+func (engine *backupCloseEngine) BlobLookupStats() (enginepkg.BlobLookupStats, bool) {
+	if engine.stats == nil {
+		return enginepkg.BlobLookupStats{}, false
+	}
+	return *engine.stats, true
+}
+
+func TestBackupCloseReportsLookupStatsAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	term := &ui.MockTerminal{}
+	repo := repository.TestRepository(t)
+	stats := &enginepkg.BlobLookupStats{Capacity: 2}
+	repo.SetEngine(&backupCloseEngine{LegacyEngine: enginepkg.NewLegacyEngine(), stats: stats, close: func() error {
+		if len(term.Output) != 0 {
+			t.Fatal("stats emitted before engine close")
+		}
+		stats.SizeRPCs = 7
+		return nil
+	}})
+	run := &backupRun{ctx: ctx, repo: repo, term: term, globalOptions: global.Options{JSON: true}}
+	run.close()
+	if len(term.Output) != 1 {
+		t.Fatalf("output=%v", term.Output)
+	}
+	var record struct {
+		MessageType string `json:"message_type"`
+		enginepkg.BlobLookupStats
+	}
+	if err := json.Unmarshal([]byte(term.Output[0]), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.MessageType != "metadata_lookup_stats" || record.Capacity != 2 || record.SizeRPCs != 7 {
+		t.Fatalf("invalid final stats: %+v", record)
+	}
+}
+
+func TestMetadataCacheBudgetFlag(t *testing.T) {
+	command := NewCommand(&global.Options{})
+	if budget, err := command.Flags().GetInt("metadata-cache-mib"); err != nil || budget != 64 {
+		t.Fatalf("default budget=%d err=%v", budget, err)
+	}
+	for _, budget := range []int{0, -1, (int(^uint(0)>>1) >> 20) + 1} {
+		if err := command.Flags().Set("metadata-cache-mib", strconv.Itoa(budget)); err != nil {
+			t.Fatal(err)
+		}
+		options := backupOptions{MetadataOnDemand: true, MetadataScratch: "scratch", MetadataCacheMiB: budget}
+		if err := options.validateParent(); err == nil {
+			t.Fatalf("invalid budget %d accepted", budget)
+		}
+	}
+	if err := (backupOptions{MetadataOnDemand: true, MetadataScratch: "scratch", MetadataCacheMiB: 1}).validateParent(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestBackupCloseReleasesEngineAfterUnlock(t *testing.T) {
 	repo := repository.TestRepository(t)
@@ -153,6 +213,8 @@ func TestBackupCrawlOptionValidation(t *testing.T) {
 		{"invalid-workers", backupOptions{UseCWalk: true}, "--cwalk-concurrency must be at least 1"},
 		{"on-demand-needs-scratch", backupOptions{MetadataOnDemand: true}, "--metadata-on-demand requires --metadata-scratch"},
 		{"scratch-needs-on-demand", backupOptions{MetadataScratch: "scratch"}, "--metadata-scratch requires --metadata-on-demand"},
+		{"cache-needs-on-demand", backupOptions{MetadataCacheMiB: 128}, "--metadata-cache-mib requires --metadata-on-demand"},
+		{"cache-needs-positive-budget", backupOptions{MetadataOnDemand: true, MetadataScratch: "scratch"}, "--metadata-cache-mib must be positive"},
 		{"on-demand-rejects-dry-run", backupOptions{MetadataOnDemand: true, MetadataScratch: "scratch", DryRun: true}, "--metadata-on-demand cannot use"},
 		{"pathdiff-needs-cwalk", backupOptions{UsePathdiff: true}, "--use-pathdiff requires --use-cwalk"},
 		{"pathdiff-needs-endpoint", backupOptions{UseCWalk: true, CWalkConcurrency: 1, UsePathdiff: true}, "--use-pathdiff requires --pathdiff-endpoint"},

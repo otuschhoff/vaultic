@@ -110,6 +110,7 @@ type backupOptions struct {
 	CWalkConcurrency          int
 	MetadataOnDemand          bool
 	MetadataScratch           string
+	MetadataCacheMiB          int
 	UsePathdiff               bool
 	PathdiffEndpoint          string
 	PathdiffRequireCoverage   bool
@@ -253,6 +254,7 @@ func (options *backupOptions) addTraversalFlags(f *pflag.FlagSet) {
 	f.IntVar(&options.CWalkConcurrency, "cwalk-concurrency", 32, "run `n` concurrent cwalk workers")
 	f.BoolVar(&options.MetadataOnDemand, "metadata-on-demand", false, "use bounded point lookups for authoritative backup metadata")
 	f.StringVar(&options.MetadataScratch, "metadata-scratch", "", "encrypted on-demand metadata scratch `directory`")
+	f.IntVar(&options.MetadataCacheMiB, "metadata-cache-mib", 64, "accounted on-demand lookup cache budget in `MiB` (not a process memory limit)")
 	f.BoolVar(&options.UsePathdiff, "use-pathdiff", false, "use verified pathdiff events to skip unchanged subtrees")
 	f.StringVar(&options.PathdiffEndpoint, "pathdiff-endpoint", "", "pathdiff control socket `path`")
 	f.BoolVar(
@@ -556,6 +558,12 @@ func (options backupOptions) validateParent() error {
 		if options.AllowDeferredCommit || options.DryRun {
 			return errors.Fatal("--metadata-on-demand cannot use deferred ingest or --dry-run")
 		}
+		if options.MetadataCacheMiB < 1 || options.MetadataCacheMiB > int(^uint(0)>>1)>>20 {
+			return errors.Fatal("--metadata-cache-mib must be positive and fit in platform memory accounting")
+		}
+	}
+	if !options.MetadataOnDemand && options.MetadataCacheMiB != 0 && options.MetadataCacheMiB != 64 {
+		return errors.Fatal("--metadata-cache-mib requires --metadata-on-demand")
 	}
 	if options.MetadataScratch != "" && !options.MetadataOnDemand {
 		return errors.Fatal("--metadata-scratch requires --metadata-on-demand")

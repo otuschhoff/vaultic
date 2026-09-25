@@ -77,11 +77,13 @@ and an explicit filesystem scratch directory:
 .. code-block:: console
 
     $ vaultic -r /srv/vaultic-repo backup --use-cwalk \
-        --metadata-on-demand --metadata-scratch /srv/hdd/vaultic-scratch .
+        --metadata-on-demand --metadata-scratch /srv/hdd/vaultic-scratch \
+        --metadata-cache-mib 64 .
 
 Startup scans pack records for sizing and recovers unfinished compatibility
 exports one authenticated pack header at a time. Existing blobs are read through
-a renewable pinned session, with a 64 MiB accounted size cache and at most four
+a renewable pinned session, with a configurable accounted size cache (64 MiB
+by default) and at most four
 lookup RPCs in flight. Exported new writes spill to temporary encrypted storage.
 These are component budgets, not a total memory limit; individual pack headers,
 blob location lists, active uploads and concurrent exports also consume memory.
@@ -102,7 +104,28 @@ On a representative ten-minute run, on-demand loading substantially reduced
 startup time and CLI memory but processed fewer files than full-index loading:
 point-read latency and metadata read amplification became bottlenecks. Keep the
 mode experimental and measure the intended workload before relying on it for
-runtime improvements. The fixed size-cache budget is not a process memory limit.
+runtime improvements. The size-cache budget is not a process memory limit.
+
+``--metadata-cache-mib`` accepts a positive integer MiB budget for the on-demand
+result cache. Each entry is accounted at 192 bytes, rounded down to whole
+entries; this includes confirmed misses tied to the pinned session. It does not
+change the daemon caches, encrypted write-spill buffers or repository pack cache.
+Blob location lists are not cached.
+
+JSON output emits a final ``metadata_lookup_stats`` record after repository
+cleanup, including canceled runs that activated the cache. It includes positive
+and negative cache probes, evictions, peak entries, accounted capacity, size RPC
+and handle counts, location RPC counts, and accumulated RPC nanoseconds. The
+``cache_hits`` count includes ``negative_hits``. Hits and misses count individual
+LRU probes, including rechecks and write-overlay probes, not unique handles or
+user requests. RPC time includes errors and cancellation, excludes waiting for a
+slot, and overlaps between concurrent calls; it is not wall-clock duration.
+Counters survive normal cache cleanup; forced process termination cannot emit
+them. Text mode reports a short summary through verbose progress output.
+
+The measured 64 MiB run used only about 8.3 MiB of accounted entries with no
+evictions, while every size RPC requested a single handle and averaged about
+53 ms. Increasing the budget cannot eliminate those first-time misses.
 
 Parallel and selective crawling
 *******************************
