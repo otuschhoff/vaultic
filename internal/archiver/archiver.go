@@ -179,6 +179,7 @@ type Options struct {
 	// Empty means the snapshot targets.
 	CWalkRoots    []string
 	CWalkProgress func(crawl.ManifestProgress)
+	CWalkPrefetch SelectFunc
 }
 
 // applyDefaults returns a copy of o with the default options set for all unset
@@ -1134,6 +1135,9 @@ func (arch *Archiver) prepareCWalkManifest(ctx context.Context, targets []string
 			info, err := arch.FS.Lstat(item)
 			if err != nil {
 				return false
+			}
+			if arch.Options.CWalkPrefetch != nil {
+				arch.Options.CWalkPrefetch(item, info, arch.FS)
 			}
 			selectMutex.Lock()
 			defer selectMutex.Unlock()

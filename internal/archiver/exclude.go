@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/otuschhoff/vaultic/internal/debug"
 	"github.com/otuschhoff/vaultic/internal/errors"
 	"github.com/otuschhoff/vaultic/internal/fs"
@@ -54,8 +56,10 @@ func CombineRejects(funcs []RejectFunc) SelectFunc {
 }
 
 type rejectionCache struct {
-	m   map[string]bool
-	mtx sync.Mutex
+	m        map[string]bool
+	mtx      sync.Mutex
+	loads    singleflight.Group
+	warnings sync.Mutex
 }
 
 func newRejectionCache() *rejectionCache {
@@ -130,17 +134,30 @@ func isExcludedByFile(filename, tagFilename, header string, rc *rejectionCache, 
 	if fs.Base(filename) == tagFilename {
 		return false // do not exclude the tagfile itself
 	}
-	rc.Lock()
-	defer rc.Unlock()
-
 	dir := fs.Dir(filename)
+	rc.Lock()
 	rejected, visited := rc.Get(dir)
+	rc.Unlock()
 	if visited {
 		return rejected
 	}
-	rejected = isDirExcludedByFile(dir, tagFilename, header, fs, warnf)
-	rc.Store(dir, rejected)
-	return rejected
+	value, _, _ := rc.loads.Do(dir, func() (any, error) {
+		rc.Lock()
+		rejected, visited := rc.Get(dir)
+		rc.Unlock()
+		if !visited {
+			rejected = isDirExcludedByFile(dir, tagFilename, header, fs, func(msg string, args ...any) {
+				rc.warnings.Lock()
+				defer rc.warnings.Unlock()
+				warnf(msg, args...)
+			})
+			rc.Lock()
+			rc.Store(dir, rejected)
+			rc.Unlock()
+		}
+		return rejected, nil
+	})
+	return value.(bool)
 }
 
 func isDirExcludedByFile(dir, tagFilename, header string, fsInst fs.FS, warnf func(msg string, args ...any)) bool {

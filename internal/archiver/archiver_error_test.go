@@ -85,6 +85,11 @@ func TestArchiverCWalkTraversal(t *testing.T) {
 
 func TestArchiverCWalkSelectionParity(t *testing.T) {
 	source := TestDir{
+		"marked": TestDir{
+			".nobackup": TestFile{Content: ""},
+			"hidden":    TestDir{"file": TestFile{Content: "excluded by marker"}},
+			"file":      TestFile{Content: "excluded by marker"},
+		},
 		"keep": TestDir{
 			"allowed":   TestFile{Content: "retained"},
 			"mandatory": TestFile{Content: "excluded by mandatory selection"},
@@ -99,6 +104,12 @@ func TestArchiverCWalkSelectionParity(t *testing.T) {
 			back := rtest.Chdir(t, root)
 			defer back()
 			arch := New(repo, fs.NewLocal(), Options{CWalkConcurrency: workers})
+			reject, err := RejectIfPresent(".nobackup", t.Logf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			arch.Select = CombineRejects([]RejectFunc{reject})
+			arch.Options.CWalkPrefetch = arch.Select
 			arch.SelectByName = func(name string) bool {
 				base := filepath.Base(name)
 				return base != "skipdir" && base != "skipfile"
@@ -111,6 +122,7 @@ func TestArchiverCWalkSelectionParity(t *testing.T) {
 				t.Fatal(err)
 			}
 			TestEnsureSnapshot(t, repo, snapshotID, TestDir{
+				"marked":   TestDir{".nobackup": TestFile{Content: ""}},
 				"keep":     TestDir{"allowed": TestFile{Content: "retained"}},
 				"rootfile": TestFile{Content: "retained root"},
 			})

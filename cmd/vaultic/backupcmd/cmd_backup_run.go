@@ -61,6 +61,7 @@ type backupRun struct {
 	parent              *data.Snapshot
 	targetFS            fs.FS
 	pathdiffPlan        crawl.Plan
+	cwalkPrefetch       archiver.SelectFunc
 	fseventsRoots       []crawl.FSEventsRootPlan
 	fseventsAnchors     []data.FSEventsAnchor
 	apfsMounts          []*apfs.Mount
@@ -703,6 +704,7 @@ func configureArchiver(ctx context.Context, run *backupRun) error {
 	options := archiver.Options{ReadConcurrency: run.options.ReadConcurrency}
 	if run.options.UseCWalk && (!run.pathdiffPlan.Selective || len(run.pathdiffPlan.ChangedDirs) > 0) {
 		options.CWalkConcurrency, options.CWalkQueue = run.options.CWalkConcurrency, 4096
+		options.CWalkPrefetch = run.cwalkPrefetch
 		if !run.globalOptions.Quiet {
 			options.CWalkProgress = func(status crawl.ManifestProgress) {
 				if run.globalOptions.JSON {
@@ -776,9 +778,12 @@ func configureBackupSelection(run *backupRun) (archiver.SelectByNameFunc, archiv
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	rejects, err := collectRejectFuncs(run.options, run.targets, run.targetFS, run.printer.E)
+	rejects, prefetch, err := collectRejectFuncsWithPrefetch(run.options, run.targets, run.targetFS, run.printer.E)
 	if err != nil {
 		return nil, nil, nil, err
+	}
+	if len(prefetch) > 0 {
+		run.cwalkPrefetch = archiver.CombineRejects(prefetch)
 	}
 	var mandatory archiver.SelectFunc = func(_ string, _ *fs.ExtendedFileInfo, _ fs.FS) bool { return true }
 	if engine, ok := run.repo.Engine().(*enginepkg.DaemonEngine); ok && !run.deferredActive {

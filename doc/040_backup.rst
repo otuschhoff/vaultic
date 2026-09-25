@@ -78,6 +78,15 @@ implementations use the standard scanner automatically.
 Manifest preparation overlaps up to four source roots. The configured worker
 count is divided among the active root lanes, not multiplied per root.
 
+Directory marker checks are prefetched concurrently before serialized selection.
+Checks for the same parent directory share one cached result, including marker
+signature validation; independent directories can perform filesystem reads in
+parallel. Prefetch shares the normal exclusion cache and does not decide whether
+an item is archived. It may check markers for directories later rejected by
+another selection rule. Embedders supplying ``CWalkPrefetch`` must provide a
+concurrency-safe callback; ordinary selection callbacks remain serialized during
+manifest preparation.
+
 JSON output includes ``cwalk_status`` records during manifest preparation, with
 total/completed roots, successful directory reads, listed entries and elapsed
 seconds. These are discovery counters, not archived files or transferred bytes.

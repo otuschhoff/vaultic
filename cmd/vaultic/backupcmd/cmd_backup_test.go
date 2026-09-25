@@ -37,6 +37,46 @@ func TestAutomaticDeferredFallbackDistinguishesUnavailableFromCorrupt(t *testing
 	}
 }
 
+func TestMarkerPrefetchSharesSelectionCache(t *testing.T) {
+	for _, caches := range []bool{false, true} {
+		t.Run(fmt.Sprint(caches), func(t *testing.T) {
+			root := t.TempDir()
+			marker, content := ".nobackup", ""
+			options := backupOptions{ExcludeIfPresent: []string{marker}}
+			if caches {
+				marker, content = "CACHEDIR.TAG", "Signature: 8a477f597d28d172789f06886806bc55"
+				options = backupOptions{ExcludeCaches: true}
+			}
+			markerPath := filepath.Join(root, marker)
+			if err := os.WriteFile(markerPath, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			filesystem := fs.NewLocal()
+			rejects, prefetch, err := collectRejectFuncsWithPrefetch(options, []string{root}, filesystem, t.Logf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(prefetch) != 1 {
+				t.Fatalf("expected one marker prefetch, got %d", len(prefetch))
+			}
+			name := filepath.Join(root, "child")
+			if archiver.CombineRejects(prefetch)(name, nil, filesystem) {
+				t.Fatal("prefetch did not observe marker")
+			}
+			if err := os.Remove(markerPath); err != nil {
+				t.Fatal(err)
+			}
+			selectItem := archiver.CombineRejects(rejects)
+			if selectItem(name, nil, filesystem) {
+				t.Fatal("selection did not reuse prefetched marker result")
+			}
+			if !selectItem(markerPath, nil, filesystem) {
+				t.Fatal("marker itself was excluded")
+			}
+		})
+	}
+}
+
 func TestBackupCrawlFlags(t *testing.T) {
 	command := NewCommand(&global.Options{})
 	for _, name := range []string{

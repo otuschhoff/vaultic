@@ -3,11 +3,56 @@ package archiver
 import (
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/otuschhoff/vaultic/internal/fs"
 	"github.com/otuschhoff/vaultic/internal/test"
 )
+
+func TestMarkerChecksOverlapAndCoalesce(t *testing.T) {
+	local := fs.NewLocal()
+	entered := make(chan struct{}, 16)
+	release := make(chan struct{})
+	var reads atomic.Int32
+	filesystem := cwalkMetadataFS{FS: local, read: func(string) (*fs.ExtendedFileInfo, error) {
+		reads.Add(1)
+		entered <- struct{}{}
+		<-release
+		return nil, os.ErrNotExist
+	}}
+	reject, err := RejectIfPresent(".nobackup", t.Logf)
+	test.OK(t, err)
+	var group sync.WaitGroup
+	for index := 0; index < 16; index++ {
+		name := filepath.Join("first", "child")
+		if index%2 == 0 {
+			name = filepath.Join("second", "child")
+		}
+		group.Go(func() {
+			if reject(name, nil, filesystem) {
+				t.Error("absent marker rejected item")
+			}
+		})
+	}
+	defer func() { close(release); group.Wait() }()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	for observed := 0; observed < 2; observed++ {
+		select {
+		case <-entered:
+		case <-deadline.C:
+			t.Fatal("independent marker reads did not overlap")
+		}
+	}
+	t.Cleanup(func() {
+		if reads.Load() != 2 {
+			t.Errorf("expected one read per directory, got %d", reads.Load())
+		}
+	})
+}
 
 func TestIsExcludedByFile(t *testing.T) {
 	const (

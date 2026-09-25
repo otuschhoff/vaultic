@@ -1,5 +1,71 @@
 # Phase 33 Production Benchmark Evidence
 
+## Concurrent marker prefetch, r14/r15 (2026-09-25)
+
+R13 identified marker-file `Lstat` under the archiver selection lock. The marker
+cache also held its own mutex during filesystem access. Independent cache misses
+now execute outside the map lock, with `singleflight` coalescing checks for the
+same directory and a per-cache warning lock. The backup command shares its marker
+predicates with an optional cwalk prefetch callback, invoked before serialized
+metadata selection. Normal selection still decides inclusion; arbitrary name,
+mandatory and metadata callbacks are not made concurrently callable. Marker
+presence/signature semantics, cache lifetime and marker-file retention remain
+unchanged. Prefetch can inspect directories later rejected by another rule.
+
+Tests prove independent reads overlap, same-directory concurrent requests issue
+one read, cwalk marker I/O overlaps while selection callbacks remain serialized,
+and sequential/cwalk snapshots have matching exclusions including retained
+markers. Command tests verify shared caches for custom and signed cache markers.
+Repeated focused archiver race tests and the full backupcmd race suite pass;
+the known root-only scanner permission fixture remains excluded. No dependency
+version change is needed: singleflight uses the existing x/sync module.
+
+Both ten-minute runs use explicit cwalk32/four lanes, the unchanged52 roots and
+HDD-NFS scratch. R15 reuses R14's exact binary and source attribution. At the same
+345-second manifest boundary:
+
+| Run | Directories read | Entries listed | Roots completed |
+| --- | ---: | ---: | ---: |
+| r11 baseline | 2,309,997 | 13,191,901 | 3 |
+| r13 baseline | 2,259,311 | 12,427,735 | 3 |
+| r14 prefetch | 2,655,776 | 15,215,548 | 3 |
+| r15 prefetch | 2,823,315 | 14,224,809 | 3 |
+
+Candidate means are19.9% higher for directories and14.9% higher for entries.
+These are discovery-throughput comparisons, not completed-backup runtime ratios:
+roots execute in nondeterministic order and have different contents. Both550s
+stacks have no selection-mutex wait stacks; R14 shows concurrent marker reads
+through prefetch alongside directory reads and cwalk child stats.
+
+R14 exits124 cleanly at604.470s, with348.142s of manifest work,2,678,322
+directories and15,359,527 entries. R15 exits124 at603.477s, with378.160s of
+manifest work,3,111,905 directories and15,787,140 entries. Both complete3/52
+roots and report `finished:true,complete:false`. Catalog loading is slower than
+r11, leaving less traversal time inside the cap; phase-aligned comparison avoids
+crediting this variation to discovery. Neither run completes a manifest or backup.
+
+| Metric | r14 | r15 |
+| --- | ---: | ---: |
+| CLI CPU seconds | 1,686.47 | 1,755.47 |
+| CLI peak RSS KiB | 31,680,196 | 32,223,972 |
+| Daemon observation seconds | 605.190 | 604.207 |
+| Daemon CPU seconds | 735.58 | 733.24 |
+| Metadata GETs | 42,069 | 42,024 |
+| Aggregate GET-service seconds | 303.573299 | 182.406810 |
+| Logical GET body bytes | 43,105,259,057 | 42,974,079,657 |
+
+All143 snapshot IDs stay unchanged; engine writes/commits and final active
+transactions/write intents are zero. Scratch is empty, no forced kills or
+sampler errors occur, and the original daemon remains PID431717/epoch55. No
+deployment or push occurs. The change is retained for repeated bounded discovery
+improvement, not claimed as end-to-end acceptance. Remaining work is dominated
+by source directory reads/child stats, with the eager full-manifest barrier still
+preventing archiving. Further investigation should address that barrier or
+duplicate metadata operations without weakening source metadata semantics.
+
+Artifacts: `/volume2/NASDA2/rustic/db.test/backup-cwalk-markers-2026-09-25-r14/`
+and `/volume2/NASDA2/rustic/db.test/backup-cwalk-markers-2026-09-25-r15/`.
+
 ## Authorized 60-minute cwalk validation, r13 (2026-09-25)
 
 The user explicitly approved one 60-minute validation of the retained four-root

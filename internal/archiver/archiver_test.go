@@ -103,6 +103,11 @@ func (filesystem cwalkMetadataFS) Lstat(name string) (*fs.ExtendedFileInfo, erro
 }
 
 func TestCWalkManifestOverlapsMetadataReads(t *testing.T) {
+	t.Run("metadata", func(t *testing.T) { testCWalkManifestOverlapsReads(t, false) })
+	t.Run("markers", func(t *testing.T) { testCWalkManifestOverlapsReads(t, true) })
+}
+
+func testCWalkManifestOverlapsReads(t *testing.T, markers bool) {
 	root := t.TempDir()
 	for _, directory := range []string{"first", "second", "third", "fourth"} {
 		path := filepath.Join(root, directory)
@@ -117,13 +122,22 @@ func TestCWalkManifestOverlapsMetadataReads(t *testing.T) {
 	entered := make(chan struct{}, 4)
 	release := make(chan struct{})
 	filesystem := cwalkMetadataFS{FS: local, read: func(name string) (*fs.ExtendedFileInfo, error) {
-		if filepath.Base(name) == "child" {
+		if !markers && filepath.Base(name) == "child" || markers && filepath.Base(name) == ".nobackup" && filepath.Dir(name) != root {
 			entered <- struct{}{}
 			<-release
 		}
 		return local.Lstat(name)
 	}}
 	arch := New(nil, filesystem, Options{CWalkConcurrency: 4})
+	var markerSelect SelectFunc
+	if markers {
+		reject, err := RejectIfPresent(".nobackup", t.Logf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		markerSelect = CombineRejects([]RejectFunc{reject})
+		arch.Options.CWalkPrefetch = markerSelect
+	}
 	var callbacks atomic.Int32
 	checkCallback := func() {
 		if callbacks.Add(1) != 1 {
@@ -136,8 +150,11 @@ func TestCWalkManifestOverlapsMetadataReads(t *testing.T) {
 		checkCallback()
 		return true
 	}
-	arch.Select = func(string, *fs.ExtendedFileInfo, fs.FS) bool {
+	arch.Select = func(name string, info *fs.ExtendedFileInfo, filesystem fs.FS) bool {
 		checkCallback()
+		if markerSelect != nil {
+			return markerSelect(name, info, filesystem)
+		}
 		return true
 	}
 	arch.MandatorySelect = arch.Select

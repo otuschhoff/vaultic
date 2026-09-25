@@ -646,11 +646,16 @@ func collectRejectByNameFuncs(
 // collectRejectFuncs returns a list of all functions which may reject data
 // from being saved in a snapshot based on path and file info
 func collectRejectFuncs(options backupOptions, targets []string, fs fs.FS, warnf func(msg string, args ...any)) (funcs []archiver.RejectFunc, err error) {
+	funcs, _, err = collectRejectFuncsWithPrefetch(options, targets, fs, warnf)
+	return funcs, err
+}
+
+func collectRejectFuncsWithPrefetch(options backupOptions, targets []string, fs fs.FS, warnf func(msg string, args ...any)) (funcs, prefetch []archiver.RejectFunc, err error) {
 	// allowed devices
 	if options.ExcludeOtherFS && !options.Stdin && !options.StdinCommand {
 		f, err := archiver.RejectByDevice(targets, fs)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		funcs = append(funcs, f)
 	}
@@ -658,12 +663,12 @@ func collectRejectFuncs(options backupOptions, targets []string, fs fs.FS, warnf
 	if len(options.ExcludeLargerThan) != 0 && !options.Stdin && !options.StdinCommand {
 		maxSize, err := ui.ParseBytes(options.ExcludeLargerThan)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		f, err := archiver.RejectBySize(maxSize)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		funcs = append(funcs, f)
 	}
@@ -671,7 +676,7 @@ func collectRejectFuncs(options backupOptions, targets []string, fs fs.FS, warnf
 	if options.ExcludeCloudFiles && !options.Stdin && !options.StdinCommand {
 		f, err := archiver.RejectCloudFiles(warnf)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		funcs = append(funcs, f)
 	}
@@ -683,13 +688,14 @@ func collectRejectFuncs(options backupOptions, targets []string, fs fs.FS, warnf
 	for _, spec := range options.ExcludeIfPresent {
 		f, err := archiver.RejectIfPresent(spec, warnf)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		funcs = append(funcs, f)
+		prefetch = append(prefetch, f)
 	}
 
-	return funcs, nil
+	return funcs, prefetch, nil
 }
 
 // collectTargets returns a list of target files/dirs from several sources.
