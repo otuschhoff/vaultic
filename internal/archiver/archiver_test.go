@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -52,6 +53,79 @@ func TestSnapshotCWalkCancellationDoesNotStartUploader(t *testing.T) {
 	entries, err := os.ReadDir(scratch)
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("manifest scratch after cancellation: %v, %v", entries, err)
+	}
+}
+
+type cwalkMetadataFS struct {
+	fs.FS
+	read func(string) (*fs.ExtendedFileInfo, error)
+}
+
+func (filesystem cwalkMetadataFS) UnwrapFS() fs.FS {
+	return filesystem.FS
+}
+
+func (filesystem cwalkMetadataFS) Lstat(name string) (*fs.ExtendedFileInfo, error) {
+	return filesystem.read(name)
+}
+
+func TestCWalkManifestOverlapsMetadataReads(t *testing.T) {
+	root := t.TempDir()
+	for _, directory := range []string{"first", "second", "third", "fourth"} {
+		path := filepath.Join(root, directory)
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "file"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	local := fs.NewLocal()
+	entered := make(chan struct{}, 4)
+	release := make(chan struct{})
+	filesystem := cwalkMetadataFS{FS: local, read: func(name string) (*fs.ExtendedFileInfo, error) {
+		if filepath.Base(name) == "file" {
+			entered <- struct{}{}
+			<-release
+		}
+		return local.Lstat(name)
+	}}
+	arch := New(nil, filesystem, Options{CWalkConcurrency: 4})
+	var callbacks atomic.Int32
+	checkCallback := func() {
+		if callbacks.Add(1) != 1 {
+			t.Error("selection callbacks overlapped")
+		}
+		runtime.Gosched()
+		callbacks.Add(-1)
+	}
+	arch.SelectByName = func(string) bool {
+		checkCallback()
+		return true
+	}
+	arch.Select = func(string, *fs.ExtendedFileInfo, fs.FS) bool {
+		checkCallback()
+		return true
+	}
+	arch.MandatorySelect = arch.Select
+	done := make(chan func(), 1)
+	go func() { done <- arch.prepareCWalkManifest(t.Context(), []string{root}) }()
+	defer func() {
+		close(release)
+		cleanup := <-done
+		defer cleanup()
+		if arch.cwalkManifest == nil {
+			t.Error("cwalk manifest was not built")
+		}
+	}()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	for observed := 0; observed < 2; observed++ {
+		select {
+		case <-entered:
+		case <-deadline.C:
+			t.Fatal("cwalk metadata reads did not overlap")
+		}
 	}
 }
 

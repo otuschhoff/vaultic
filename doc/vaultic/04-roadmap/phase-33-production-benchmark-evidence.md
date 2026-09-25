@@ -1,5 +1,30 @@
 # Phase 33 Production Benchmark Evidence
 
+## Cwalk metadata read concurrency, r6 (2026-09-25)
+
+Manifest selection previously held one mutex across name selection, a second
+filesystem Lstat, and metadata selection. The lock now protects only selection
+callbacks; cwalk's bounded workers can overlap the filesystem reads. A gated
+regression proves two reads overlap while all selection callbacks remain
+serialized. Cwalk parity and cancellation race checks pass against upstream
+v1.0.1, with the known root-permission fallback test excluded.
+
+R6 retains 52 roots, 32 cwalk workers, HDD-NFS scratch and the ten-minute cap.
+It reaches the manifest phase after catalog reads plateau around 205 seconds,
+then exits on TERM at 603.151 seconds without a forced kill. All 143 snapshot
+IDs remain unchanged; engine writes/commits are zero. CLI CPU is 1,164.74 seconds
+and peak RSS 33,063,352 KiB. The 603.956-second daemon window records 743.11 CPU
+seconds, 41,981 GETs, 66.690693 aggregate GET-service seconds and
+42,909,993,282 logical body bytes. No sampler errors occurred.
+
+Catalog startup varies substantially from r5, before the changed code executes,
+so this does not establish a production runtime win. The manifest still does
+not complete. Its next measured CPU cost is exclusion matching: filter.match
+accounts cumulatively for 251.52 of 1,159.53 sampled CPU seconds; later stacks
+also show selection-lock contention. Optimize matching semantics-preservingly
+before considering callback concurrency. Evidence is retained under
+`db.test/backup-cwalk-metadata-2026-09-25-r6`.
+
 ## Cwalk cancellation and archiver handoff, r4/r5 (2026-09-24)
 
 After catalog parallelism reached source traversal, cancellation required fixes

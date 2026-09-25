@@ -1122,14 +1122,17 @@ func (arch *Archiver) prepareCWalkManifest(ctx context.Context, targets []string
 		queueCapacity,
 		func(item string, _ os.FileInfo) bool {
 			selectMutex.Lock()
-			defer selectMutex.Unlock()
-			if !arch.SelectByName(item) {
+			selected := arch.SelectByName(item)
+			selectMutex.Unlock()
+			if !selected {
 				return true
 			}
 			info, err := arch.FS.Lstat(item)
 			if err != nil {
 				return false
 			}
+			selectMutex.Lock()
+			defer selectMutex.Unlock()
 			return !arch.MandatorySelect(item, info, arch.FS) || !arch.Select(item, info, arch.FS)
 		},
 	)
