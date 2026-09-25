@@ -1,5 +1,40 @@
 # Phase 33 Production Benchmark Evidence
 
+## Directory-stat reuse not retained, r16 (2026-09-25)
+
+After committing marker prefetch as `1390dea6f`, a second candidate reused
+cwalk's directory `os.FileInfo` via the existing `ExtendedStat` converter. An
+explicit filesystem capability allowed plain local filesystems and transparent
+telemetry wrappers to opt in; mapped and custom filesystems kept normal Lstat.
+Tests verified full extended-metadata equality, wrapper fallback and telemetry
+request accounting, plus existing cwalk selection/cancellation race checks.
+Actual archiving still read fresh metadata through the normal path.
+
+The unchanged cwalk32/four-root/52-source/HDD-NFS r16 reaches2,843,351 directories
+and14,116,305 entries at345 seconds of manifest time, completing3 roots. Against
+the preceding marker-prefetch r15, that is only0.7% more directories and0.8%
+fewer entries, smaller than candidate repetition variation. The added capability
+and cross-module code are not justified by this result and are removed. Marker
+prefetch remains unchanged. The exact experimental patch/binary remain in the
+artifact directory for reproducibility.
+
+R16 exits124 cleanly after603.518 seconds. Its389.366-second manifest phase
+reads3,195,068 directories and lists15,994,320 entries, completing3/52 roots;
+no manifest or backup completes. CLI CPU is1,786.04 seconds, peak RSS31,967,128KiB.
+Daemon CPU is730.61 seconds over604.264 seconds; metadata records41,998 GETs,
+132.228141 aggregate service seconds and42,912,913,929 logical body bytes.
+All143 snapshot IDs are unchanged, engine writes/commits are zero, no active
+transactions/intents remain, scratch is empty, and there are no sampler errors
+or forced kills. Focused cwalk/marker race checks pass after removing the
+experiment, excluding the known root-only scanner permission fixture.
+
+Artifacts:
+`/volume2/NASDA2/rustic/db.test/backup-cwalk-stat-reuse-2026-09-25-r16/`.
+Remaining ideas are not exhausted: avoiding unnecessary cwalk file metadata
+reads and replacing the whole-manifest startup barrier need separate correctness
+work. This run does not establish completed-backup runtime or justify a longer
+runtime authorization.
+
 ## Concurrent marker prefetch, r14/r15 (2026-09-25)
 
 R13 identified marker-file `Lstat` under the archiver selection lock. The marker
