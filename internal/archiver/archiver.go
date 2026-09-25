@@ -177,7 +177,8 @@ type Options struct {
 	CWalkQueue int
 	// CWalkRoots optionally limits manifest discovery to selective changed roots.
 	// Empty means the snapshot targets.
-	CWalkRoots []string
+	CWalkRoots    []string
+	CWalkProgress func(crawl.ManifestProgress)
 }
 
 // applyDefaults returns a copy of o with the default options set for all unset
@@ -1115,7 +1116,7 @@ func (arch *Archiver) prepareCWalkManifest(ctx context.Context, targets []string
 	if len(roots) == 0 {
 		roots = targets
 	}
-	manifest, err := crawl.BuildDirectoryManifest(
+	manifest, err := crawl.BuildDirectoryManifestWithProgress(
 		ctx,
 		roots,
 		arch.Options.CWalkConcurrency,
@@ -1138,6 +1139,7 @@ func (arch *Archiver) prepareCWalkManifest(ctx context.Context, targets []string
 			defer selectMutex.Unlock()
 			return !arch.MandatorySelect(item, info, arch.FS) || !arch.Select(item, info, arch.FS)
 		},
+		arch.Options.CWalkProgress,
 	)
 	if err != nil {
 		debug.Log("cwalk manifest unavailable, using sequential traversal: %v", err)

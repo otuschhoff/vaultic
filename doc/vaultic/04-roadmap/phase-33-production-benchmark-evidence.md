@@ -1,5 +1,32 @@
 # Phase 33 Production Benchmark Evidence
 
+## Manifest progress observability, r10 (2026-09-25)
+
+An optional serialized manifest observer now reports roots completed, successful
+directory reads, entries listed and phase duration at start, every five seconds,
+and after traversal/writer shutdown. The reporter is joined before returning;
+the final `finished` flag does not imply `complete`. Backup JSON emits distinct
+`cwalk_status` records, never counting these entries as archived files. Tests
+cover exact successful counts and canceled/incomplete termination; crawl,
+backupcmd and focused archiver cwalk race tests pass (excluding the documented
+root-only permission fixture).
+
+The unchanged explicit cwalk32/52-root/HDD-NFS r10 attempt exits124 cleanly after
+603.03 seconds. Manifest preparation runs403.480 seconds, reading1,055,833
+directories and listing4,998,943 entries while completing only2/52 roots.
+Final status is `finished:true,complete:false`. The catalog phase ends near
+200 seconds. CLI CPU is1,028.31 seconds and peak RSS29,833,424KiB; daemon CPU
+is740.60 seconds over603.808 seconds. Metadata records42,012 GETs,
+65.494816 aggregate service seconds and42,973,515,907 logical body bytes.
+All143 snapshot IDs are unchanged; metadata writes/commits remain zero.
+No sampler errors or forced kill occurred, and no backup completed.
+
+Artifacts: `/volume2/NASDA2/rustic/db.test/backup-cwalk-progress-2026-09-25-r10/`.
+The baseline now exposes completed discovery work. The next candidate is bounded
+root overlap under the existing total cwalk worker budget; comparisons must
+acknowledge that different roots have different entry/directory ratios and that
+only a completed manifest or backup proves end-to-end improvement.
+
 ## Directory-only manifest selection, r9 (2026-09-25)
 
 The cwalk manifest stores directory entry names before its ignore callback and

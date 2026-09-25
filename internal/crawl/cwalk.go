@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/otuschhoff/cwalk"
@@ -23,11 +25,37 @@ type directoryRecord struct {
 	names []string
 }
 
+type ManifestProgress struct {
+	RootsTotal      uint64  `json:"roots_total"`
+	RootsCompleted  uint64  `json:"roots_completed"`
+	DirectoriesRead uint64  `json:"directories_read"`
+	EntriesListed   uint64  `json:"entries_listed"`
+	SecondsElapsed  float64 `json:"seconds_elapsed"`
+	Finished        bool    `json:"finished"`
+	Complete        bool    `json:"complete"`
+}
+
+type manifestCounters struct {
+	roots       atomic.Uint64
+	directories atomic.Uint64
+	entries     atomic.Uint64
+}
+
 func BuildDirectoryManifest(
 	ctx context.Context,
 	roots []string,
 	workers, queueCapacity int,
 	ignore func(string, os.FileInfo) bool,
+) (*DirectoryManifest, error) {
+	return BuildDirectoryManifestWithProgress(ctx, roots, workers, queueCapacity, ignore, nil)
+}
+
+func BuildDirectoryManifestWithProgress(
+	ctx context.Context,
+	roots []string,
+	workers, queueCapacity int,
+	ignore func(string, os.FileInfo) bool,
+	report func(ManifestProgress),
 ) (*DirectoryManifest, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -45,6 +73,16 @@ func BuildDirectoryManifest(
 		return nil, fmt.Errorf("open cwalk manifest: %w", err)
 	}
 	manifest := &DirectoryManifest{database: database, path: directory}
+	started := time.Now()
+	counters := &manifestCounters{}
+	emitProgress := func(finished, complete bool) {
+		if report != nil {
+			report(ManifestProgress{RootsTotal: uint64(len(roots)), RootsCompleted: counters.roots.Load(),
+				DirectoriesRead: counters.directories.Load(), EntriesListed: counters.entries.Load(),
+				SecondsElapsed: time.Since(started).Seconds(), Finished: finished, Complete: complete})
+		}
+	}
+	emitProgress(false, false)
 	walkCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	records := make(chan directoryRecord, queueCapacity)
@@ -64,18 +102,27 @@ func BuildDirectoryManifest(
 	monitorExited := make(chan struct{})
 	go func() {
 		defer close(monitorExited)
-		select {
-		case <-walkCtx.Done():
-			stopWalkers()
-		case <-monitorDone:
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-walkCtx.Done():
+				stopWalkers()
+				return
+			case <-monitorDone:
+				return
+			case <-ticker.C:
+				emitProgress(false, false)
+			}
 		}
 	}()
 
-	walkErr := walkManifestRoots(walkCtx, cancel, roots, workers, ignore, records, &walkersMu, &walkers)
+	walkErr := walkManifestRoots(walkCtx, cancel, roots, workers, ignore, records, &walkersMu, &walkers, counters)
 	close(monitorDone)
 	<-monitorExited
 	close(records)
 	writeErr := <-writeDone
+	emitProgress(true, walkErr == nil && writeErr == nil && ctx.Err() == nil)
 	if walkErr != nil || writeErr != nil || ctx.Err() != nil {
 		_ = manifest.Close() // Preserve the walk/write failure; manifest cleanup cannot make it usable.
 		if ctx.Err() != nil {
@@ -128,6 +175,7 @@ func walkManifestRoots(
 	records chan<- directoryRecord,
 	walkersMu *sync.Mutex,
 	walkers *[]*cwalk.Walker,
+	counters *manifestCounters,
 ) error {
 	for _, root := range roots {
 		if err := ctx.Err(); err != nil {
@@ -138,13 +186,14 @@ func walkManifestRoots(
 			return err
 		}
 		if !info.IsDir() {
+			counters.roots.Add(1)
 			continue
 		}
 		absoluteRoot, err := filepath.Abs(root)
 		if err != nil {
 			return err
 		}
-		walker := newManifestWalker(ctx, cancel, absoluteRoot, workers, ignore, records)
+		walker := newManifestWalker(ctx, cancel, absoluteRoot, workers, ignore, records, counters)
 		walkersMu.Lock()
 		*walkers = append(*walkers, walker)
 		walkersMu.Unlock()
@@ -155,6 +204,7 @@ func walkManifestRoots(
 		if err := walker.Run(); err != nil {
 			return err
 		}
+		counters.roots.Add(1)
 	}
 	return nil
 }
@@ -166,6 +216,7 @@ func newManifestWalker(
 	workers int,
 	ignore func(string, os.FileInfo) bool,
 	records chan<- directoryRecord,
+	counters *manifestCounters,
 ) *cwalk.Walker {
 	var walker *cwalk.Walker
 	var resizeOnce sync.Once
@@ -184,6 +235,8 @@ func newManifestWalker(
 		if err != nil {
 			return
 		}
+		counters.entries.Add(uint64(len(entries)))
+		counters.directories.Add(1)
 		names := make([]string, len(entries))
 		for index, entry := range entries {
 			names[index] = entry.Name()

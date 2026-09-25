@@ -703,6 +703,19 @@ func configureArchiver(ctx context.Context, run *backupRun) error {
 	options := archiver.Options{ReadConcurrency: run.options.ReadConcurrency}
 	if run.options.UseCWalk && (!run.pathdiffPlan.Selective || len(run.pathdiffPlan.ChangedDirs) > 0) {
 		options.CWalkConcurrency, options.CWalkQueue = run.options.CWalkConcurrency, 4096
+		if !run.globalOptions.Quiet {
+			options.CWalkProgress = func(status crawl.ManifestProgress) {
+				if run.globalOptions.JSON {
+					run.term.Print(ui.ToJSONString(struct {
+						MessageType string `json:"message_type"`
+						crawl.ManifestProgress
+					}{MessageType: "cwalk_status", ManifestProgress: status}))
+				} else {
+					run.printer.V("cwalk: %d/%d roots, %d directories, %d entries listed in %.1fs\n",
+						status.RootsCompleted, status.RootsTotal, status.DirectoriesRead, status.EntriesListed, status.SecondsElapsed)
+				}
+			}
+		}
 		if run.pathdiffPlan.Selective {
 			options.CWalkRoots = run.pathdiffPlan.ChangedDirs
 		}

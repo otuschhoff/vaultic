@@ -45,6 +45,53 @@ func TestBuildDirectoryManifestCancellationCleansTemporaryState(t *testing.T) {
 	}
 }
 
+func TestManifestProgressCompletionAndCancellation(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "complete", true: "canceled"}[canceled], func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.Mkdir(filepath.Join(root, "child"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "child", "file"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var updates []ManifestProgress
+			manifest, err := BuildDirectoryManifestWithProgress(ctx, []string{root}, 4, 1,
+				func(string, os.FileInfo) bool {
+					if canceled {
+						cancel()
+					}
+					return false
+				}, func(status ManifestProgress) { updates = append(updates, status) })
+			if canceled {
+				if !errors.Is(err, context.Canceled) || manifest != nil {
+					t.Fatalf("expected canceled manifest, got %v, %v", manifest, err)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer manifest.Close()
+			}
+			if len(updates) < 2 || updates[0].DirectoriesRead != 0 || updates[0].Finished {
+				t.Fatalf("missing initial progress: %v", updates)
+			}
+			final := updates[len(updates)-1]
+			if !final.Finished || final.Complete == canceled || final.RootsTotal != 1 || final.SecondsElapsed < 0 {
+				t.Fatalf("incorrect completion progress: %+v", final)
+			}
+			if !canceled && (final.RootsCompleted != 1 || final.DirectoriesRead != 2 || final.EntriesListed != 2) {
+				t.Fatalf("incorrect final counts: %+v", final)
+			}
+			if canceled && final.RootsCompleted != 0 {
+				t.Fatalf("canceled root counted as complete: %+v", final)
+			}
+		})
+	}
+}
+
 func TestBuildDirectoryManifest(t *testing.T) {
 	root := t.TempDir()
 	for _, directory := range []string{"a", "a/nested", "b", "ignored"} {

@@ -75,6 +75,12 @@ defaults to 32. Use ``--no-cwalk`` to restore the legacy traversal. A bounded
 internal queue applies backpressure to concurrent callbacks. Non-local filesystem
 implementations use the standard scanner automatically.
 
+JSON output includes ``cwalk_status`` records during manifest preparation, with
+total/completed roots, successful directory reads, listed entries and elapsed
+seconds. These are discovery counters, not archived files or transferred bytes.
+The final record has ``finished: true``; ``complete`` is true only if the entire
+manifest succeeds. A canceled manifest reports ``complete: false``.
+
 ``--use-pathdiff`` enables selective parent-subtree reuse and requires cwalk
 (the default), ``--pathdiff-endpoint PATH``, and ``--pathdiff-svm-map FILE``.
 It cannot be combined with ``--no-cwalk``. The endpoint is the Unix control
