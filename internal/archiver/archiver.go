@@ -1120,7 +1120,10 @@ func (arch *Archiver) prepareCWalkManifest(ctx context.Context, targets []string
 		roots,
 		arch.Options.CWalkConcurrency,
 		queueCapacity,
-		func(item string, _ os.FileInfo) bool {
+		func(item string, entryInfo os.FileInfo) bool {
+			if !entryInfo.IsDir() {
+				return false
+			}
 			selectMutex.Lock()
 			selected := arch.SelectByName(item)
 			selectMutex.Unlock()

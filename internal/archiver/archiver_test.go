@@ -56,6 +56,39 @@ func TestSnapshotCWalkCancellationDoesNotStartUploader(t *testing.T) {
 	}
 }
 
+func TestCWalkManifestSelectsOnlyDirectories(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "directory"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "file"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	arch := New(nil, fs.NewLocal(), Options{CWalkConcurrency: 4})
+	arch.SelectByName = func(name string) bool {
+		if filepath.Base(name) == "file" {
+			t.Error("manifest preselected a file")
+		}
+		return true
+	}
+	arch.Select = func(_ string, info *fs.ExtendedFileInfo, _ fs.FS) bool {
+		if !info.Mode.IsDir() {
+			t.Error("manifest evaluated file metadata selection")
+		}
+		return true
+	}
+	arch.MandatorySelect = arch.Select
+	cleanup := arch.prepareCWalkManifest(t.Context(), []string{root})
+	defer cleanup()
+	if arch.cwalkManifest == nil {
+		t.Fatal("manifest was not built")
+	}
+	names, found, err := arch.cwalkManifest.Names(root)
+	if err != nil || !found || len(names) != 2 || names[0] != "directory" || names[1] != "file" {
+		t.Fatalf("manifest lost file names: %v, %v, %v", names, found, err)
+	}
+}
+
 type cwalkMetadataFS struct {
 	fs.FS
 	read func(string) (*fs.ExtendedFileInfo, error)
@@ -76,7 +109,7 @@ func TestCWalkManifestOverlapsMetadataReads(t *testing.T) {
 		if err := os.Mkdir(path, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(path, "file"), nil, 0o600); err != nil {
+		if err := os.Mkdir(filepath.Join(path, "child"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -84,7 +117,7 @@ func TestCWalkManifestOverlapsMetadataReads(t *testing.T) {
 	entered := make(chan struct{}, 4)
 	release := make(chan struct{})
 	filesystem := cwalkMetadataFS{FS: local, read: func(name string) (*fs.ExtendedFileInfo, error) {
-		if filepath.Base(name) == "file" {
+		if filepath.Base(name) == "child" {
 			entered <- struct{}{}
 			<-release
 		}

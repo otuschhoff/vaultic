@@ -2,6 +2,7 @@ package archiver
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -80,6 +81,41 @@ func TestArchiverCWalkTraversal(t *testing.T) {
 		t.Fatal(err)
 	}
 	TestEnsureSnapshot(t, repo, snapshotID, source)
+}
+
+func TestArchiverCWalkSelectionParity(t *testing.T) {
+	source := TestDir{
+		"keep": TestDir{
+			"allowed":   TestFile{Content: "retained"},
+			"mandatory": TestFile{Content: "excluded by mandatory selection"},
+		},
+		"skipdir":  TestDir{"hidden": TestFile{Content: "excluded directory"}},
+		"skipfile": TestFile{Content: "excluded by name"},
+		"rootfile": TestFile{Content: "retained root"},
+	}
+	for _, workers := range []int{0, 4} {
+		t.Run(fmt.Sprint(workers), func(t *testing.T) {
+			root, repo := prepareTempdirRepoSrc(t, source)
+			back := rtest.Chdir(t, root)
+			defer back()
+			arch := New(repo, fs.NewLocal(), Options{CWalkConcurrency: workers})
+			arch.SelectByName = func(name string) bool {
+				base := filepath.Base(name)
+				return base != "skipdir" && base != "skipfile"
+			}
+			arch.MandatorySelect = func(name string, _ *fs.ExtendedFileInfo, _ fs.FS) bool {
+				return filepath.Base(name) != "mandatory"
+			}
+			_, snapshotID, _, err := arch.Snapshot(t.Context(), []string{"."}, SnapshotOptions{Time: time.Now()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			TestEnsureSnapshot(t, repo, snapshotID, TestDir{
+				"keep":     TestDir{"allowed": TestFile{Content: "retained"}},
+				"rootfile": TestFile{Content: "retained root"},
+			})
+		})
+	}
 }
 
 func TestArchiverMandatorySelectRejectsExplicitTarget(t *testing.T) {

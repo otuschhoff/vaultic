@@ -1,5 +1,36 @@
 # Phase 33 Production Benchmark Evidence
 
+## Directory-only manifest selection, r9 (2026-09-25)
+
+The cwalk manifest stores directory entry names before its ignore callback and
+the archiver applies file selection again when saving those names. File and
+symlink selection during manifest construction therefore cannot prune traversal
+and needlessly repeats metadata reads and marker-file checks. The prepass now
+evaluates selection only for directories. Directory pruning, mandatory selection
+during archiving, all file names, and actual snapshot filtering remain intact.
+Tests assert that prepass callbacks see only directories, metadata reads still
+overlap, and sequential/cwalk snapshots contain identical allowed files under
+name and mandatory exclusions. Focused cwalk race checks pass.
+
+R9 uses the unchanged explicit cwalk32/52-root/HDD-NFS configuration. Catalog
+reads plateau near 205 seconds, but manifest preparation remains incomplete at
+the cap. Exit124 occurs at603.021 seconds without forced kill; CLI CPU is
+1,005.26 seconds and peak RSS29,740,536KiB. The603.775-second daemon window
+records732.64 CPU seconds,42,038 GETs,65.352917 aggregate GET-service seconds
+and43,037,972,402 logical body bytes. All143 snapshot IDs remain unchanged;
+engine writes/commits and sampler errors are zero. The late stack is now in
+directory reads and directory-marker Lstat checks. CPU is lower than r8's
+1,072.40 seconds, but completed manifest work is not counted, so this is not
+an equal-work throughput claim. Evidence is retained under
+`db.test/backup-cwalk-dirselect-2026-09-25-r9`.
+
+The next measurement requirement is manifest progress (directories, entries,
+completed roots and phase duration), followed by matched comparisons. Remaining
+design candidates include bounded overlap across independent roots and an
+incremental manifest pipeline. The latter must preserve callback synchronization,
+error/fallback semantics, cancellation cleanup and snapshot publication ordering;
+it is not equivalent to simply running the existing prepass in a goroutine.
+
 ## Recursive component filter reduction, r7/r8 (2026-09-25)
 
 The r6 profile exposed recursive wildcard expansion in exclusions. Patterns
