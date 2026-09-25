@@ -1,5 +1,73 @@
 # Phase 33 Production Benchmark Evidence
 
+## Right-sized decrypted range buffers, R24 (2026-09-25)
+
+Tracing R23's daemon memory growth found a concrete retained-allocation problem:
+EncryptedObjectStore returned a small plaintext range using `Bytes::slice` on
+the complete decrypted encryption chunk. A downstream cache could retain the
+whole allocation while accounting only for the short returned range. The wrapper
+now copies partial ranges into right-sized Bytes buffers. Full selected chunks
+still use the existing zero-copy path. Authentication, ciphertext range fetching,
+encryption format and cache/concurrency settings are unchanged.
+
+The regression writes nonuniform plaintext with64KiB chunks and verifies exact
+content, returned ranges and retained allocation capacity for64-byte reads within
+a chunk, across a chunk boundary and at the object end. All16 encryption tests
+pass, including tamper/truncation, cross-repository authentication, key rotation,
+range/object-store semantics and unique-ciphertext allocation reuse. All108 Rust
+library and193 daemon tests pass serially; the exact release also passes three
+native Go race repetitions covering transactions, sessions, publication fences,
+atomic snapshot export, recovery and encrypted blob/overlay reads.
+
+The user explicitly approved deployment and the next capped comparison. The
+quiescent epoch57 writer was demoted before executable replacement. The unchanged
+service now runs PID1217457 at epoch58 with SHA256
+`3a825c277b2273627ca9349122e8c77b32f7ac91710a888411c4765fd6531ccd`.
+Rollback executable, candidate, source/test evidence, hashes and snapshot sets
+are retained in
+`/volume2/NASDA2/rustic/db.test/daemon-range-buffers-20260925-sLQ3Gj`.
+The service-unit hash and all143 snapshot IDs were unchanged after restart.
+
+R24 uses the exact R23/R22 profiling CLI,52 roots, cwalk32, two file readers,
+four lookup slots,64MiB result cache, exclusions and600s cap/45s grace. Exact
+binaries, source delta, profiles, samples and analysis are in
+`/volume2/NASDA2/rustic/db.test/backup-range-buffers-20260925-r24-58gVIl`.
+
+| Metric | R23 sliced buffers | R24 right-sized buffers |
+| --- | --- | --- |
+| Daemon sampled peak RSS |35.994GiB|1.014GiB|
+| Daemon post-run RSS |35.646GiB|0.656GiB|
+| Files at600s |50,754|48,847|
+| Logical bytes at600s |98,973,507,929|93,604,158,848|
+| Mean size RPC |18.714ms|19.879ms|
+| CLI peak RSS |1,320,520KiB|1,300,616KiB|
+| CLI /daemon CPU |709.96s /4043.2s|695.24s /4614.22s|
+| Metadata-object GETs |714,816|686,602|
+| Metadata-object body bytes |1,697,757,934,919|1,614,533,514,696|
+| Aggregate transaction-slot wait |0.005764s|0.007313s|
+| Wrapper exit /duration |124 /626.438s|124 /633.018s|
+
+Both daemons started cold after restart, at0.067GiB and0.039GiB RSS respectively.
+R24's result cache peaked at119,482 entries (22,940,544 accounted bytes,34.2%
+capacity), with zero evictions and zero location RPCs. All119,486 size RPCs still
+carried one handle. Aggregate overlapping size-RPC time was2375.311s. Probe hits
+were150,239, including32,362 negative hits, with490,214 misses.
+
+All143 snapshot IDs remained unchanged; no backup snapshot completed. There were
+15,845 engine writes and14,137 commits. Final writer state was read-write at
+epoch58 with zero active transactions/intents. Scratch was empty and no sampler
+errors occurred. Cancellation finished within grace, about33s after the cap,
+with final metrics emitted.
+
+Decision: retain the small allocation fix. The measured daemon-memory reduction
+is about97%, supported by a direct allocation-capacity regression. This is not a
+runtime speedup: file progress was about4% lower, mean RPC latency slightly higher
+and daemon CPU higher. Repeated-run warmth/prior writes/reached-data differences
+remain confounders. Ciphertext bytes per requested handle are essentially
+unchanged; the1.61TB of metadata traffic remains the next bottleneck to address.
+The fix bounds the allocation retained by a partial returned range, not total
+daemon memory for every workload. On-demand stays experimental.
+
 ## Concurrent pinned-transaction reads, R23 (2026-09-25)
 
 Following R22's single-handle admission stalls exposed a server-side bottleneck:

@@ -53,6 +53,24 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn partial_range_does_not_retain_decrypted_chunk_allocation() {
+        let encrypted = store(Arc::new(InMemory::new()), "repo-a").with_chunk_size(64 * 1024);
+        let location = Path::from("compacted/small-range.sst");
+        let plaintext = Bytes::from((0..128 * 1024).map(|index| (index % 251) as u8).collect::<Vec<_>>());
+        encrypted.put(&location, plaintext.clone().into()).await.unwrap();
+        for range in [128..192, 65504..65568, 131008..131072] {
+            let mut options = GetOptions::default();
+            options.range = Some(GetRange::Bounded(range.start as u64..range.end as u64));
+            let result = encrypted.get_opts(&location, options).await.unwrap();
+            assert_eq!(result.range, range.start as u64..range.end as u64);
+            let bytes = result.bytes().await.unwrap();
+            assert_eq!(bytes, plaintext.slice(range.clone()));
+            let owned = bytes.try_into_mut().expect("range must own its allocation");
+            assert_eq!(owned.capacity(), range.len());
+        }
+    }
+
     fn rustcrypto_encrypt(location: &Path, plaintext: &[u8]) -> Bytes {
         let header = Header {
             key_version: 1,

@@ -719,12 +719,12 @@ impl ObjectStore for EncryptedObjectStore {
                 .decrypt_chunks(location, header, first_chunk, encrypted.bytes().await?)
                 .await?;
             let relative_start = range.start - first_chunk * header.chunk_size;
-            (
-                chunks.slice(relative_start..relative_start + range.len()),
-                encrypted_meta,
-                attributes,
-                extensions,
-            )
+            let payload = if range.len() == chunks.len() {
+                chunks
+            } else {
+                Bytes::copy_from_slice(&chunks[relative_start..relative_start + range.len()])
+            };
+            (payload, encrypted_meta, attributes, extensions)
         };
         let meta = plaintext_meta_from_header(encrypted_meta, header)?;
         Ok(GetResult {
