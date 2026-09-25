@@ -663,9 +663,22 @@ func (reconciler *Reconciler) publishHardlinks(
 }
 
 func (reconciler *Reconciler) publishDirectories(directories []preparedItem, published map[string]publishedItem) {
+	if err := reconciler.ctx.Err(); err != nil {
+		reconciler.fail("directories", err)
+		return
+	}
 	if err := validateLiveDirectoryParents(directories); err != nil {
 		reconciler.fail("directories", err)
 		return
+	}
+	childrenByParent := make(map[string][]string)
+	for sourcePath := range published {
+		if err := reconciler.ctx.Err(); err != nil {
+			reconciler.fail("directories", err)
+			return
+		}
+		parent := reconciler.filesystem.Dir(sourcePath)
+		childrenByParent[parent] = append(childrenByParent[parent], sourcePath)
 	}
 	sort.Slice(directories, func(left, right int) bool {
 		leftDepth, rightDepth := pathDepth(directories[left].sourcePath), pathDepth(directories[right].sourcePath)
@@ -675,11 +688,17 @@ func (reconciler *Reconciler) publishDirectories(directories []preparedItem, pub
 		return directories[left].sourcePath < directories[right].sourcePath
 	})
 	for _, directory := range directories {
+		if err := reconciler.ctx.Err(); err != nil {
+			reconciler.fail(directory.sourcePath, err)
+			return
+		}
 		children := make([]schema.DirectoryChild, 0)
-		for sourcePath, child := range published {
-			if reconciler.filesystem.Dir(sourcePath) != directory.sourcePath {
-				continue
+		for _, sourcePath := range childrenByParent[directory.sourcePath] {
+			if err := reconciler.ctx.Err(); err != nil {
+				reconciler.fail(directory.sourcePath, err)
+				return
 			}
+			child := published[sourcePath]
 			if child.identity.fsid != directory.identity.fsid {
 				reconciler.deferred.Add(1)
 				if err := reconciler.writeDeferredDebt(child.snapshotPath, fmt.Errorf("cross-filesystem directory child")); err != nil {
@@ -722,6 +741,10 @@ func (reconciler *Reconciler) publishDirectories(directories []preparedItem, pub
 		} else {
 			reconciler.changed.Add(1)
 			reconciler.reconciled.Add(1)
+		}
+		if _, exists := published[directory.sourcePath]; !exists {
+			parent := reconciler.filesystem.Dir(directory.sourcePath)
+			childrenByParent[parent] = append(childrenByParent[parent], directory.sourcePath)
 		}
 		published[directory.sourcePath] = publishedItem{
 			identity:     directory.identity,

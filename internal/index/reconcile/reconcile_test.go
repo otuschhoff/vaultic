@@ -666,6 +666,82 @@ func TestMetadataAndContentChangesPreserveRevisions(t *testing.T) {
 	}
 }
 
+type countedParentFS struct {
+	statFS
+	calls  int
+	cancel context.CancelFunc
+}
+
+func (filesystem *countedParentFS) Dir(sourcePath string) string {
+	filesystem.calls++
+	if filesystem.cancel != nil {
+		filesystem.cancel()
+	}
+	return filesystem.statFS.Dir(sourcePath)
+}
+
+func TestPublishDirectoriesIndexesChildren(t *testing.T) {
+	const directoryCount = 16
+	const fileCount = 128
+	store := newFakeStore()
+	filesystem := &countedParentFS{statFS: testFilesystem()}
+	reconciler := &Reconciler{ctx: context.Background(), filesystem: filesystem, store: store}
+	published := make(map[string]publishedItem)
+	directories := make([]preparedItem, 0, directoryCount+1)
+	for index := 0; index < directoryCount; index++ {
+		inode := uint64(index + 10)
+		directories = append(directories, preparedItem{
+			workItem: workItem{sourcePath: fmt.Sprintf("/source/d%02d", index), snapshotPath: fmt.Sprintf("/snapshot/renamed%02d", index)},
+			identity: identity{fsid: 1, inode: inode}, parent: identity{fsid: 1, inode: 1}, stat: dirInfo(1, inode),
+		})
+	}
+	directories = append(directories, preparedItem{
+		workItem: workItem{sourcePath: "/source", snapshotPath: "/snapshot"},
+		identity: identity{fsid: 1, inode: 1}, parent: identity{fsid: 1, inode: 2}, stat: dirInfo(1, 1),
+	})
+	for index := 0; index < fileCount; index++ {
+		inode := uint64(index + 1000)
+		published[fmt.Sprintf("/source/d%02d/f%03d", index%directoryCount, index)] = publishedItem{
+			identity: identity{fsid: 1, inode: inode}, key: schema.InodeRevisionKey(1, inode, 1),
+			typeID: nodeType(data.NodeTypeFile), snapshotPath: fmt.Sprintf("/snapshot/renamed%02d/file%03d", index%directoryCount, index),
+		}
+	}
+	reconciler.publishDirectories(directories, published)
+	if len(reconciler.errors) != 0 {
+		t.Fatal(reconciler.errors)
+	}
+	if filesystem.calls > 2*(fileCount+len(directories)) {
+		t.Fatalf("parent lookups are not linear: %d", filesystem.calls)
+	}
+	for index := 0; index < directoryCount; index++ {
+		record, err := schema.UnmarshalDirectoryRevision(currentValue(t, store, schema.CurrentDirectoryKey(1, uint64(index+10))))
+		if err != nil || len(record.Children) != fileCount/directoryCount {
+			t.Fatalf("directory %d: children=%d err=%v", index, len(record.Children), err)
+		}
+		for _, child := range record.Children {
+			if !strings.HasPrefix(child.Name, "file") {
+				t.Fatalf("source basename leaked into snapshot: %q", child.Name)
+			}
+		}
+	}
+	root, err := schema.UnmarshalDirectoryRevision(currentValue(t, store, schema.CurrentDirectoryKey(1, 1)))
+	if err != nil || len(root.Children) != directoryCount {
+		t.Fatalf("root children=%d err=%v", len(root.Children), err)
+	}
+}
+
+func TestPublishDirectoriesCancelsDuringParentIndex(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	filesystem := &countedParentFS{statFS: testFilesystem(), cancel: cancel}
+	reconciler := &Reconciler{ctx: ctx, filesystem: filesystem, store: newFakeStore()}
+	published := map[string]publishedItem{"/root/one": {}, "/root/two": {}}
+	reconciler.publishDirectories(nil, published)
+	if filesystem.calls != 1 || len(reconciler.errors) != 1 || !errors.Is(reconciler.errors[0], context.Canceled) {
+		t.Fatalf("calls=%d errors=%v", filesystem.calls, reconciler.errors)
+	}
+}
+
 func TestDirectoryMoveDeletionAndHardlink(t *testing.T) {
 	store := newFakeStore()
 	filesystem := testFilesystem()

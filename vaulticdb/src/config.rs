@@ -946,6 +946,17 @@ mod tests {
         assert_eq!(defaults.meta_cache_bytes, None);
 
         unsafe {
+            env::set_var("VAULTICDB_META_CACHE_BYTES", "1073741824");
+        }
+        let metadata_only = slatedb_tuning_from_env().unwrap();
+        assert_eq!(metadata_only.meta_cache_bytes, Some(1_073_741_824));
+        assert_eq!(metadata_only.block_cache_bytes, None);
+        assert_eq!(metadata_only.flush_interval, None);
+        assert_eq!(metadata_only.max_unflushed_bytes, None);
+        assert_eq!(metadata_only.l0_sst_size_bytes, None);
+        clear_slatedb_tuning_environment();
+
+        unsafe {
             env::set_var("VAULTICDB_WAL_FLUSH_INTERVAL", "500ms");
             env::set_var("VAULTICDB_MAX_UNFLUSHED_BYTES", "4294967296");
             env::set_var("VAULTICDB_L0_SST_SIZE_BYTES", "268435456");

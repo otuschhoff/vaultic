@@ -1,5 +1,86 @@
 # Phase 33 Production Benchmark Evidence
 
+## Metadata-cache sizing and linear directory publication, R27/R28 (2026-09-25)
+
+SlateDB's default split cache has512MiB for data blocks and128MiB shared by
+filters, indexes and table statistics. The user approved a temporary increase
+of only `VAULTICDB_META_CACHE_BYTES` to1073741824. Effective budgets were
+asserted before/after measurement. The daemon binary stayed at12f686c29 and
+no shared read-cache tier or persisted policy/quota setting changed. The existing
+parser regression now also verifies metadata-only tuning leaves other settings
+unspecified. All three tuning tests pass.
+
+R27 used the exact earlier profiling CLI,52 roots, explicit cwalk32, two file
+readers, four lookup slots,64MiB CLI result cache and600s cap/45s grace. Read
+volume fell sharply, but termination exceeded grace: the process was killed at
+645.009s with exit137. It emitted no final lookup statistics, retained encrypted
+scratch, and left one read transaction with zero write intents. The610s profile
+showed `Reconciler.Close` waiting while `publishDirectories` scanned the published
+map through `filesystem.Dir`. Each directory rescanned every published node and
+the scan did not check cancellation, yielding quadratic work at publication.
+
+Directory publication now indexes source paths by parent once and updates that
+index as child directories are published bottom-up. Child records are still read
+from the current published map; snapshot names and cross-filesystem handling are
+unchanged. Cancellation is checked before validation and during indexing and
+directory/child traversal. Parent grouping is linear in nodes/edges, plus the
+existing directory sort and serialization costs, with additional O(nodes) index
+memory. Tests verify nested child counts, snapshot rather than source basenames,
+a linear bound on parent lookups, and cancellation during index construction.
+
+After R27, normal non-forced demotion pruned the expired transaction and allowed
+restoration. Writer status alone does not prune idle transactions; normal demotion
+does. The daemon's default transaction idle timeout is300s. No active transaction
+was forcibly discarded. The user then explicitly approved R28 using the fixed
+CLI and the same temporary1GiB metadata budget, followed by restoration again.
+
+| Metric | R24:128MiB metadata | R27:1GiB metadata | R28:1GiB + publication fix |
+| --- | --- | --- | --- |
+| Last files status at or below600s |48,847|93,390|97,558|
+| Logical bytes at that status |93,604,158,848|164,921,783,316|169,557,219,997|
+| Metadata-object body bytes |1,614,533,514,696|32,494,687,655|33,820,343,954|
+| Daemon sampled peak RSS |1.014GiB|1.552GiB|1.553GiB|
+| Mean size RPC |19.879ms|unavailable|4.018ms|
+| Wrapper exit /duration |124 /633.018s|137 /645.009s|124 /601.791s|
+| Final transactions /intents |0 /0|1 /0|0 /0|
+| Scratch cleanup |empty|encrypted spill retained|empty|
+
+R28 issued218,506 single-handle size RPCs, with no CLI cache evictions or location
+RPCs. Metadata body bytes per handle fell from about13.51MB in R24 to154.8KB,
+about99% lower. Daemon CPU was361.09s versus4614.22s; CLI CPU was968.4s and peak
+RSS1,481,144KiB. There were14,367 engine writes and19,444 commits. The daemon
+recorded232,408 positive and1,419,453 negative point-filter checks, including
+10,992 false positives. Filter checks are not cache hit/miss counters. These
+measurements support metadata-cache sizing as the main read-amplification lever,
+but do not isolate filters versus index/statistics objects within that cache.
+
+R28 completed cancellation within the existing grace and emitted final metrics,
+with no sampler errors. It did not complete a snapshot: all143 snapshot IDs
+remained unchanged in both runs. File progress still plateaued late; the550s
+profile shows reconciliation waiting in `PublishReconciledRevision` -> `Commit`,
+with bounded queue backpressure reaching the archiver. Serialized revision
+publication/durability waits are the next bottleneck, not grounds to weaken
+atomic publication or durability. The directory fix addresses measured algorithmic
+work and cancellation, not every remaining publication wait.
+
+Repeated-run source warmth, earlier writes and reached-data differences remain
+confounders. R28 processed roughly twice R24's files and1.81 times its logical
+bytes, but this is a capped-window result, not a completed-backup speedup. Both
+cache experiments were restored as approved: current production is PID1243174,
+epoch66, read-write, zero transactions/intents,128MiB metadata/512MiB block cache.
+Executable SHA256 remains `3a825c277b2273627ca9349122e8c77b32f7ac91710a888411c4765fd6531ccd`.
+Unit, shared policy/quota hashes and snapshot IDs match the pre-trial baseline.
+No daemon binary replacement or permanent cache-default change was made.
+
+Artifacts, exact binaries, source patch, profiles and restoration evidence:
+`/volume2/NASDA2/rustic/db.test/backup-meta-cache-20260925-r27-sYjTlq` and
+`/volume2/NASDA2/rustic/db.test/backup-linear-publication-20260925-r28-0zW9b4`.
+All reconciliation tests pass three race repetitions, broad archiver/backup/index
+race gates pass, and native transaction/session/publication/recovery/encrypted-read
+tests pass three race repetitions against the exact measured daemon. New-code
+lint reports zero issues. The fixed CLI is archived in R28; no installed CLI
+or daemon executable was replaced. On-demand mode remains experimental.
+
 ## Cache policy diagnosis and gated R26 probe (2026-09-25)
 
 Read-only inspection resolved R25's policy failure. The configured metadata
