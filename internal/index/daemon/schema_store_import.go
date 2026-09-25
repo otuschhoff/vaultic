@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/index/schema"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -418,9 +419,30 @@ func packImportEvents(imported LegacyPackImport, oldRecord *schema.PackRecord, l
 }
 
 func (store *SchemaStore) MarkPackPublished(ctx context.Context, packID schema.ID) error {
+	return store.MarkPacksPublished(ctx, []schema.ID{packID})
+}
+
+func (store *SchemaStore) MarkPacksPublished(ctx context.Context, packIDs []schema.ID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(packIDs) > vaultic.BlobLookupBatchSize {
+		return fmt.Errorf("pack acknowledgment batch exceeds %d", vaultic.BlobLookupBatchSize)
+	}
+	if len(packIDs) == 0 {
+		return nil
+	}
+	unique := make([]schema.ID, 0, len(packIDs))
+	seen := make(map[schema.ID]struct{}, len(packIDs))
+	for _, id := range packIDs {
+		if _, found := seen[id]; !found {
+			unique = append(unique, id)
+			seen[id] = struct{}{}
+		}
+	}
 	backoff := 100 * time.Microsecond
 	for range revisionAllocationAttempts {
-		err := store.markPackPublishedOnce(ctx, packID)
+		err := store.markPacksPublishedOnce(ctx, unique)
 		if status.Code(err) != codes.Aborted {
 			return err
 		}
@@ -552,8 +574,11 @@ func (store *SchemaStore) markIndexPublishedOnce(
 	return checkpoint.Sequence, nil
 }
 
-func (store *SchemaStore) markPackPublishedOnce(ctx context.Context, packID schema.ID) error {
-	key := schema.PackKey(packID)
+func (store *SchemaStore) markPacksPublishedOnce(ctx context.Context, packIDs []schema.ID) error {
+	limit := min(vaultic.BlobLookupBatchSize, int(store.client.Limits().MaxBatchItems))
+	if limit == 0 {
+		return fmt.Errorf("daemon does not support pack acknowledgment batches")
+	}
 	transaction, err := store.client.Begin(ctx)
 	if err != nil {
 		return err
@@ -562,40 +587,51 @@ func (store *SchemaStore) markPackPublishedOnce(ctx context.Context, packID sche
 		rollbackTransaction(ctx, transaction)
 		return err
 	}
-	value, found, err := transaction.Get(ctx, key)
-	if err != nil {
-		return fail(err)
+	var puts []Mutation
+	var events []PackEvent
+	for start := 0; start < len(packIDs); start += limit {
+		end := min(start+limit, len(packIDs))
+		keys := make([][]byte, end-start)
+		for ordinal, id := range packIDs[start:end] {
+			keys[ordinal] = schema.PackKey(id)
+		}
+		values, found, err := transaction.MultiGet(ctx, keys)
+		if err != nil {
+			return fail(err)
+		}
+		for ordinal, id := range packIDs[start:end] {
+			if !found[ordinal] {
+				return fail(fmt.Errorf("published pack is missing"))
+			}
+			record, err := schema.UnmarshalPackRecord(values[ordinal].Value)
+			if err != nil {
+				return fail(err)
+			}
+			if record.Lifecycle == schema.PackPublished {
+				continue
+			}
+			if record.Lifecycle != schema.PackExportPending && record.Lifecycle != schema.PackImported {
+				return fail(fmt.Errorf("pack cannot transition from lifecycle %d to published", record.Lifecycle))
+			}
+			record.Lifecycle = schema.PackPublished
+			encoded, err := record.MarshalBinary()
+			if err != nil {
+				return fail(err)
+			}
+			puts = append(puts, Mutation{Key: keys[ordinal], Value: encoded})
+			events = append(events, PackEvent{PackID: id, Record: schema.PackHistoryEvent{
+				Type: schema.EventPublished, PackType: record.Type, PhysicalSize: record.PhysicalSize, PayloadSize: record.PayloadSize,
+			}})
+		}
 	}
-	if !found {
-		return fail(fmt.Errorf("published pack is missing"))
-	}
-	record, err := schema.UnmarshalPackRecord(value)
-	if err != nil {
-		return fail(err)
-	}
-	if record.Lifecycle == schema.PackPublished {
+	if len(puts) == 0 {
 		return transaction.Rollback(ctx)
 	}
-	if record.Lifecycle != schema.PackExportPending && record.Lifecycle != schema.PackImported {
-		return fail(fmt.Errorf("pack cannot transition from lifecycle %d to published", record.Lifecycle))
-	}
-	record.Lifecycle = schema.PackPublished
-	encoded, err := record.MarshalBinary()
+	history, err := packHistoryMutations(ctx, transaction, events)
 	if err != nil {
 		return fail(err)
 	}
-	puts := []Mutation{{Key: key, Value: encoded}}
-	history, err := packHistoryMutations(ctx, transaction, []PackEvent{{
-		PackID: packID,
-		Record: schema.PackHistoryEvent{
-			Type: schema.EventPublished, PackType: record.Type,
-			PhysicalSize: record.PhysicalSize, PayloadSize: record.PayloadSize,
-		},
-	}})
-	if err != nil {
-		return fail(err)
-	}
-	if err := transaction.WriteBatch(ctx, append(puts, history...), nil); err != nil {
+	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), append(puts, history...), nil); err != nil {
 		return fail(err)
 	}
 	if err := transaction.Commit(ctx); err != nil {

@@ -19,6 +19,13 @@ type MasterIndex struct {
 	pendingBlobs map[vaultic.BlobHandle]uint
 	idxMutex     sync.RWMutex
 	spill        func(context.Context, *Index) error
+	onSaved      func(context.Context, *Index) error
+}
+
+func (mi *MasterIndex) SetSavedIndexCallback(callback func(context.Context, *Index) error) {
+	mi.idxMutex.Lock()
+	defer mi.idxMutex.Unlock()
+	mi.onSaved = callback
 }
 
 func NewSpillingMasterIndex(spill func(context.Context, *Index) error) *MasterIndex {
@@ -770,6 +777,16 @@ func (mi *MasterIndex) saveIndex(ctx context.Context, r vaultic.SaverUnpacked[va
 			if err := mi.spill(ctx, idx); err != nil {
 				return fmt.Errorf("spill saved index: %w", err)
 			}
+		}
+		mi.idxMutex.RLock()
+		onSaved := mi.onSaved
+		mi.idxMutex.RUnlock()
+		if onSaved != nil {
+			if err := onSaved(ctx, idx); err != nil {
+				return fmt.Errorf("acknowledge saved index: %w", err)
+			}
+		}
+		if mi.spill != nil {
 			mi.idxMutex.Lock()
 			for ordinal, current := range mi.idx {
 				if current == idx {

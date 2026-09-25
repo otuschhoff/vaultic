@@ -2,10 +2,12 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 
 	"github.com/otuschhoff/vaultic/internal/index/schema"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 func historyTestStore(t *testing.T, repositoryID string) (*SchemaStore, context.Context) {
@@ -65,6 +67,93 @@ func historyPack(id schema.ID, blob schema.ID, payload uint64, lifecycle schema.
 			blob: {Locations: []schema.BlobLocation{{PackID: id, Length: uint32(payload), Type: schema.BlobData}}},
 		},
 	}
+}
+
+func TestMarkPacksPublishedAtomicHistory(t *testing.T) {
+	store, ctx := historyTestStore(t, t.Name())
+	ids := make([]schema.ID, 16)
+	for ordinal := range ids {
+		ids[ordinal] = daemonTestID(byte(ordinal + 1))
+		if err := store.PublishPack(ctx, historyPack(ids[ordinal], daemonTestID(byte(ordinal+80)), 100, schema.PackExportPending)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var baseline []schema.ID
+	for ordinal := range 16 {
+		id := daemonTestID(byte(ordinal + 32))
+		baseline = append(baseline, id)
+		if err := store.PublishPack(ctx, historyPack(id, daemonTestID(byte(ordinal+112)), 100, schema.PackExportPending)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	singleBefore, err := store.client.WriterStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range baseline {
+		if err := store.MarkPackPublished(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := store.client.WriterStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	singleWaits := before.Attribution.DurableWait.Attempts - singleBefore.Attribution.DurableWait.Attempts
+	if singleWaits != uint64(len(baseline)) {
+		t.Fatalf("single-pack durable waits=%d", singleWaits)
+	}
+	if err := store.MarkPacksPublished(ctx, []schema.ID{ids[0], daemonTestID(250)}); err == nil {
+		t.Fatal("missing pack accepted")
+	}
+	value, found, err := store.Get(ctx, schema.PackKey(ids[0]))
+	if err != nil || !found {
+		t.Fatalf("read pending pack: %v", err)
+	}
+	record, err := schema.UnmarshalPackRecord(value)
+	if err != nil || record.Lifecycle != schema.PackExportPending {
+		t.Fatalf("failed batch partially published: %+v %v", record, err)
+	}
+	limit := store.client.limits.MaxBatchItems
+	store.client.limits.MaxBatchItems = 2
+	for range 2 {
+		if err := store.MarkPacksPublished(ctx, append(append([]schema.ID(nil), ids...), ids[0])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store.client.limits.MaxBatchItems = limit
+	if err := store.MarkPacksPublished(ctx, make([]schema.ID, vaultic.BlobLookupBatchSize+1)); err == nil {
+		t.Fatal("oversized acknowledgment accepted")
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := store.MarkPacksPublished(canceled, ids); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation=%v", err)
+	}
+	if err := store.MarkPacksPublished(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.client.WriterStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waits := after.Attribution.DurableWait.Attempts - before.Attribution.DurableWait.Attempts
+	if waits != 1 || after.ActiveTransactions != 0 || after.ActiveWriteIntents != 0 {
+		t.Fatalf("durable waits=%d transactions=%d intents=%d", waits, after.ActiveTransactions, after.ActiveWriteIntents)
+	}
+	counts := make(map[schema.ID]int)
+	events, keys := readHistoryWithKeys(t, store, ctx)
+	for ordinal, event := range events {
+		if event.Type == schema.EventPublished {
+			counts[keys[ordinal].ID]++
+		}
+	}
+	for _, id := range ids {
+		if counts[id] != 1 {
+			t.Fatalf("pack %x has %d publication events", id, counts[id])
+		}
+	}
+	t.Logf("%d packs: single acknowledgments=%d durable waits, batch=%d; replay and rejected requests added none", len(ids), singleWaits, waits)
 }
 
 // TestPackTransitionsRecordHistory asserts that every catalog transition

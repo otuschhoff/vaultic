@@ -535,6 +535,123 @@ func TestAuthoritativePackInventoryAndRecovery(t *testing.T) {
 	}
 }
 
+type acknowledgmentTestSaver struct {
+	calls, failAt int
+	afterSave     func()
+}
+
+func (saver *acknowledgmentTestSaver) Connections() uint { return 1 }
+func (saver *acknowledgmentTestSaver) SaveUnpacked(_ context.Context, _ vaultic.FileType, data []byte) (vaultic.ID, error) {
+	saver.calls++
+	if saver.calls == saver.failAt {
+		return vaultic.ID{}, errors.New("index export failed")
+	}
+	if saver.afterSave != nil {
+		saver.afterSave()
+	}
+	return vaultic.Hash(data), nil
+}
+
+func TestAuthoritativeIncrementalAcknowledgment(t *testing.T) {
+	ctx := t.Context()
+	client, err := daemon.Ensure(ctx, daemon.Options{Socket: gcTestSocket(t), RepositoryID: t.Name(), DaemonPath: testGCDaemonPath(t), DataDir: t.TempDir(), ObjectStore: "memory"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close(context.Background()) })
+	store := daemon.NewSchemaStore(client)
+	engine := enginepkg.NewDaemonEngine(client)
+	originalFull := legacyindex.Full
+	legacyindex.Full = func(*legacyindex.Index) bool { return true }
+	defer func() { legacyindex.Full = originalFull }()
+	saver := &acknowledgmentTestSaver{}
+	for range 16 {
+		id := vaultic.NewRandomID()
+		if err := engine.StorePack(ctx, id, pack.Blobs{{BlobHandle: vaultic.NewRandomBlobHandle(), Length: 100}}, saver); err != nil {
+			t.Fatal(err)
+		}
+		value, found, err := store.Get(ctx, schema.PackKey(schema.ID(id)))
+		if err != nil || !found {
+			t.Fatalf("pack missing: %v", err)
+		}
+		record, err := schema.UnmarshalPackRecord(value)
+		if err != nil || record.Lifecycle != schema.PackPublished {
+			t.Fatalf("automatic export left pack pending: %+v %v", record, err)
+		}
+	}
+	if saver.calls != 16 {
+		t.Fatalf("exports=%d", saver.calls)
+	}
+	if err := engine.Flush(ctx, saver); err != nil {
+		t.Fatal(err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	defer cancel()
+	interrupted := vaultic.NewRandomID()
+	if err := engine.StorePack(canceled, interrupted, pack.Blobs{{BlobHandle: vaultic.NewRandomBlobHandle(), Length: 100}}, &acknowledgmentTestSaver{afterSave: cancel}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled export acknowledgment=%v", err)
+	}
+	value, found, err := store.Get(ctx, schema.PackKey(schema.ID(interrupted)))
+	if err != nil || !found {
+		t.Fatalf("interrupted pack missing: %v", err)
+	}
+	record, err := schema.UnmarshalPackRecord(value)
+	if err != nil || record.Lifecycle != schema.PackExportPending {
+		t.Fatalf("interrupted acknowledgment published pack: %+v %v", record, err)
+	}
+	if err := engine.Flush(ctx, saver); !errors.Is(err, context.Canceled) {
+		t.Fatalf("failed export was forgotten: %v", err)
+	}
+}
+
+func TestAuthoritativeFragmentedRecoveryAcknowledgment(t *testing.T) {
+	ctx := t.Context()
+	client, err := daemon.Ensure(ctx, daemon.Options{Socket: gcTestSocket(t), RepositoryID: t.Name(), DaemonPath: testGCDaemonPath(t), DataDir: t.TempDir(), ObjectStore: "memory"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close(context.Background()) })
+	store := daemon.NewSchemaStore(client)
+	id := schema.ID(vaultic.NewRandomID())
+	published := daemon.PublishedPack{PackID: id, Record: schema.PackRecord{Type: schema.PackData, BlobCount: 4, PayloadSize: 400, Lifecycle: schema.PackExportPending}, Blobs: make(map[schema.ID]schema.BlobRecord)}
+	for ordinal := range 4 {
+		published.Blobs[schema.ID{byte(ordinal)}] = schema.BlobRecord{Locations: []schema.BlobLocation{{PackID: id, Type: schema.BlobData, Offset: uint64(ordinal * 100), Length: 100}}}
+	}
+	if err := store.PublishPack(ctx, published); err != nil {
+		t.Fatal(err)
+	}
+	repo := newEngineTestRepository(t, mem.New())
+	for _, failAt := range []int{2, 0} {
+		engine := enginepkg.NewDaemonEngine(client)
+		if err := engine.Load(ctx, repo, vaultic.NoopCounter, nil); err != nil {
+			t.Fatal(err)
+		}
+		saver := &acknowledgmentTestSaver{failAt: failAt}
+		err := engine.Flush(ctx, saver)
+		if (err != nil) != (failAt != 0) {
+			t.Fatalf("flush failure=%v", err)
+		}
+		if failAt != 0 {
+			retrySaver := &acknowledgmentTestSaver{}
+			if retryErr := engine.Flush(ctx, retrySaver); !errors.Is(retryErr, err) || retrySaver.calls != 0 {
+				t.Fatalf("failed recovery was retried: error=%v exports=%d", retryErr, retrySaver.calls)
+			}
+		}
+		value, found, err := store.Get(ctx, schema.PackKey(id))
+		if err != nil || !found {
+			t.Fatalf("pack missing: %v", err)
+		}
+		record, err := schema.UnmarshalPackRecord(value)
+		want := schema.PackPublished
+		if failAt != 0 {
+			want = schema.PackExportPending
+		}
+		if err != nil || record.Lifecycle != want {
+			t.Fatalf("fragment acknowledgment=%v want=%v err=%v", record.Lifecycle, want, err)
+		}
+	}
+}
+
 func newEngineTestRepository(t *testing.T, be backend.Backend) *Repository {
 	t.Helper()
 	repo, err := New(be, Options{})

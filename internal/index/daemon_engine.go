@@ -219,10 +219,12 @@ type DaemonEngine struct {
 	client           *daemon.Client
 	store            *daemon.SchemaStore
 	mu               sync.Mutex
+	writeMu          sync.RWMutex
 	analyticsMu      sync.Mutex
 	pendingSnapshots map[vaultic.ID][]byte
 	nextSnapshotRoot []byte
-	pendingPacks     map[vaultic.ID]struct{}
+	pendingPacks     map[vaultic.ID]bool
+	exportErr        error
 	tier             TierPolicy
 	now              func() time.Time
 	runID            schema.ID
@@ -243,14 +245,16 @@ func NewDaemonEngine(client *daemon.Client, legacy ...*LegacyEngine) *DaemonEngi
 	if len(legacy) > 0 && legacy[0] != nil {
 		projection = legacy[0]
 	}
-	return &DaemonEngine{
+	engine := &DaemonEngine{
 		legacy:           projection,
 		client:           client,
 		store:            daemon.NewSchemaStore(client),
 		pendingSnapshots: make(map[vaultic.ID][]byte),
-		pendingPacks:     make(map[vaultic.ID]struct{}),
+		pendingPacks:     make(map[vaultic.ID]bool),
 		now:              time.Now,
 	}
+	projection.master.SetSavedIndexCallback(engine.acknowledgeSavedIndex)
+	return engine
 }
 
 // SetTierPolicy records how this repository routes packs. It must be called
@@ -473,7 +477,24 @@ func (engine *DaemonEngine) storePack(
 	repo vaultic.SaverUnpacked[vaultic.FileType],
 	physicalSize uint64,
 	physicalSizeKnown bool,
-) error {
+) (resultErr error) {
+	engine.writeMu.RLock()
+	defer engine.writeMu.RUnlock()
+	engine.mu.Lock()
+	priorErr := engine.exportErr
+	engine.mu.Unlock()
+	if priorErr != nil {
+		return priorErr
+	}
+	defer func() {
+		if resultErr != nil {
+			engine.mu.Lock()
+			if engine.exportErr == nil {
+				engine.exportErr = resultErr
+			}
+			engine.mu.Unlock()
+		}
+	}()
 	clock := engine.now
 	if clock == nil {
 		clock = time.Now
@@ -500,13 +521,11 @@ func (engine *DaemonEngine) storePack(
 	engine.mu.Lock()
 	engine.blobSizesValid = false
 	engine.catalogVersion++
+	engine.pendingPacks[id] = true
 	engine.mu.Unlock()
 	if err := engine.legacy.StorePack(ctx, id, blobs, repo); err != nil {
 		return err
 	}
-	engine.mu.Lock()
-	engine.pendingPacks[id] = struct{}{}
-	engine.mu.Unlock()
 	return nil
 }
 
@@ -543,7 +562,7 @@ func (engine *DaemonEngine) Load(
 	if len(pendingPacks) > 0 {
 		engine.mu.Lock()
 		for id := range pendingPacks {
-			engine.pendingPacks[id] = struct{}{}
+			engine.pendingPacks[id] = false
 		}
 		engine.mu.Unlock()
 	}
@@ -757,7 +776,62 @@ func (engine *DaemonEngine) recoverPendingSnapshots(ctx context.Context, repo va
 	}
 }
 
-func (engine *DaemonEngine) Flush(ctx context.Context, repo vaultic.SaverUnpacked[vaultic.FileType]) error {
+func (engine *DaemonEngine) acknowledgeSavedIndex(ctx context.Context, index *legacyindex.Index) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	candidates := index.Packs()
+	pending := make([]vaultic.ID, 0, len(candidates))
+	engine.mu.Lock()
+	for id := range candidates {
+		if wholePack := engine.pendingPacks[id]; wholePack {
+			pending = append(pending, id)
+		}
+	}
+	engine.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return engine.acknowledgePacks(ctx, pending)
+}
+
+func (engine *DaemonEngine) acknowledgePacks(ctx context.Context, pending []vaultic.ID) error {
+	for start := 0; start < len(pending); start += vaultic.BlobLookupBatchSize {
+		end := min(start+vaultic.BlobLookupBatchSize, len(pending))
+		ids := make([]schema.ID, end-start)
+		for ordinal, id := range pending[start:end] {
+			ids[ordinal] = schema.ID(id)
+		}
+		if err := engine.store.MarkPacksPublished(ctx, ids); err != nil {
+			return fmt.Errorf("complete pack compatibility exports: %w", err)
+		}
+		engine.mu.Lock()
+		for _, id := range pending[start:end] {
+			delete(engine.pendingPacks, id)
+		}
+		engine.mu.Unlock()
+	}
+	return nil
+}
+
+func (engine *DaemonEngine) Flush(ctx context.Context, repo vaultic.SaverUnpacked[vaultic.FileType]) (resultErr error) {
+	engine.writeMu.Lock()
+	defer engine.writeMu.Unlock()
+	engine.mu.Lock()
+	priorErr := engine.exportErr
+	engine.mu.Unlock()
+	if priorErr != nil {
+		return priorErr
+	}
+	defer func() {
+		if resultErr != nil {
+			engine.mu.Lock()
+			if engine.exportErr == nil {
+				engine.exportErr = resultErr
+			}
+			engine.mu.Unlock()
+		}
+	}()
 	if err := engine.legacy.Flush(ctx, repo); err != nil {
 		return err
 	}
@@ -767,15 +841,7 @@ func (engine *DaemonEngine) Flush(ctx context.Context, repo vaultic.SaverUnpacke
 		pending = append(pending, id)
 	}
 	engine.mu.Unlock()
-	for _, id := range pending {
-		if err := engine.store.MarkPackPublished(ctx, schema.ID(id)); err != nil {
-			return fmt.Errorf("complete pack %s compatibility export: %w", id.Str(), err)
-		}
-		engine.mu.Lock()
-		delete(engine.pendingPacks, id)
-		engine.mu.Unlock()
-	}
-	return nil
+	return engine.acknowledgePacks(ctx, pending)
 }
 
 func (engine *DaemonEngine) ListPacks(ctx context.Context, packs vaultic.IDSet) <-chan legacyindex.PackBlobs {

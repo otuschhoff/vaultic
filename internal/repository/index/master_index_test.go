@@ -56,6 +56,42 @@ func TestMasterIndexSavedSpill(t *testing.T) {
 	}
 }
 
+func TestMasterIndexSavedCallback(t *testing.T) {
+	for _, failing := range []bool{false, true} {
+		t.Run(fmt.Sprint(failing), func(t *testing.T) {
+			_, saver, _ := repository.TestRepositoryWithVersion(t, 2)
+			spilled := false
+			master := index.NewSpillingMasterIndex(func(context.Context, *index.Index) error { spilled = true; return nil })
+			failure := errors.New("acknowledgment failed")
+			calls := 0
+			master.SetSavedIndexCallback(func(_ context.Context, saved *index.Index) error {
+				calls++
+				ids, err := saved.IDs()
+				if err != nil || len(ids) != 1 || !spilled {
+					t.Fatal("callback preceded export/spill")
+				}
+				if failing {
+					return failure
+				}
+				return nil
+			})
+			handle := vaultic.NewRandomBlobHandle()
+			rtest.OK(t, master.StorePack(t.Context(), vaultic.NewRandomID(), pack.Blobs{{BlobHandle: handle, Length: 100}}, saver))
+			err := master.Flush(t.Context(), saver)
+			if failing {
+				if !errors.Is(err, failure) {
+					t.Fatalf("callback failure=%v", err)
+				}
+			} else {
+				rtest.OK(t, err)
+			}
+			if calls != 1 || (len(master.Lookup(handle)) != 0) != failing {
+				t.Fatalf("calls=%d retained=%v", calls, master.Lookup(handle))
+			}
+		})
+	}
+}
+
 func TestMasterIndex(t *testing.T) {
 	bhInIdx1 := vaultic.NewRandomBlobHandle()
 	bhInIdx2 := vaultic.NewRandomBlobHandle()

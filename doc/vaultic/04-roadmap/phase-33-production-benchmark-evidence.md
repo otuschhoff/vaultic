@@ -1,5 +1,69 @@
 # Phase 33 Production Benchmark Evidence
 
+## Incremental, batched pack-export acknowledgments (2026-09-25)
+
+Daemon-backed engines now acknowledge newly written packs after each successful
+compatibility-index export instead of retaining every pending pack until final
+flush. The master-index saved callback runs after export and optional encrypted
+spill, before spill eviction. Failed callbacks retain the index and propagate an
+error. Pack IDs come from the index's pack list, not another full blob walk.
+Default non-daemon index retention remains unchanged.
+
+Pending IDs are registered before insertion into the compatibility index, since
+insertion can synchronously trigger export. Successfully acknowledged IDs are
+removed immediately. New-write bookkeeping therefore tracks active/unexported
+indexes and concurrent exporters, rather than the entire backup's writes.
+Recovered pending packs remain a separate case: catalog loading can split one
+pack across four projections, so these IDs are acknowledged only after every
+recovery index has exported successfully. The recovered pending set still scales
+with unfinished work from previous runs; this is not a whole-backup memory cap.
+
+Flush is exclusive against pack publication/insertion, preventing acknowledgment
+of a pack that has not yet reached an exported index. Pack publication and export
+errors are sticky within the engine. A subsequent flush cannot accidentally
+acknowledge failed finalized indexes that the legacy exporter does not retry.
+Recovery requires a fresh engine/catalog load. This is not the owned read-session
+and final snapshot-publication fencing required for on-demand backup activation.
+
+`SchemaStore.MarkPacksPublished` accepts at most256 IDs, deduplicates them, reads
+pack records with negotiated MultiGet limits, and commits lifecycle changes and
+publication-history events atomically. Existing published records are no-ops;
+missing/invalid records roll back the entire batch. Mutation batches retain the
+negotiated item/byte limits, and existing conflict retries remain in place. Each
+engine acknowledgment group is at most256 packs; a larger export can complete in
+several independently durable groups. The single-pack API delegates to this path.
+
+Three race-enabled native-fixture repetitions measured the same work reduction:
+
+| Acknowledgment of16 packs | Durable-wait attempts |
+| --- | ---: |
+| Individual calls | 16 |
+| One batch, negotiated two-item RPC limit | 1 |
+| Duplicate/replayed batch, empty/canceled/oversized requests, missing-pack failure | 0 additional |
+
+Every pack has exactly one publication event, and transactions/write intents end
+at zero. This is a93.75% reduction in acknowledgment durable-wait attempts for this
+fixture, not measured storage latency or end-to-end backup throughput. An attempt
+to run these fixtures with HDD-NFS `TMPDIR` failed before daemon readiness because
+the runtime directory did not satisfy its required0700 mode. Normal test-runtime
+directories were used for the successful correctness/counter runs; no storage
+performance conclusion is drawn from them.
+
+Native tests also cover16 automatic index rotations acknowledged before final
+flush, cancellation after compatibility export leaving a pack pending, and a
+four-fragment recovered pack whose second export fails. Retrying the failed engine
+remains blocked; a fresh load and successful export completes recovery. Saved-index
+callback ordering/failure tests pass three race repetitions. Full archiver,
+backupcmd, engine and repository-index race suites pass with child-only permission
+capability drops; targeted authoritative catalog/recovery, pinned-session and
+publication-history tests pass as well.
+
+Production backup still uses the full catalog and does not select the spill-backed
+point-read adapter. No production backup, push, daemon restart or deployment was
+performed for this stage; no RPC/schema change is required. Remaining activation
+work includes owned read-session/publication fencing, conservative unknown-sizing
+handling, and scan-free startup selection before a matched10-minute cwalk run.
+
 ## Encrypted spill for exported write indexes (2026-09-25)
 
 `NewSpillingBlobLookup` creates an opt-in write index and temporary encrypted
