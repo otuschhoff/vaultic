@@ -253,6 +253,8 @@ github.com/oklog/run v1.1.0/go.mod h1:sVPdnTZT1zYwAJeCMu2Th4T21pA3FPOQRfWjQlk7DV
 github.com/orisano/pixelmatch v0.0.0-20220722002657-fb0b55479cde/go.mod h1:nZgzbfBr3hhjoZnS66nKrHmduYNpc34ny7RK4z5/HM0=
 github.com/otuschhoff/cwalk v0.0.0-20260815164352-9b009e22a463 h1:L2hm93v5hyuSmDviGZDbNdkSeFAJyI8KWrSBJw2WXUw=
 github.com/otuschhoff/cwalk v0.0.0-20260815164352-9b009e22a463/go.mod h1:PdS6aqI3PoJ5DZmAQN41X0xHVbHUyK8WJMxF/95UvLU=
+github.com/otuschhoff/cwalk v1.0.1 h1:7j2lntlE0hPuLM3YndFXP069n3hVpjlifEdQbWwXc88=
+github.com/otuschhoff/cwalk v1.0.1/go.mod h1:PdS6aqI3PoJ5DZmAQN41X0xHVbHUyK8WJMxF/95UvLU=
 github.com/otuschhoff/go-nfs v0.0.0-20260914094923-10c2fcac207a h1:K/ZI8oGHWhjN4n1s3FFw2vxh7Vkt9gAxBM3B0Bja5rs=
 github.com/otuschhoff/go-nfs v0.0.0-20260914094923-10c2fcac207a/go.mod h1:VhNccO67Oug787VNXcyx9JDI3ZoSpqoKMT/lWMhUIDg=
 github.com/otuschhoff/go-nfs-client v0.0.0-20260914094943-59cc678e915f h1:uM9C8q0fBrOA1zNoScf5cIp5DEjvbrdthajAq5nasU0=

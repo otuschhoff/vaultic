@@ -35,7 +35,7 @@ require (
 	github.com/klauspost/compress v1.20.0
 	github.com/minio/minio-go/v7 v7.3.0
 	github.com/ncw/swift/v2 v2.0.5
-	github.com/otuschhoff/cwalk v0.0.0-20260815164352-9b009e22a463
+	github.com/otuschhoff/cwalk v1.0.1
 	github.com/otuschhoff/pathdiff v0.0.0-20260906012451-6c092b832e20
 	github.com/otuschhoff/rados-go v0.1.1-0.20260917080311-c8bb148a1379
 	github.com/peterbourgon/unixtransport v0.0.7
