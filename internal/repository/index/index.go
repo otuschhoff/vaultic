@@ -72,6 +72,12 @@ func NewIndex() *Index {
 type CatalogBuilder struct {
 	index *Index
 	packs map[vaultic.ID]uint32
+	sizes []CatalogPackSize
+}
+
+type CatalogPackSize struct {
+	Type    vaultic.BlobType
+	Entries uint64
 }
 
 func NewCatalogBuilder() *CatalogBuilder {
@@ -95,15 +101,32 @@ func (builder *CatalogBuilder) Add(packID vaultic.ID, blob pack.Blob) error {
 		}
 		ordinal = builder.index.addToPacks(packID)
 		builder.packs[packID] = ordinal
+		builder.sizes = append(builder.sizes, CatalogPackSize{Type: blob.Type})
 	}
 	builder.index.store(ordinal, blob)
+	summary := &builder.sizes[ordinal]
+	if summary.Type != blob.Type {
+		summary.Type = vaultic.NumBlobTypes
+	}
+	summary.Entries += uint64(blob.Length) + uint64(pack.CalculateEntrySize(blob.IsCompressed()))
 	return nil
+}
+
+func (builder *CatalogBuilder) PackSizes() iter.Seq2[vaultic.ID, CatalogPackSize] {
+	return func(yield func(vaultic.ID, CatalogPackSize) bool) {
+		for ordinal, summary := range builder.sizes {
+			if !yield(builder.index.packs[ordinal], summary) {
+				return
+			}
+		}
+	}
 }
 
 func (builder *CatalogBuilder) Build() *Index {
 	result := builder.index
 	builder.index = nil
 	builder.packs = nil
+	builder.sizes = nil
 	return result
 }
 

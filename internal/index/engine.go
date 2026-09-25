@@ -89,6 +89,10 @@ type ReadEngine interface {
 	LookupSize(vaultic.BlobHandle) (uint, bool)
 }
 
+type BlobSizeEngine interface {
+	BlobSizes(context.Context) ([vaultic.NumBlobTypes]uint64, bool, error)
+}
+
 // ScanEngine exposes read-only iteration for diagnostics and pack inspection.
 type ScanEngine interface {
 	Engine

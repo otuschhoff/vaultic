@@ -1,5 +1,55 @@
 # Phase 33 Production Benchmark Evidence
 
+## Catalog-size summaries remove the second blob walk, r19 (2026-09-25)
+
+The authoritative backup loader reads the full `b:` catalog from VaulticDB and
+builds an in-memory compatibility index; it does not obtain this projection by
+scanning legacy pack files. Both startup work and index memory remain linear in
+the full blob catalog. R18 then walked that projection again for pack sizing.
+
+Catalog builders now accumulate payload and entry-header bytes using their
+existing pack ordinals. Their summaries are merged across workers, adding each
+pack's fixed header once and excluding mixed packs. Validated fresh loads expose
+constant-time size totals to uploader startup through an optional engine
+capability. Canceled/failed loads do not publish totals; pack publication
+invalidates them, and legacy or unavailable totals retain the exact scan fallback.
+Temporary summaries scale with packs, not an additional copy of all blobs.
+
+R19 used the unchanged 52 sources, explicit cwalk32, two file workers and
+HDD-backed NFS scratch. First archival status moved from316 seconds in R18 to216
+seconds, and the CPU profile contains no samples in `currentBlobSizes`, compared
+with118.39 CPU-seconds in R18. The last status at607 seconds reported59,824 files
+and136,114,669,242 logical bytes. Exit124 at611.110 seconds was clean, without a
+forced kill. Peak RSS was30,367,292KiB versus33,604,216KiB in R18; full-run CLI CPU
+was1,485.12 seconds, with more time spent doing actual archival work.
+
+All143 snapshot IDs remained unchanged. There were10,982 engine writes and4,685
+commits, no remaining transactions/write intents, no sampler errors, and no
+daemon restart or epoch change. No new snapshot completed. Earlier writes,
+filesystem cache warmth and different reached data affect this sequential
+comparison: the approximately doubled processed bytes are not an isolated 2x
+throughput improvement. Removing the serial sizing phase is directly supported
+by the code-path regression and profile evidence.
+
+Focused race tests cover builder accounting, four-way catalog loading of pure
+and mixed packs, pending export recovery, canceled-load behavior, post-write
+invalidation, exact scan fallback, and cached sizing that performs no iteration.
+Artifact directory:
+`/volume2/NASDA2/rustic/db.test/backup-catalog-summaries-2026-09-25-r19/`.
+
+The next scalability change is an on-demand backup lookup path, not merely more
+catalog-loading workers. The existing Get/MultiGet RPC clients already return
+errors and distinguish missing keys; the synchronous Go ReadEngine Lookup and
+LookupSize methods, and WriteEngine AddPending, cannot propagate those failures.
+Add context-aware, error-returning lookup/admission capabilities first, then use
+bounded MultiGet batches, a byte-bounded cache and an in-flight/new-write overlay.
+Retain a consistent read session and validate generation/fencing through
+publication; never interpret timeout, corruption or session loss as a missing
+blob. Avoid retaining arbitrarily many chunk buffers while waiting for batches.
+Keep full enumeration for commands that need it, and separately replace backup
+startup sizing/export recovery dependencies on that enumeration. On-demand
+lookups are not implemented or enabled by R19.
+
 ## Incremental cwalk and cancellable pack sizing, r17/r18 (2026-09-25)
 
 The backup command now consumes cwalk directory listings on demand, with bounded

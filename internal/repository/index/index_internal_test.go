@@ -18,11 +18,19 @@ func TestCatalogBuilderPreservesLocationsAndReusesPacks(t *testing.T) {
 		blob.Offset = uint(ordinal * 100)
 		rtest.OK(t, builder.Add(packIDs[ordinal%2], blob))
 	}
+	seen := 0
+	for _, summary := range builder.PackSizes() {
+		rtest.Equals(t, vaultic.DataBlob, summary.Type)
+		rtest.Equals(t, uint64(500*(100+pack.CalculateEntrySize(false))), summary.Entries)
+		seen++
+	}
+	rtest.Equals(t, 2, seen)
 	idx := builder.Build()
 	rtest.Equals(t, 2, len(idx.packs))
 	rtest.Equals(t, 1000, len(idx.Lookup(blob.BlobHandle, nil)))
 	rtest.Assert(t, !idx.Final(), "recovery projection must remain mutable")
 	rtest.Assert(t, builder.packs == nil, "finished builder retained the pack map")
+	rtest.Assert(t, builder.sizes == nil, "finished builder retained pack summaries")
 	rtest.Assert(t, builder.Build() == nil, "second build must not return the index again")
 	rtest.Assert(t, builder.Add(packIDs[0], blob) != nil, "finished builder accepted an entry")
 	idx.Finalize()

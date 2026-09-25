@@ -3,13 +3,50 @@ package repository
 import (
 	"context"
 	"errors"
+	"iter"
 	"testing"
 
+	enginepkg "github.com/otuschhoff/vaultic/internal/index"
 	"github.com/otuschhoff/vaultic/internal/repository/index"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 	"golang.org/x/sync/errgroup"
 )
+
+type cachedSizeEngine struct {
+	*enginepkg.LegacyEngine
+	totals  [vaultic.NumBlobTypes]uint64
+	err     error
+	scanned bool
+}
+
+func (engine *cachedSizeEngine) BlobSizes(context.Context) ([vaultic.NumBlobTypes]uint64, bool, error) {
+	return engine.totals, true, engine.err
+}
+
+func (engine *cachedSizeEngine) Values() iter.Seq[*pack.PackedBlob] {
+	engine.scanned = true
+	return engine.LegacyEngine.Values()
+}
+
+func TestCurrentBlobSizesUsesCachedTotalsWithoutScan(t *testing.T) {
+	repo := TestRepository(t)
+	engine := &cachedSizeEngine{LegacyEngine: enginepkg.NewLegacyEngine(), totals: [vaultic.NumBlobTypes]uint64{100, 200}}
+	repo.SetEngine(engine)
+	totals, err := repo.currentBlobSizes(t.Context())
+	if err != nil || totals != engine.totals || engine.scanned {
+		t.Fatalf("totals=%v err=%v scanned=%v", totals, err, engine.scanned)
+	}
+	engine.err = errors.New("catalog unavailable")
+	if _, err := repo.currentBlobSizes(t.Context()); !errors.Is(err, engine.err) || engine.scanned {
+		t.Fatalf("provider error hidden: err=%v scanned=%v", err, engine.scanned)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := repo.currentBlobSizes(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cached sizing ignored cancellation: %v", err)
+	}
+}
 
 func TestCurrentBlobSizesAndCanceledStartup(t *testing.T) {
 	repo := TestRepository(t)

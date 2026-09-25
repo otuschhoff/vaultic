@@ -524,6 +524,14 @@ func (r *Repository) packSizing(t vaultic.BlobType) (size, limit uint64, growFac
 
 func (r *Repository) currentBlobSizes(ctx context.Context) ([vaultic.NumBlobTypes]uint64, error) {
 	var totals [vaultic.NumBlobTypes]uint64
+	if err := ctx.Err(); err != nil {
+		return totals, err
+	}
+	if provider, ok := r.Engine().(enginepkg.BlobSizeEngine); ok {
+		if sizes, available, err := provider.BlobSizes(ctx); available || err != nil {
+			return sizes, err
+		}
+	}
 	type packSummary struct {
 		blobType vaultic.BlobType
 		size     uint64

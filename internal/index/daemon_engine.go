@@ -229,6 +229,9 @@ type DaemonEngine struct {
 	repackSources    []schema.ID
 	lineageKind      schema.RepackLineageKind
 	promotionTarget  uint64
+	blobSizes        [vaultic.NumBlobTypes]uint64
+	blobSizesValid   bool
+	catalogVersion   uint64
 }
 
 var _ LegacyIndexEngine = (*DaemonEngine)(nil)
@@ -398,6 +401,12 @@ func (engine *DaemonEngine) Values() iter.Seq[*pack.PackedBlob] {
 	return engine.legacy.Values()
 }
 
+func (engine *DaemonEngine) BlobSizes(ctx context.Context) ([vaultic.NumBlobTypes]uint64, bool, error) {
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	return engine.blobSizes, engine.blobSizesValid, ctx.Err()
+}
+
 func (engine *DaemonEngine) AddPending(handle vaultic.BlobHandle, size uint) bool {
 	return engine.legacy.AddPending(handle, size)
 }
@@ -452,6 +461,10 @@ func (engine *DaemonEngine) storePack(
 	if err := engine.store.PublishPack(ctx, published); err != nil {
 		return fmt.Errorf("publish pack %s to slatedb: %w", id.Str(), err)
 	}
+	engine.mu.Lock()
+	engine.blobSizesValid = false
+	engine.catalogVersion++
+	engine.mu.Unlock()
 	if err := engine.legacy.StorePack(ctx, id, blobs, repo); err != nil {
 		return err
 	}
@@ -468,10 +481,19 @@ func (engine *DaemonEngine) Load(
 	callback func(vaultic.ID, *legacyindex.Index, error) error,
 ) error {
 	_ = callback
+	engine.mu.Lock()
+	engine.blobSizesValid = false
+	version := engine.catalogVersion
+	engine.mu.Unlock()
+	cacheable := true
+	for range engine.legacy.Values() {
+		cacheable = false
+		break
+	}
 	if err := engine.recoverPendingSnapshots(ctx, repo); err != nil {
 		return err
 	}
-	pendingPacks, projections, err := engine.loadCatalog(ctx, progress)
+	pendingPacks, projections, sizes, err := engine.loadCatalog(ctx, progress)
 	if err != nil {
 		return err
 	}
@@ -489,6 +511,10 @@ func (engine *DaemonEngine) Load(
 		}
 		engine.mu.Unlock()
 	}
+	engine.mu.Lock()
+	engine.blobSizes = sizes
+	engine.blobSizesValid = cacheable && version == engine.catalogVersion
+	engine.mu.Unlock()
 	return nil
 }
 
@@ -501,12 +527,36 @@ type catalogProgress struct {
 	records    atomic.Uint64
 	locations  atomic.Uint64
 	partitions atomic.Uint64
+	sizesMutex sync.Mutex
+	packSizes  map[vaultic.ID]legacyindex.CatalogPackSize
 }
 
-func (engine *DaemonEngine) loadCatalog(ctx context.Context, progress vaultic.Counter) (pending map[vaultic.ID]struct{}, projections []catalogProjection, resultErr error) {
+func (counts *catalogProgress) collectSizes(ctx context.Context, builders ...*legacyindex.CatalogBuilder) error {
+	counts.sizesMutex.Lock()
+	defer counts.sizesMutex.Unlock()
+	for _, builder := range builders {
+		for packID, incoming := range builder.PackSizes() {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			current, found := counts.packSizes[packID]
+			if !found {
+				current.Type = incoming.Type
+				current.Entries = uint64(pack.CalculateHeaderSize(nil))
+			} else if current.Type != incoming.Type {
+				current.Type = vaultic.NumBlobTypes
+			}
+			current.Entries += incoming.Entries
+			counts.packSizes[packID] = current
+		}
+	}
+	return nil
+}
+
+func (engine *DaemonEngine) loadCatalog(ctx context.Context, progress vaultic.Counter) (pending map[vaultic.ID]struct{}, projections []catalogProjection, sizes [vaultic.NumBlobTypes]uint64, resultErr error) {
 	session, err := engine.store.BeginReadSession(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open authoritative catalog read session: %w", err)
+		return nil, nil, sizes, fmt.Errorf("open authoritative catalog read session: %w", err)
 	}
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -516,11 +566,11 @@ func (engine *DaemonEngine) loadCatalog(ctx context.Context, progress vaultic.Co
 	ctx = session.Context()
 	pending, err = engine.loadPendingPacks(ctx, session)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, sizes, err
 	}
 	const workers = 4
 	projections = make([]catalogProjection, workers)
-	counts := &catalogProgress{}
+	counts := &catalogProgress{packSizes: make(map[vaultic.ID]legacyindex.CatalogPackSize)}
 	group, scanCtx := errgroup.WithContext(ctx)
 	for worker := range workers {
 		group.Go(func() error {
@@ -533,13 +583,21 @@ func (engine *DaemonEngine) loadCatalog(ctx context.Context, progress vaultic.Co
 		})
 	}
 	if err := group.Wait(); err != nil {
-		return nil, nil, fmt.Errorf("load authoritative catalog after %d records, %d locations, %d/256 partitions: %w",
+		return nil, nil, sizes, fmt.Errorf("load authoritative catalog after %d records, %d locations, %d/256 partitions: %w",
 			counts.records.Load(), counts.locations.Load(), counts.partitions.Load(), err)
 	}
 	if err := session.Validate(ctx); err != nil {
-		return nil, nil, fmt.Errorf("validate authoritative catalog read session: %w", err)
+		return nil, nil, sizes, fmt.Errorf("validate authoritative catalog read session: %w", err)
 	}
-	return pending, projections, nil
+	for _, summary := range counts.packSizes {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, sizes, err
+		}
+		if summary.Type < vaultic.NumBlobTypes {
+			sizes[summary.Type] += summary.Entries
+		}
+	}
+	return pending, projections, sizes, nil
 }
 
 func (engine *DaemonEngine) loadBlobCatalog(ctx context.Context, session *daemon.ReadSession, pending map[vaultic.ID]struct{}, progress vaultic.Counter, firstPartition, stride int, counts *catalogProgress) (*legacyindex.Index, *legacyindex.Index, error) {
@@ -597,6 +655,9 @@ func (engine *DaemonEngine) loadBlobCatalog(ctx context.Context, session *daemon
 			return nil, nil, fmt.Errorf("load authoritative blob catalog partition %02x: %w", partition, err)
 		}
 		counts.partitions.Add(1)
+	}
+	if err := counts.collectSizes(ctx, projection, recovery); err != nil {
+		return nil, nil, err
 	}
 	return projection.Build(), recovery.Build(), nil
 }

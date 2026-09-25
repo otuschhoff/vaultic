@@ -46,11 +46,21 @@ func TestAuthoritativeCatalogLoadStreamsAndCleansUp(t *testing.T) {
 	}
 	store := daemon.NewSchemaStore(client)
 	expected := make(map[vaultic.BlobHandle][]schema.BlobLocation)
-	for packNumber := range 2 {
+	var expectedSizes [vaultic.NumBlobTypes]uint64
+	for packNumber := range 4 {
 		packID := schema.ID(vaultic.Hash(fmt.Appendf(nil, "pack-%d", packNumber)))
 		published := daemon.PublishedPack{PackID: packID,
 			Record: schema.PackRecord{Type: schema.PackMixed, BlobCount: 6001, PayloadSize: 600100, Lifecycle: schema.PackExportPending},
 			Blobs:  make(map[schema.ID]schema.BlobRecord),
+		}
+		if packNumber >= 2 {
+			blobType := vaultic.DataBlob
+			published.Record.Type = schema.PackData
+			if packNumber == 3 {
+				blobType = vaultic.TreeBlob
+				published.Record.Type = schema.PackTree
+			}
+			expectedSizes[blobType] = uint64(pack.CalculateHeaderSize(nil)) + 6001*uint64(100+pack.CalculateEntrySize(true))
 		}
 		for ordinal := range 6001 {
 			blobID := vaultic.Hash(fmt.Appendf(nil, "blob-%d-%d", packNumber, ordinal))
@@ -58,7 +68,7 @@ func TestAuthoritativeCatalogLoadStreamsAndCleansUp(t *testing.T) {
 				blobID = vaultic.Hash([]byte("shared-blob"))
 			}
 			kind, blobType := schema.BlobData, vaultic.DataBlob
-			if ordinal%2 != 0 {
+			if (packNumber < 2 && ordinal%2 != 0) || packNumber == 3 {
 				kind, blobType = schema.BlobTree, vaultic.TreeBlob
 			}
 			location := schema.BlobLocation{PackID: packID, Type: kind, Offset: uint64(ordinal * 100), Length: 100, UncompressedSize: 123}
@@ -84,8 +94,12 @@ func TestAuthoritativeCatalogLoadStreamsAndCleansUp(t *testing.T) {
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("canceled catalog: %v", err)
 			}
-		} else if err != nil || counter.count.Load() != 12002 {
+		} else if err != nil || counter.count.Load() != 24004 {
 			t.Fatalf("load: count=%d err=%v", counter.count.Load(), err)
+		}
+		sizes, available, sizeErr := engine.BlobSizes(ctx)
+		if sizeErr != nil || available == canceled || (!canceled && sizes != expectedSizes) {
+			t.Fatalf("catalog sizes=%v available=%v err=%v, want %v", sizes, available, sizeErr, expectedSizes)
 		}
 		for handle, locations := range expected {
 			actual := engine.Lookup(handle)
@@ -107,6 +121,25 @@ func TestAuthoritativeCatalogLoadStreamsAndCleansUp(t *testing.T) {
 				if !found {
 					t.Fatalf("lookup %v missing location %+v", handle, location)
 				}
+			}
+		}
+		if !canceled {
+			repo.SetEngine(engine)
+			actual, err := repo.currentBlobSizes(ctx)
+			if err != nil || actual != expectedSizes {
+				t.Fatalf("fast sizing=%v, %v; want %v", actual, err, expectedSizes)
+			}
+			blob := pack.Blob{BlobHandle: vaultic.NewRandomBlobHandle(), Length: 100}
+			if err := engine.StorePack(ctx, vaultic.NewRandomID(), pack.Blobs{blob}, &internalRepository{repo}); err != nil {
+				t.Fatal(err)
+			}
+			if _, available, err := engine.BlobSizes(ctx); err != nil || available {
+				t.Fatalf("write retained stale sizing: available=%v err=%v", available, err)
+			}
+			expectedSizes[blob.Type] += 100 + uint64(pack.CalculateHeaderSize(pack.Blobs{blob}))
+			actual, err = repo.currentBlobSizes(ctx)
+			if err != nil || actual != expectedSizes {
+				t.Fatalf("fallback sizing=%v, %v; want %v", actual, err, expectedSizes)
 			}
 		}
 		status, err := client.WriterStatus(ctx)
