@@ -22,9 +22,10 @@ import (
 )
 
 const (
-	DefaultWorkers    = 128
-	DefaultQueueDepth = 50_000
-	DefaultBatchSize  = 5_000
+	DefaultWorkers         = 128
+	DefaultQueueDepth      = 50_000
+	DefaultBatchSize       = 5_000
+	publicationConcurrency = 4
 )
 
 type Options struct {
@@ -587,8 +588,14 @@ func (reconciler *Reconciler) processBatch(
 	hardlinks map[identity][]preparedItem,
 	published map[string]publishedItem,
 ) {
+	pending := make([]preparedItem, 0, publicationConcurrency)
+	flush := func() {
+		reconciler.publishInodes(pending, published)
+		pending = pending[:0]
+	}
 	for _, item := range batch {
 		if item.deferred {
+			flush()
 			reconciler.deferred.Add(1)
 			if err := reconciler.writeDeferredDebt(item.snapshotPath, item.prepareErr); err != nil {
 				reconciler.fail(item.sourcePath, err, item.debtKeys)
@@ -596,18 +603,67 @@ func (reconciler *Reconciler) processBatch(
 			continue
 		}
 		if item.prepareErr != nil {
+			flush()
 			reconciler.fail(item.sourcePath, item.prepareErr, item.debtKeys)
 			continue
 		}
 		if item.stat.Mode.IsDir() {
+			flush()
 			*directories = append(*directories, item)
 			continue
 		}
 		if item.stat.Links > 1 {
+			flush()
 			hardlinks[item.identity] = append(hardlinks[item.identity], item)
 			continue
 		}
-		reconciler.publishInode(item, published)
+		if publicationConflicts(pending, item) {
+			flush()
+		}
+		pending = append(pending, item)
+		if len(pending) == publicationConcurrency {
+			flush()
+		}
+	}
+	flush()
+}
+
+func publicationConflicts(pending []preparedItem, item preparedItem) bool {
+	for _, previous := range pending {
+		if previous.identity == item.identity || previous.sourcePath == item.sourcePath ||
+			normalizeSnapshotPath(previous.snapshotPath) == normalizeSnapshotPath(item.snapshotPath) {
+			return true
+		}
+	}
+	return false
+}
+
+func (reconciler *Reconciler) publishInodes(items []preparedItem, published map[string]publishedItem) {
+	if len(items) == 1 {
+		reconciler.publishInode(items[0], published)
+		return
+	}
+	type result struct {
+		key []byte
+		err error
+	}
+	results := make([]result, len(items))
+	var workers sync.WaitGroup
+	for index, item := range items {
+		workers.Go(func() {
+			results[index].key, results[index].err = reconciler.publishInodeRecord(item, false)
+		})
+	}
+	workers.Wait()
+	for index, item := range items {
+		if results[index].err != nil {
+			reconciler.fail(item.sourcePath, results[index].err, item.debtKeys)
+			continue
+		}
+		published[item.sourcePath] = publishedItem{
+			identity: item.identity, key: results[index].key,
+			typeID: nodeType(item.node.Type), snapshotPath: item.snapshotPath,
+		}
 	}
 }
 

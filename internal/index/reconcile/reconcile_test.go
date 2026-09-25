@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -670,6 +671,150 @@ type countedParentFS struct {
 	statFS
 	calls  int
 	cancel context.CancelFunc
+}
+
+type gatedPublicationStore struct {
+	*fakeStore
+	entered chan struct{}
+	release chan struct{}
+	failure error
+	active  atomic.Int32
+	peak    atomic.Int32
+}
+
+func (store *gatedPublicationStore) PublishReconciledRevision(ctx context.Context, revision daemon.ReconciledRevision) error {
+	active := store.active.Add(1)
+	defer store.active.Add(-1)
+	for peak := store.peak.Load(); active > peak; peak = store.peak.Load() {
+		if store.peak.CompareAndSwap(peak, active) {
+			break
+		}
+	}
+	store.entered <- struct{}{}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-store.release:
+		if store.failure != nil {
+			return store.failure
+		}
+		return store.fakeStore.PublishReconciledRevision(ctx, revision)
+	}
+}
+
+func TestIndependentPublicationsOverlapWithinBound(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	store := &gatedPublicationStore{fakeStore: newFakeStore(), entered: make(chan struct{}, 8), release: make(chan struct{})}
+	var release sync.Once
+	unblock := func() { release.Do(func() { close(store.release) }) }
+	defer unblock()
+	reconciler := &Reconciler{ctx: ctx, filesystem: testFilesystem(), store: store}
+	batch := make([]preparedItem, 8)
+	for index := range batch {
+		name := fmt.Sprintf("file%d", index)
+		inode := uint64(100 + index)
+		batch[index] = preparedItem{
+			workItem: workItem{sourcePath: "/root/" + name, snapshotPath: "/" + name, node: *fileNode(name, 1)},
+			identity: identity{fsid: 1, inode: inode}, parent: identity{fsid: 1, inode: 10}, stat: fileInfo(1, inode, 1, 1),
+		}
+	}
+	published := make(map[string]publishedItem)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var directories []preparedItem
+		reconciler.processBatch(batch, &directories, make(map[identity][]preparedItem), published)
+	}()
+	for range publicationConcurrency {
+		select {
+		case <-store.entered:
+		case <-ctx.Done():
+			t.Fatal("independent publications did not overlap")
+		}
+	}
+	unblock()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("publication did not finish")
+	}
+	if store.peak.Load() != publicationConcurrency || len(published) != len(batch) || len(reconciler.errors) != 0 {
+		t.Fatalf("peak=%d published=%d errors=%v", store.peak.Load(), len(published), reconciler.errors)
+	}
+}
+
+func TestPublicationsJoinOnCancellationAndFailure(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("canceled=%t", canceled), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			failure := errors.New("publication failed")
+			store := &gatedPublicationStore{
+				fakeStore: newFakeStore(), entered: make(chan struct{}, publicationConcurrency),
+				release: make(chan struct{}), failure: failure,
+			}
+			reconciler := &Reconciler{ctx: ctx, filesystem: testFilesystem(), store: store}
+			batch := make([]preparedItem, publicationConcurrency)
+			for index := range batch {
+				name := fmt.Sprintf("file%d", index)
+				inode := uint64(100 + index)
+				batch[index] = preparedItem{
+					workItem: workItem{sourcePath: "/root/" + name, snapshotPath: "/" + name, node: *fileNode(name, 1)},
+					identity: identity{fsid: 1, inode: inode}, parent: identity{fsid: 1, inode: 10}, stat: fileInfo(1, inode, 1, 1),
+				}
+			}
+			published := make(map[string]publishedItem)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				reconciler.publishInodes(batch, published)
+			}()
+			for range publicationConcurrency {
+				select {
+				case <-store.entered:
+				case <-ctx.Done():
+					t.Fatal("publications did not enter store")
+				}
+			}
+			if canceled {
+				cancel()
+				failure = context.Canceled
+			} else {
+				close(store.release)
+			}
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("publication workers did not finish")
+			}
+			if store.active.Load() != 0 || len(published) != 0 || len(reconciler.errors) != len(batch) {
+				t.Fatalf("active=%d published=%d errors=%v", store.active.Load(), len(published), reconciler.errors)
+			}
+			for _, err := range reconciler.errors {
+				if !errors.Is(err, failure) {
+					t.Fatalf("expected %v, got %v", failure, err)
+				}
+			}
+		})
+	}
+}
+
+func TestPublicationConflictsPreserveIdentityAndPathOrder(t *testing.T) {
+	first := preparedItem{identity: identity{fsid: 1, inode: 1}, workItem: workItem{sourcePath: "/source/a", snapshotPath: "/snapshot/a"}}
+	independent := preparedItem{identity: identity{fsid: 1, inode: 2}, workItem: workItem{sourcePath: "/source/b", snapshotPath: "/snapshot/b"}}
+	if publicationConflicts([]preparedItem{first}, independent) {
+		t.Fatal("independent inode conflicts")
+	}
+	for _, conflict := range []preparedItem{
+		{identity: first.identity, workItem: independent.workItem},
+		{identity: independent.identity, workItem: workItem{sourcePath: first.sourcePath, snapshotPath: independent.snapshotPath}},
+		{identity: independent.identity, workItem: workItem{sourcePath: independent.sourcePath, snapshotPath: "snapshot/a"}},
+	} {
+		if !publicationConflicts([]preparedItem{first}, conflict) {
+			t.Fatalf("conflicting publication accepted: %+v", conflict)
+		}
+	}
 }
 
 func (filesystem *countedParentFS) Dir(sourcePath string) string {

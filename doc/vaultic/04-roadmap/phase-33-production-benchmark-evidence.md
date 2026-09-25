@@ -1,5 +1,82 @@
 # Phase 33 Production Benchmark Evidence
 
+## Bounded concurrent inode publication, R29 (2026-09-25)
+
+R28's late profile showed serialized durable revision publication holding up
+the archiver. Reconciliation now overlaps at most four ordinary inode
+publications. Each retains its own serializable transaction, conflict retries
+and durable commit. Duplicate inode identities, source paths and normalized
+snapshot paths force an ordered flush. Deferred items, preparation errors,
+directories and hardlinks also flush the pending group. Workers join before
+the writer updates shared maps or records failures, in original input order.
+Directory/hardlink handling, publication fences and durability are unchanged.
+
+The user approved a ten-minute comparison with the same temporary1GiB metadata
+cache as R28, followed by restoration. R29 retained52 roots, explicit cwalk32,
+two file readers, four lookup slots,64MiB CLI result cache, HDD-NFS storage and
+the600s cap/45s grace. The daemon remained the exact12f686c29 binary. No builds
+or tests overlapped measurement; no persisted read-cache policy/quota changed.
+
+| Metric | R28: serial publication | R29: at most four publications |
+| --- | --- | --- |
+| Last files status at or below600s |97,558|105,769|
+| Logical bytes at that status |169,557,219,997|181,252,115,885|
+| Metadata-object body bytes |33,820,343,954|34,533,228,474|
+| Metadata GETs |212,642|230,500|
+| Single-handle size RPCs |218,506|235,954|
+| Mean size RPC |4.018ms|3.360ms|
+| Engine writes |14,367|66,264|
+| Commit attempts /successes /failures |19,444 /19,444 /0|41,152 /32,131 /9,021|
+| Late successful commits per second |9.89|25.09|
+| CLI CPU seconds /peak RSS KiB |968.4 /1,481,144|1,054.7 /1,494,376|
+| Daemon CPU seconds /sampled peak RSS |361.09 /1.553GiB|499.95 /1.616GiB|
+| Wrapper exit /duration |124 /601.791s|124 /601.787s|
+
+Late rates use the last writer samples at or below420s and590s: R28 completed
+1,683 successful commits in170.165s; R29 completed4,270 in170.176s. Thus useful
+commit throughput rose2.54 times, not the approximately fourfold increase in
+attempts. R29 also recorded2,424 failed commits in that late window. Boundary
+in-flight requests mean attempt and completion deltas need not sum exactly.
+The full run's9,021 failures are21.9% of attempts. Aggregate commit telemetry
+does not classify their causes or distinguish revision allocation from
+publication; do not label every failure a measured serializable conflict.
+Both code paths already retry aborted transactions. No retry-limit error was
+reported; the only terminal error was expected snapshot cancellation.
+
+At550s, three publication workers were waiting in
+`PublishReconciledRevision` -> `Commit`, with the writer joining its group and
+archiver callbacks backpressured in `Observe`. Publication/durability waits
+remain relevant. Attribute failed commits and shared-key contention before
+raising concurrency or considering revision-allocation amortization. The
+four-worker candidate is retained provisionally: files increased8.4% and
+logical bytes6.9%, but CPU cost and failed attempts increased. Repeated-run
+source warmth, previous writes and reached-data differences remain confounders.
+This is not a completed-backup speedup or a count of published revisions.
+
+Cancellation emitted final lookup metrics and left empty scratch, zero active
+transactions/intents and no sampler errors. The CLI cache peaked at235,954
+entries /45,303,168 accounted bytes, with no evictions or location RPCs. No
+snapshot completed; all143 snapshot IDs remained unchanged through restoration.
+The runtime override was removed and the original settings verified at
+PID1260903/epoch68, read-write,128MiB metadata/512MiB block cache, zero active
+work. Executable, unit and shared policy/quota hashes match the original values.
+No installed CLI or daemon executable was replaced.
+
+Regression coverage verifies the four-worker bound, overlap, joining on failure
+and cancellation, and duplicate identity/path detection. A native shared-content
+test concurrently publishes four inline revisions and replays each, requiring
+exactly four references/inodes/revisions. It passes five race repetitions.
+All reconciliation tests pass three race repetitions; broad archiver, backup,
+index and repository-index race gates pass. Native transaction/session,
+publication, recovery and encrypted-read gates pass three race repetitions
+against the exact measured daemon. New-code lint reports zero issues.
+
+Artifacts, exact binaries, source patch, profiles, analysis and restoration
+evidence are in
+`/volume2/NASDA2/rustic/db.test/backup-publication-overlap-20260925-r29-QAMqpE`.
+The source patch is relative tobdab29e1c. On-demand mode remains experimental;
+completed-backup/reopen acceptance and matched repetitions remain outstanding.
+
 ## Metadata-cache sizing and linear directory publication, R27/R28 (2026-09-25)
 
 SlateDB's default split cache has512MiB for data blocks and128MiB shared by

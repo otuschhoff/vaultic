@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os/exec"
 	"sort"
@@ -527,6 +528,66 @@ func TestSchemaStoreConcurrentRevisionAllocationAndImmutability(t *testing.T) {
 	}
 	if err := store.PublishRevision(ctx, schema.BlobKey(schema.ID{}), key, encoded, revision); err == nil {
 		t.Fatal("non-current key accepted as current pointer")
+	}
+}
+
+func TestSchemaStoreConcurrentReconciledSharedContent(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	client, err := Ensure(ctx, Options{
+		Socket: testSocket(t), RepositoryID: "concurrent-reconcile",
+		DaemonPath: daemonBinary(t), DataDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	store := NewSchemaStore(client)
+	content := []schema.ID{daemonTestID(1)}
+	start := make(chan struct{})
+	results := make(chan error, 4)
+	for index := range 4 {
+		inode := uint64(index + 10)
+		revision, err := store.AllocateRevision(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record := schema.InodeRevision{
+			ParentInode: 7, Known: schema.KnownParent | schema.KnownPath,
+			ContentMode: schema.ContentInline, ContentIDs: content, ContentCount: 1,
+			SourcePath: fmt.Sprintf("dir/file%d", index), Freshness: schema.FreshnessVerified,
+		}
+		reconciled := ReconciledRevision{
+			CurrentKey: schema.CurrentInodeKey(3, inode), RevisionKey: schema.InodeRevisionKey(3, inode, revision),
+			RevisionValue: encodeSchemaRecord(t, record), Revision: revision, ContentIDs: content,
+		}
+		go func() {
+			select {
+			case <-start:
+			case <-ctx.Done():
+				results <- ctx.Err()
+				return
+			}
+			err := store.PublishReconciledRevision(ctx, reconciled)
+			if err == nil {
+				err = store.PublishReconciledRevision(ctx, reconciled)
+			}
+			results <- err
+		}()
+	}
+	close(start)
+	for range 4 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	value, found, err := store.Get(ctx, schema.ReferenceCountKey(content[0]))
+	if err != nil || !found {
+		t.Fatalf("shared references: found=%t err=%v", found, err)
+	}
+	count, err := schema.UnmarshalReferenceCountRecord(value)
+	if err != nil || count.TotalReferences != 4 || count.DistinctInodes != 4 || count.DistinctRevisions != 4 {
+		t.Fatalf("shared reference count = %#v, err=%v", count, err)
 	}
 }
 
