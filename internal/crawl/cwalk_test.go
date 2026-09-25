@@ -12,6 +12,63 @@ import (
 	"time"
 )
 
+func TestDirectoryStreamDemandAndCancellation(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"first", "second", "third"} {
+		if err := os.MkdirAll(filepath.Join(root, name, "nested"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stream, err := NewDirectoryStream(t.Context(), 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	names, found, err := stream.Names(root)
+	if err != nil || !found || len(names) != 3 {
+		t.Fatalf("root listing: %v, %v, %v", names, found, err)
+	}
+	for _, name := range names {
+		children, found, err := stream.Names(filepath.Join(root, name))
+		if err != nil || !found || len(children) != 1 || children[0] != "nested" {
+			t.Fatalf("child listing: %v, %v, %v", children, found, err)
+		}
+		stream.mutex.Lock()
+		pending := len(stream.pending)
+		stream.mutex.Unlock()
+		if pending > 1 {
+			t.Fatalf("lookahead exceeded capacity: %d", pending)
+		}
+	}
+	if _, _, err := stream.Names(filepath.Join(root, "missing")); err == nil {
+		t.Fatal("missing directory treated as empty")
+	}
+	stream.Close()
+	if _, _, err := stream.Names(root); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation, got %v", err)
+	}
+}
+
+func TestDirectoryStreamCloseJoinsDemand(t *testing.T) {
+	root := t.TempDir()
+	stream, err := NewDirectoryStream(t.Context(), 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream.slots <- struct{}{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _, err := stream.Names(root)
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("expected canceled demand, got %v", err)
+		}
+	}()
+	stream.Close()
+	<-done
+	<-stream.slots
+}
+
 func TestBuildDirectoryManifestCancellationCleansTemporaryState(t *testing.T) {
 	for _, beforeStart := range []bool{true, false} {
 		t.Run(map[bool]string{true: "before-start", false: "during-first-root"}[beforeStart], func(t *testing.T) {

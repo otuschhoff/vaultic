@@ -57,17 +57,28 @@ func (r *Repository) startPackUploader(ctx context.Context, wg *errgroup.Group) 
 		return ErrUploaderAlreadyStarted
 	}
 
+	treeSize, treeLimit, treeGrow := r.packSizing(vaultic.TreeBlob)
+	dataSize, dataLimit, dataGrow := r.packSizing(vaultic.DataBlob)
+	var totals [vaultic.NumBlobTypes]uint64
+	if treeGrow != 0 || dataGrow != 0 {
+		var err error
+		totals, err = r.currentBlobSizes(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	innerWg, ctx := errgroup.WithContext(ctx)
 	r.packerWg = innerWg
 	r.uploader = newPackerUploader(ctx, innerWg, r, r.Connections())
-	treeSize, treeLimit, treeGrow := r.packSizing(vaultic.TreeBlob)
-	dataSize, dataLimit, dataGrow := r.packSizing(vaultic.DataBlob)
 	r.treePM = newConfiguredPackerManager(
 		r.key,
 		vaultic.TreeBlob,
 		treeSize,
 		treeLimit,
-		r.currentBlobSize(vaultic.TreeBlob),
+		totals[vaultic.TreeBlob],
 		treeGrow,
 		r.packerCount,
 		r.uploader.QueuePacker,
@@ -77,7 +88,7 @@ func (r *Repository) startPackUploader(ctx context.Context, wg *errgroup.Group) 
 		vaultic.DataBlob,
 		dataSize,
 		dataLimit,
-		r.currentBlobSize(vaultic.DataBlob),
+		totals[vaultic.DataBlob],
 		dataGrow,
 		r.packerCount,
 		r.uploader.QueuePacker,

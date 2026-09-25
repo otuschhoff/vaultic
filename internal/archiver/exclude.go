@@ -60,6 +60,8 @@ type rejectionCache struct {
 	mtx      sync.Mutex
 	loads    singleflight.Group
 	warnings sync.Mutex
+	store    *MarkerCacheStore
+	prefix   string
 }
 
 func newRejectionCache() *rejectionCache {
@@ -82,6 +84,12 @@ func (rc *rejectionCache) Unlock() {
 // method, otherwise data races may occur.
 func (rc *rejectionCache) Get(dir string) (bool, bool) {
 	v, ok := rc.m[dir]
+	if !ok && rc.store != nil {
+		v, ok = rc.store.get(rc.prefix, dir)
+		if ok {
+			rc.Store(dir, v)
+		}
+	}
 	return v, ok
 }
 
@@ -89,6 +97,10 @@ func (rc *rejectionCache) Get(dir string) (bool, bool) {
 // rc.Lock and rc.Unlock before using this method, otherwise data races may
 // occur.
 func (rc *rejectionCache) Store(dir string, rejected bool) {
+	if rc.store != nil && len(rc.m) >= rc.store.limit {
+		rc.store.spill(rc.prefix, rc.m)
+		clear(rc.m)
+	}
 	rc.m[dir] = rejected
 }
 
@@ -100,6 +112,10 @@ func (rc *rejectionCache) Store(dir string, rejected bool) {
 // non-nil, it is going to be used in the RejectByNameFunc to expedite the evaluation
 // of a directory based on previous visits.
 func RejectIfPresent(excludeFileSpec string, warnf func(msg string, args ...any)) (RejectFunc, error) {
+	return RejectIfPresentWithStore(excludeFileSpec, warnf, nil)
+}
+
+func RejectIfPresentWithStore(excludeFileSpec string, warnf func(msg string, args ...any), store *MarkerCacheStore) (RejectFunc, error) {
 	if excludeFileSpec == "" {
 		return nil, errors.New("name for exclusion tagfile is empty")
 	}
@@ -116,6 +132,7 @@ func RejectIfPresent(excludeFileSpec string, warnf func(msg string, args ...any)
 	}
 	debug.Log("using %q as exclusion tagfile", tf)
 	rc := newRejectionCache()
+	rc.store, rc.prefix = store, excludeFileSpec
 	return func(filename string, _ *fs.ExtendedFileInfo, fs fs.FS) bool {
 		return isExcludedByFile(filename, tf, tc, rc, fs, warnf)
 	}, nil

@@ -75,7 +75,7 @@ func TestArchiverCWalkTraversal(t *testing.T) {
 	back := rtest.Chdir(t, tempdir)
 	defer back()
 
-	arch := New(repo, fs.NewLocal(), Options{CWalkConcurrency: 8, CWalkQueue: 1})
+	arch := New(repo, fs.NewLocal(), Options{CWalkConcurrency: 8, CWalkQueue: 1, CWalkIncremental: true})
 	_, snapshotID, _, err := arch.Snapshot(ctx, []string{"."}, SnapshotOptions{Time: time.Now()})
 	if err != nil {
 		t.Fatal(err)
@@ -98,12 +98,12 @@ func TestArchiverCWalkSelectionParity(t *testing.T) {
 		"skipfile": TestFile{Content: "excluded by name"},
 		"rootfile": TestFile{Content: "retained root"},
 	}
-	for _, workers := range []int{0, 4} {
+	for _, workers := range []int{0, 4, 8} {
 		t.Run(fmt.Sprint(workers), func(t *testing.T) {
 			root, repo := prepareTempdirRepoSrc(t, source)
 			back := rtest.Chdir(t, root)
 			defer back()
-			arch := New(repo, fs.NewLocal(), Options{CWalkConcurrency: workers})
+			arch := New(repo, fs.NewLocal(), Options{CWalkConcurrency: workers, CWalkIncremental: workers == 8})
 			reject, err := RejectIfPresent(".nobackup", t.Logf)
 			if err != nil {
 				t.Fatal(err)
@@ -127,6 +127,23 @@ func TestArchiverCWalkSelectionParity(t *testing.T) {
 				"rootfile": TestFile{Content: "retained root"},
 			})
 		})
+	}
+}
+
+func TestArchiverCWalkSelectionFailurePreventsPublication(t *testing.T) {
+	root, repo := prepareTempdirRepoSrc(t, TestDir{"file": TestFile{Content: "data"}})
+	back := rtest.Chdir(t, root)
+	defer back()
+	arch := New(repo, fs.NewLocal(), Options{CWalkConcurrency: 2, CWalkIncremental: true,
+		SelectionError: func() error { return fmt.Errorf("marker storage failed") }})
+	called := false
+	arch.BeforeSnapshot = func() error { called = true; return nil }
+	snapshot, _, _, err := arch.Snapshot(t.Context(), []string{"."}, SnapshotOptions{Time: time.Now()})
+	if err == nil || snapshot != nil || called {
+		t.Fatalf("selection failure reached publication: snapshot=%v err=%v hook=%v", snapshot, err, called)
+	}
+	if arch.cwalkManifest != nil {
+		t.Fatal("incremental cwalk remained active after failure")
 	}
 }
 

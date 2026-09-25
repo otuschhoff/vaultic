@@ -1,10 +1,51 @@
 package repository
 
 import (
+	"context"
+	"errors"
 	"testing"
 
+	"github.com/otuschhoff/vaultic/internal/repository/index"
+	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
+	"golang.org/x/sync/errgroup"
 )
+
+func TestCurrentBlobSizesAndCanceledStartup(t *testing.T) {
+	repo := TestRepository(t)
+	projection := index.NewIndex()
+	var expected [vaultic.NumBlobTypes]uint64
+	for ordinal, types := range [][]vaultic.BlobType{{vaultic.DataBlob}, {vaultic.TreeBlob}, {vaultic.DataBlob, vaultic.TreeBlob}} {
+		var blobs pack.Blobs
+		var size uint64
+		for offset, blobType := range types {
+			blob := pack.Blob{BlobHandle: vaultic.BlobHandle{Type: blobType, ID: vaultic.ID{byte(ordinal + 1), byte(offset + 1)}},
+				Length: 100, Offset: uint(offset * 100), UncompressedLength: uint(offset * 200)}
+			blobs = append(blobs, blob)
+			size += uint64(blob.Length)
+		}
+		projection.StorePack(vaultic.ID{byte(ordinal + 1)}, blobs)
+		if len(types) == 1 {
+			expected[types[0]] += size + uint64(pack.CalculateHeaderSize(blobs))
+		}
+	}
+	repo.idx.Insert(projection)
+	got, err := repo.currentBlobSizes(t.Context())
+	if err != nil || got != expected {
+		t.Fatalf("pack totals=%v, %v; want %v", got, err, expected)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := repo.currentBlobSizes(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("sizing ignored cancellation: %v", err)
+	}
+	if err := repo.startPackUploader(ctx, &errgroup.Group{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("uploader ignored cancellation: %v", err)
+	}
+	if repo.packerWg != nil || repo.uploader != nil {
+		t.Fatal("canceled sizing initialized uploader")
+	}
+}
 
 func TestPackSizerMatchesRusticGrowth(t *testing.T) {
 	const mib = uint64(1024 * 1024)

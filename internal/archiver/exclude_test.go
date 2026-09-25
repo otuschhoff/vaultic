@@ -12,6 +12,50 @@ import (
 	"github.com/otuschhoff/vaultic/internal/test"
 )
 
+func TestMarkerCacheSpillsWithoutChangingDecisions(t *testing.T) {
+	scratch := t.TempDir()
+	t.Setenv("TMPDIR", scratch)
+	store := NewMarkerCacheStore(2)
+	defer store.Close()
+	cache := newRejectionCache()
+	cache.store, cache.prefix = store, "marker"
+	for _, path := range []string{"first", "second", "third", "fourth"} {
+		cache.Store(path, path == "first")
+		if len(cache.m) > 2 {
+			t.Fatal("marker memory limit exceeded")
+		}
+	}
+	for _, path := range []string{"first", "second", "third", "fourth"} {
+		value, found := cache.Get(path)
+		if !found || value != (path == "first") {
+			t.Fatalf("lost spilled decision for %s", path)
+		}
+	}
+	if err := store.Error(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(scratch)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("marker scratch retained: %v, %v", entries, err)
+	}
+}
+
+func TestMarkerCacheSpillFailureIsReported(t *testing.T) {
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
+	store := NewMarkerCacheStore(1)
+	defer store.Close()
+	cache := newRejectionCache()
+	cache.store = store
+	cache.Store("first", false)
+	cache.Store("second", false)
+	if store.Error() == nil {
+		t.Fatal("spill failure was hidden")
+	}
+}
+
 func TestMarkerChecksOverlapAndCoalesce(t *testing.T) {
 	local := fs.NewLocal()
 	entered := make(chan struct{}, 16)

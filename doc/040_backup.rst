@@ -69,29 +69,32 @@ data. Transferred volume might be lower (due to deduplication) or higher.
 Parallel and selective crawling
 *******************************
 
-For local filesystem trees, the initial traversal uses the upstream parallel
-cwalk engine by default. ``--cwalk-concurrency N`` controls its worker count and
-defaults to 32. Use ``--no-cwalk`` to restore the legacy traversal. A bounded
-internal queue applies backpressure to concurrent callbacks. Non-local filesystem
+For local filesystem trees, traversal uses the upstream parallel cwalk engine
+by default. ``--cwalk-concurrency N`` controls its worker count and defaults to
+32. Use ``--no-cwalk`` to restore the legacy traversal. Non-local filesystem
 implementations use the standard scanner automatically.
 
-Manifest preparation overlaps up to four source roots. The configured worker
-count is divided among the active root lanes, not multiplied per root.
+Directory listings are consumed incrementally instead of building a complete
+manifest before archiving. Lookahead retains at most twice the worker count,
+capped at 64 directory listings. Demand reads and background reads share the
+configured concurrency limit. Large listings are not retained in the lookahead
+cache, but an individual directory read can still require substantial memory.
+Lookahead may read directories later excluded by selection; normal selection
+still decides what is archived. Filesystem metadata checks are retained,
+including on NFSv3 where READDIRPLUS can populate the client attribute cache.
 
-Directory marker checks are prefetched concurrently before serialized selection.
-Checks for the same parent directory share one cached result, including marker
-signature validation; independent directories can perform filesystem reads in
-parallel. Prefetch shares the normal exclusion cache and does not decide whether
-an item is archived. It may check markers for directories later rejected by
-another selection rule. Embedders supplying ``CWalkPrefetch`` must provide a
-concurrency-safe callback; ordinary selection callbacks remain serialized during
-manifest preparation.
+Directory marker decisions, including signature validation, are shared for the
+same parent directory and remain fixed for the duration of a backup. Each marker
+rule retains up to 4,096 decisions in its in-memory map and spills decisions to
+a shared temporary Pebble store instead of forgetting and re-evaluating them.
+The store is created lazily in the system temporary directory (``TMPDIR`` on
+Unix) and removed on normal cleanup. Ensure sufficient temporary disk space;
+marker-store errors abort backup and prevent snapshot publication.
 
-JSON output includes ``cwalk_status`` records during manifest preparation, with
-total/completed roots, successful directory reads, listed entries and elapsed
-seconds. These are discovery counters, not archived files or transferred bytes.
-The final record has ``finished: true``; ``complete`` is true only if the entire
-manifest succeeds. A canceled manifest reports ``complete: false``.
+Incremental traversal reports normal backup progress, not a separate full-tree
+``cwalk_status`` prepass. The eager manifest API remains available to embedders,
+including its discovery counters and concurrent ``CWalkPrefetch`` callback;
+that callback must be concurrency-safe.
 
 ``--use-pathdiff`` enables selective parent-subtree reuse and requires cwalk
 (the default), ``--pathdiff-endpoint PATH``, and ``--pathdiff-svm-map FILE``.

@@ -101,9 +101,12 @@ type Archiver struct {
 
 	fileSaver     *fileSaver
 	treeSaver     *treeSaver
-	cwalkManifest *crawl.DirectoryManifest
-	mu            sync.Mutex
-	summary       *Summary
+	cwalkManifest interface {
+		Names(string) ([]string, bool, error)
+		Close() error
+	}
+	mu      sync.Mutex
+	summary *Summary
 
 	// Error is called for all errors that occur during backup.
 	Error ErrorFunc
@@ -177,9 +180,11 @@ type Options struct {
 	CWalkQueue int
 	// CWalkRoots optionally limits manifest discovery to selective changed roots.
 	// Empty means the snapshot targets.
-	CWalkRoots    []string
-	CWalkProgress func(crawl.ManifestProgress)
-	CWalkPrefetch SelectFunc
+	CWalkRoots       []string
+	CWalkProgress    func(crawl.ManifestProgress)
+	CWalkPrefetch    SelectFunc
+	CWalkIncremental bool
+	SelectionError   func() error
 }
 
 // applyDefaults returns a copy of o with the default options set for all unset
@@ -994,7 +999,18 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, snapshotOp
 	}
 
 	rootTreeID, err := arch.saveSnapshotTree(ctx, atree, snapshotOptions)
+	if arch.Options.CWalkIncremental {
+		closeManifest()
+	}
+	if arch.Options.SelectionError != nil {
+		if selectionErr := arch.Options.SelectionError(); selectionErr != nil {
+			return nil, vaultic.ID{}, nil, selectionErr
+		}
+	}
 	if err != nil {
+		return nil, vaultic.ID{}, nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, vaultic.ID{}, nil, err
 	}
 
@@ -1107,6 +1123,17 @@ func (arch *Archiver) saveSnapshotTree(ctx context.Context, tree *tree, snapshot
 func (arch *Archiver) prepareCWalkManifest(ctx context.Context, targets []string) func() {
 	if arch.Options.CWalkConcurrency <= 0 || !fs.IsLocal(arch.FS) {
 		return func() {}
+	}
+	if arch.Options.CWalkIncremental {
+		stream, err := crawl.NewDirectoryStream(ctx, arch.Options.CWalkConcurrency, min(64, arch.Options.CWalkConcurrency*2))
+		if err != nil {
+			return func() {}
+		}
+		arch.cwalkManifest = stream
+		return func() {
+			_ = stream.Close()
+			arch.cwalkManifest = nil
+		}
 	}
 	queueCapacity := arch.Options.CWalkQueue
 	if queueCapacity <= 0 {

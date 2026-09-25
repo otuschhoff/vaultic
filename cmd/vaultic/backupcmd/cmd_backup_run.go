@@ -62,6 +62,7 @@ type backupRun struct {
 	targetFS            fs.FS
 	pathdiffPlan        crawl.Plan
 	cwalkPrefetch       archiver.SelectFunc
+	markerStore         *archiver.MarkerCacheStore
 	fseventsRoots       []crawl.FSEventsRootPlan
 	fseventsAnchors     []data.FSEventsAnchor
 	apfsMounts          []*apfs.Mount
@@ -181,6 +182,11 @@ func (run *backupRun) close() {
 	}
 	if run.progress != nil {
 		run.progress.Done()
+	}
+	if run.markerStore != nil {
+		if err := run.markerStore.Close(); err != nil {
+			run.printer.E("close marker cache: %v", err)
+		}
 	}
 	if run.closeRepo != nil {
 		run.closeRepo()
@@ -702,8 +708,10 @@ func configureArchiver(ctx context.Context, run *backupRun) error {
 	run.group, run.cancel = group, cancel
 	configureBackupScanner(cancelCtx, run, selectByName, selectItem)
 	options := archiver.Options{ReadConcurrency: run.options.ReadConcurrency}
+	options.SelectionError = run.markerStore.Error
 	if run.options.UseCWalk && (!run.pathdiffPlan.Selective || len(run.pathdiffPlan.ChangedDirs) > 0) {
 		options.CWalkConcurrency, options.CWalkQueue = run.options.CWalkConcurrency, 4096
+		options.CWalkIncremental = true
 		options.CWalkPrefetch = run.cwalkPrefetch
 		if !run.globalOptions.Quiet {
 			options.CWalkProgress = func(status crawl.ManifestProgress) {
@@ -778,7 +786,8 @@ func configureBackupSelection(run *backupRun) (archiver.SelectByNameFunc, archiv
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	rejects, prefetch, err := collectRejectFuncsWithPrefetch(run.options, run.targets, run.targetFS, run.printer.E)
+	run.markerStore = archiver.NewMarkerCacheStore(4096)
+	rejects, prefetch, err := collectRejectFuncsWithPrefetch(run.options, run.targets, run.targetFS, run.printer.E, run.markerStore)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -798,7 +807,17 @@ func configureBackupSelection(run *backupRun) (archiver.SelectByNameFunc, archiv
 			mandatory = archiver.CombineRejects([]archiver.RejectFunc{uidPolicy})
 		}
 	}
-	return archiver.CombineRejectByNames(byName), archiver.CombineRejects(rejects), mandatory, nil
+	selectItem := archiver.CombineRejects(rejects)
+	return archiver.CombineRejectByNames(byName), func(item string, info *fs.ExtendedFileInfo, filesystem fs.FS) bool {
+		selected := selectItem(item, info, filesystem)
+		if run.markerStore.Error() != nil {
+			if run.cancel != nil {
+				run.cancel()
+			}
+			return false
+		}
+		return selected
+	}, mandatory, nil
 }
 
 func configureBackupScanner(ctx context.Context, run *backupRun, byName archiver.SelectByNameFunc, selectItem archiver.SelectFunc) {

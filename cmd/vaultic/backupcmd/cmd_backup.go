@@ -650,7 +650,11 @@ func collectRejectFuncs(options backupOptions, targets []string, fs fs.FS, warnf
 	return funcs, err
 }
 
-func collectRejectFuncsWithPrefetch(options backupOptions, targets []string, fs fs.FS, warnf func(msg string, args ...any)) (funcs, prefetch []archiver.RejectFunc, err error) {
+func collectRejectFuncsWithPrefetch(options backupOptions, targets []string, fs fs.FS, warnf func(msg string, args ...any), stores ...*archiver.MarkerCacheStore) (funcs, prefetch []archiver.RejectFunc, err error) {
+	var store *archiver.MarkerCacheStore
+	if len(stores) > 0 {
+		store = stores[0]
+	}
 	// allowed devices
 	if options.ExcludeOtherFS && !options.Stdin && !options.StdinCommand {
 		f, err := archiver.RejectByDevice(targets, fs)
@@ -686,7 +690,7 @@ func collectRejectFuncsWithPrefetch(options backupOptions, targets []string, fs 
 	}
 
 	for _, spec := range options.ExcludeIfPresent {
-		f, err := archiver.RejectIfPresent(spec, warnf)
+		f, err := archiver.RejectIfPresentWithStore(spec, warnf, store)
 		if err != nil {
 			return nil, nil, err
 		}

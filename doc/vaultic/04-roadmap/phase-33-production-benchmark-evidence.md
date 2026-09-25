@@ -1,5 +1,70 @@
 # Phase 33 Production Benchmark Evidence
 
+## Incremental cwalk and cancellable pack sizing, r17/r18 (2026-09-25)
+
+The backup command now consumes cwalk directory listings on demand, with bounded
+child-directory lookahead, instead of waiting for a complete source manifest.
+Demand and speculative reads share the worker limit, retain filesystem stats,
+and are joined during cancellation and before snapshot publication. Marker
+decisions spill from bounded per-rule maps to a shared temporary Pebble store;
+spilled decisions remain sticky, and storage failures prevent publication.
+The eager manifest API remains available for existing explicit callers.
+
+R17 exposed a separate startup barrier before the incremental reader was used:
+uploader sizing scanned the entire blob catalog four times and used an
+uncancellable background context. The CLI stayed near one core after catalog
+loading, while the daemon used roughly 0.003 cores. TERM at ten minutes did not
+stop sizing, and the 45-second grace expired with exit137. No source archival,
+engine writes, commits, or new snapshots occurred in this attempt.
+
+Sizing now computes both blob-type totals in one cancellable pass, preserving
+pack-header overhead and exclusion of mixed-type packs. Configurations with no
+pack growth skip the scan. Uploader workers are initialized only after sizing
+succeeds, avoiding partially started uploaders on cancellation.
+
+R18 used the same 52 saved sources, explicit `--use-cwalk`, 32 cwalk workers,
+two file workers, NFSv3 sources and HDD-backed NFS scratch. Its first archival
+status arrived at316 seconds. At602 seconds it reported38,017 files and
+66,904,728,427 logical bytes processed, approximately223 MiB/s between the first
+and last status records. These are processed bytes, not newly uploaded bytes.
+It exited124 cleanly at605.384 seconds without a forced kill. CLI CPU was
+1,254.07 seconds and peak RSS33,604,216KiB. All143 snapshot IDs remained unchanged;
+8,059 engine writes and2,469 commits reflect actual archival/reconciliation work.
+No active transactions or write intents remained, the daemon stayed at epoch55,
+and no sampler errors occurred. No new snapshot completed.
+
+The CPU profile contains1,228.68 sampled CPU-seconds: blob catalog loading
+651.15s/53.00%, remaining serial sizing118.39s/9.64%, SHA-256
+197.96s/16.11%, and chunking106.10s/8.64%. Focusing on archival call paths and
+excluding sizing gives386.81 CPU-seconds: hashing51.18%, chunking27.43%, and
+filesystem syscalls15.25%. At550 seconds traversal waited for two file workers,
+one chunking and one reading; all32 directory-stream workers were idle.
+
+On the main active source mount, NFS READ round-trip time averaged0.985ms and
+GETATTR0.276ms, with no retransmissions or major timeouts. Mount counters are
+shared, not backup-exclusive. Four saved sources had no matching NFS mount in
+the captured namespace: `/ncl1-1-vs-50/IT_download` and
+`/ncl1-1-vs-70/vf_dmz_ftp2`, `vf_dmz_svn`, `vf_dmz_www`. Their source scope was
+not changed and no RPC attribution is invented for them. Metadata commits
+averaged94.36ms, including92.35ms waiting for durability. The228.01 seconds of
+aggregate durability wait overlap archival work and must not be added to runtime.
+
+Focused race checks pass for crawl and backupcmd, archiver cwalk/marker behavior,
+and pack sizing/cancellation. Coverage includes demand-read shutdown, selection
+parity, sticky spill decisions, storage failure, and snapshot-publication gating.
+The known root-only `TestScannerCWalkSuppressedErrorFallsBack` fixture is excluded.
+This is partial-run evidence, not completed-backup or durability acceptance.
+Remaining candidates are pack summaries reused during catalog loading, a matched
+two-versus-four file-worker experiment, and amortized reconciliation revision
+allocation/publication without relaxing durability. Source saturation is not
+established by these measurements.
+
+Artifacts, including source patches, binary hashes, CPU profiles where available,
+stacks, NFS counters and repository safety records:
+`/volume2/NASDA2/rustic/db.test/backup-cwalk-incremental-2026-09-25-r17/` and
+`/volume2/NASDA2/rustic/db.test/backup-cwalk-incremental-2026-09-25-r18/`.
+No daemon restart, deployment or push was performed.
+
 ## Directory-stat reuse not retained, r16 (2026-09-25)
 
 After committing marker prefetch as `1390dea6f`, a second candidate reused

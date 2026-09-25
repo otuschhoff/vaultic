@@ -522,31 +522,41 @@ func (r *Repository) packSizing(t vaultic.BlobType) (size, limit uint64, growFac
 	return uint64(r.opts.PackSize), 0, 0
 }
 
-func (r *Repository) currentBlobSize(t vaultic.BlobType) uint64 {
-	types := make(map[vaultic.ID]vaultic.BlobType)
+func (r *Repository) currentBlobSizes(ctx context.Context) ([vaultic.NumBlobTypes]uint64, error) {
+	var totals [vaultic.NumBlobTypes]uint64
+	type packSummary struct {
+		blobType vaultic.BlobType
+		size     uint64
+	}
+	packs := make(map[vaultic.ID]packSummary)
 	engine, err := r.legacyIndexEngine()
 	if err != nil {
-		return 0
+		return totals, err
 	}
 	for blob := range engine.Values() {
+		if err := ctx.Err(); err != nil {
+			return totals, err
+		}
 		packID := blob.PackID()
-		if previous, ok := types[packID]; !ok {
-			types[packID] = blob.Handle().Type
-		} else if previous != vaultic.NumBlobTypes && previous != blob.Handle().Type {
-			types[packID] = vaultic.NumBlobTypes
+		summary, ok := packs[packID]
+		if !ok {
+			summary.blobType = blob.Handle().Type
+			summary.size = uint64(pack.CalculateHeaderSize(nil))
+		} else if summary.blobType != blob.Handle().Type {
+			summary.blobType = vaultic.NumBlobTypes
+		}
+		summary.size += uint64(blob.CiphertextLength()) + uint64(pack.CalculateEntrySize(blob.IsCompressed()))
+		packs[packID] = summary
+	}
+	for _, summary := range packs {
+		if err := ctx.Err(); err != nil {
+			return totals, err
+		}
+		if summary.blobType < vaultic.NumBlobTypes {
+			totals[summary.blobType] += summary.size
 		}
 	}
-	packSizes, err := pack.Size(context.Background(), r, false)
-	if err != nil {
-		return 0
-	}
-	var size uint64
-	for packID, packType := range types {
-		if packType == t {
-			size += uint64(packSizes[packID])
-		}
-	}
-	return size
+	return totals, ctx.Err()
 }
 
 // UseCache replaces the backend with the wrapped cache.
