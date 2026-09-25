@@ -449,7 +449,10 @@ func (reconciler *Reconciler) writer() {
 }
 
 func (reconciler *Reconciler) publishSnapshotRoot(published map[string]publishedItem) error {
-	children := make([]schema.DirectoryChild, 0)
+	children, err := reconciler.publishSnapshotAncestors(published)
+	if err != nil {
+		return err
+	}
 	for _, item := range published {
 		name := strings.TrimPrefix(normalizeSnapshotPath(item.snapshotPath), "/")
 		if name == "" || strings.Contains(name, "/") {

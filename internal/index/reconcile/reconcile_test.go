@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -46,6 +47,106 @@ func TestDecodeDeferredObservationsStrict(t *testing.T) {
 		if _, err := DecodeDeferredObservations([]json.RawMessage{invalid}); err == nil {
 			t.Fatalf("accepted invalid deferred observation %q", invalid)
 		}
+	}
+}
+
+func TestSnapshotRootIncludesMissingAncestors(t *testing.T) {
+	store := newFakeStore()
+	reconciler := &Reconciler{ctx: t.Context(), store: store}
+	fileKey := schema.InodeRevisionKey(7, 11, 1)
+	published := map[string]publishedItem{
+		"/actual/file": {snapshotPath: "/volume/source/file", identity: identity{fsid: 7, inode: 11}, typeID: schema.NodeFile, key: fileKey},
+	}
+	if err := reconciler.publishSnapshotRoot(published); err != nil {
+		t.Fatal(err)
+	}
+	key := reconciler.RootKey()
+	for _, name := range []string{"volume", "source", "file"} {
+		value, found, err := store.Get(t.Context(), key)
+		if err != nil || !found {
+			t.Fatalf("missing directory %q: %v", name, err)
+		}
+		record, err := schema.UnmarshalDirectoryRevision(value)
+		if err != nil || len(record.Children) != 1 || record.Children[0].Name != name {
+			t.Fatalf("directory %q children=%+v err=%v", name, record.Children, err)
+		}
+		key = record.Children[0].MetadataKey
+	}
+	if !bytes.Equal(key, fileKey) {
+		t.Fatalf("synthetic ancestors changed leaf identity: %x", key)
+	}
+	if len(published) != 1 {
+		t.Fatalf("synthetic ancestors changed source observations: %+v", published)
+	}
+}
+
+func TestSnapshotAncestorsPreserveObservedDirectories(t *testing.T) {
+	store := newFakeStore()
+	reconciler := &Reconciler{ctx: t.Context(), store: store}
+	directoryKey := schema.DirectoryRevisionKey(7, 10, 12)
+	published := map[string]publishedItem{
+		"/actual/source": {snapshotPath: "/volume/source", identity: identity{fsid: 7, inode: 10}, typeID: schema.NodeDirectory, key: directoryKey},
+		"/actual/source/file": {
+			snapshotPath: "/volume/source/file", identity: identity{fsid: 7, inode: 11}, typeID: schema.NodeFile,
+			key: schema.InodeRevisionKey(7, 11, 13),
+		},
+		"/other": {
+			snapshotPath: "/volume/other", identity: identity{fsid: 8, inode: 20}, typeID: schema.NodeFile,
+			key: schema.InodeRevisionKey(8, 20, 14),
+		},
+	}
+	roots, err := reconciler.publishSnapshotAncestors(published)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(roots) != 1 || roots[0].Name != "volume" || store.next != 1 {
+		t.Fatalf("roots=%+v revisions=%d", roots, store.next)
+	}
+	value, _, err := store.Get(t.Context(), roots[0].MetadataKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := schema.UnmarshalDirectoryRevision(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(record.Children) != 2 || record.Children[0].Name != "other" || record.Children[1].Name != "source" ||
+		!bytes.Equal(record.Children[1].MetadataKey, directoryKey) {
+		t.Fatalf("observed directory was lost or replaced: %+v", record.Children)
+	}
+	if len(published) != 3 {
+		t.Fatal("source observations mutated")
+	}
+}
+
+func TestSnapshotAncestorsRejectIncompleteObservedSubtree(t *testing.T) {
+	store := newFakeStore()
+	reconciler := &Reconciler{ctx: t.Context(), store: store}
+	published := map[string]publishedItem{
+		"/actual": {
+			snapshotPath: "/source", identity: identity{fsid: 7, inode: 10}, typeID: schema.NodeDirectory,
+			key: schema.DirectoryRevisionKey(7, 10, 12),
+		},
+		"/actual/gap/file": {
+			snapshotPath: "/source/gap/file", identity: identity{fsid: 7, inode: 11}, typeID: schema.NodeFile,
+			key: schema.InodeRevisionKey(7, 11, 13),
+		},
+	}
+	if _, err := reconciler.publishSnapshotAncestors(published); err == nil || store.next != 0 {
+		t.Fatalf("incomplete observed subtree accepted: revisions=%d err=%v", store.next, err)
+	}
+	for _, name := range []string{"..", "../file", "../../nested/file"} {
+		if _, err := reconciler.publishSnapshotAncestors(map[string]publishedItem{
+			"/actual": {snapshotPath: name},
+		}); err == nil || store.next != 0 {
+			t.Fatalf("escaping path %q accepted: revisions=%d err=%v", name, store.next, err)
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	reconciler.ctx = ctx
+	if _, err := reconciler.publishSnapshotAncestors(published); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled publication returned %v", err)
 	}
 }
 

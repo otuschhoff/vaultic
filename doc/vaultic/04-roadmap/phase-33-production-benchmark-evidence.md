@@ -1,5 +1,85 @@
 # Phase 33 Production Benchmark Evidence
 
+## Approved deployment, absolute paths and on-demand R21 (2026-09-25)
+
+The user approved the production daemon update. The release built from
+`ab09d26c7` passed three native race repetitions of publication-fence and atomic
+snapshot-export tests before deployment. `vaulticdb-rustic.service` now runs
+PID1184230, writer epoch56, binary SHA256
+`706abf74f0a543dab129da812a449a36db4b23ea57bd87e80201201e7dd400e2`.
+The unit and configuration were unchanged. The143 snapshot IDs matched exactly
+before/after restart, with zero active transactions and write intents.
+The previous executable and deployment evidence are retained in
+`/volume2/NASDA2/rustic/db.test/daemon-update-ab09d26c7-3rtgZr`.
+The initial comparison used a lost shell variable; the fresh explicit-path
+comparison is `snapshots-verified.txt`, not the empty interrupted output.
+
+The absolute-source blocker was missing synthetic ancestor directories in the
+reconciled snapshot graph. Publication now plans missing path containers and
+writes them bottom-up before linking the root. Observed directory references
+and the source-keyed observation map remain unchanged; ancestor lookup uses
+snapshot paths. Missing intermediate observations below an observed directory,
+parent-relative escaping paths, and cancellation fail closed. Synthetic
+directories use fresh revision-derived identities in the synthetic FSID0
+namespace; no live filesystem attributes are invented. This fixes both full
+and on-demand loading, not just the experimental mode.
+
+The existing disposable HDD-NFS fixture completed absolute cwalk snapshots
+`458d8797` (two9MiB-total files,0.915s reported backup duration), `0462bccf`
+(two unchanged files,0.902s), and full-index control `df7fd96c` (0.864s).
+Restore matched all source bytes; `check --read-data` passed five snapshots and
+seven packs before the latter two snapshots. Fresh encrypted scratch was empty
+after close. These runs reused existing data and are correctness checks, not
+throughput measurements. The disposable writer was explicitly demoted and
+stopped. Reconciler races passed three repetitions, all backup/index race gates
+passed, and the changed reconciliation package passed the new-code lint gate.
+
+R20 was rejected before opening the repository because the ordinary CLI build
+omitted profiling flags. R21 used `-tags debug` and the same52 roots, cwalk32,
+two file readers, exclusions, cache directory, profiles and600s/45s timeout as
+R19. Its extra flags were `--metadata-on-demand --metadata-scratch DIR`.
+Artifacts, exact candidate, source delta, sampler and analysis are in
+`/volume2/NASDA2/rustic/db.test/backup-on-demand-20260925-r21-nze5jw`.
+Candidate SHA256:
+`868a82c197ef2f55a54a82160f8251a8b8eb9d1a6c105cbbdd3550ddd2c40c9a`.
+The subsequent lint-only split separates ancestor planning/publication; the
+archived candidate and source preserve the exact measured implementation.
+
+| Metric | R19 full projection | R21 on-demand |
+| --- | --- | --- |
+| First archive status |216s|1s|
+| Final progress |59,824 files /136,114,669,242 logical bytes at607s|18,047 files /23,696,605,565 logical bytes at603s|
+| CLI peak RSS |30,367,292KiB|1,047,500KiB|
+| CLI CPU |1485.12s|179.42s|
+| End-to-end wrapper |611.110s, exit124|604.760s, exit124|
+
+R21 made227,603 metadata-object GETs, consuming545,327,742,389 body bytes
+(about507.9GiB), and1174.28 daemon CPU seconds. The550s stack had all four
+size-lookup RPC slots waiting in MultiGet, admission callers waiting on those
+results/slots, and file workers blocked on blob-save admission. Final daemon RSS
+was11,798,224,896 bytes: the CLI reduction is not a total-system memory bound.
+There were16,754 engine writes and7,251 commits. The daemon stayed read-write at
+epoch56 with zero active transactions/intents; all143 snapshot IDs were unchanged,
+scratch was empty, and there were no sampler errors. Cancellation was surfaced
+as a metadata-lookup cancellation and completed within the grace period. No
+snapshot completed during the cap.
+
+Decision: keep on-demand experimental and full-index loading the default.
+Startup and CLI memory improved substantially, but throughput regressed. Earlier
+writes, cache warmth and the daemon restart confound isolated speedup claims;
+this result does not justify promoting the mode for runtime performance.
+
+The CLI already has a64MiB accounted LRU for pinned blob size/existence results,
+including confirmed misses, plus shared in-flight requests and an active/spilled
+write overlay. This is not a process RSS limit or a cache of arbitrary database
+records; blob locations are not cached. It is separate from SlateDB block/index
+caches and the encrypted pack cache. The budget remains hard-coded. Useful next
+work is exposing the budget with hit/miss/eviction, occupancy, batch-size and RPC
+latency metrics, then distinguishing result-cache churn from first-read cost.
+The measured stalls support investigating daemon read amplification and bounded
+admission batching; blindly increasing the client budget or adding a location
+cache is not yet supported by these measurements.
+
 ## Owned on-demand backup sessions and publication fencing (2026-09-25)
 
 Backup now has an explicit, experimental `--metadata-on-demand` mode requiring

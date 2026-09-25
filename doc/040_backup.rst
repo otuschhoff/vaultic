@@ -95,10 +95,14 @@ silently falling back. The mode cannot be combined with deferred ingest or
 
 Pack-cache pruning based on the full in-memory index is skipped in this mode.
 Maintenance and restore commands retain their existing full-index behavior.
-Validate intended source paths before production use: a nested absolute-source
-smoke test encountered an existing missing reconciled-root failure with both
-full-index and on-demand loading. Relative-source cwalk backups, parent reuse,
-restore and a full data check passed; the absolute-source issue remains open.
+Nested absolute targets now receive missing synthetic ancestor directories in
+the reconciled snapshot graph. Absolute and relative cwalk backups, parent reuse,
+restore and full data checks have passed on a disposable HDD-backed repository.
+On a representative ten-minute run, on-demand loading substantially reduced
+startup time and CLI memory but processed fewer files than full-index loading:
+point-read latency and metadata read amplification became bottlenecks. Keep the
+mode experimental and measure the intended workload before relying on it for
+runtime improvements. The fixed size-cache budget is not a process memory limit.
 
 Parallel and selective crawling
 *******************************
