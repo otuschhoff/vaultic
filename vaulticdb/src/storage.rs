@@ -198,7 +198,7 @@ pub(crate) struct GenerationAuthority {
 }
 
 struct TransactionSlot {
-    transaction: Mutex<Option<DbTransaction>>,
+    transaction: RwLock<Option<DbTransaction>>,
     last_touched_ms: AtomicU64,
 }
 
@@ -3254,7 +3254,7 @@ impl Storage {
 
     pub(crate) async fn validate_read_session(&self, transaction_id: &str) -> Result<(), Status> {
         let transaction = self.transaction(transaction_id).await?;
-        let transaction = transaction.transaction.lock().await;
+        let transaction = transaction.transaction.read().await;
         if transaction.is_none() {
             return Err(transaction_not_found("read session was closed"));
         }
@@ -3272,7 +3272,7 @@ impl Storage {
         } else {
             let transaction = self.transaction(transaction_id).await?;
             let mut lock_timer = self.attribution.transaction_slot_lock_wait.timer();
-            let transaction = transaction.transaction.lock().await;
+            let transaction = transaction.transaction.read().await;
             lock_timer.succeeded();
             drop(lock_timer);
             transaction
@@ -3339,7 +3339,7 @@ impl Storage {
         } else {
             let transaction = self.transaction(transaction_id).await?;
             let mut lock_timer = self.attribution.transaction_slot_lock_wait.timer();
-            let transaction = transaction.transaction.lock().await;
+            let transaction = transaction.transaction.read().await;
             lock_timer.succeeded();
             drop(lock_timer);
             let transaction = transaction
@@ -3444,7 +3444,7 @@ impl Storage {
         } else {
             let transaction = self.transaction(transaction_id).await?;
             let mut lock_timer = self.attribution.transaction_slot_lock_wait.timer();
-            let transaction = transaction.transaction.lock().await;
+            let transaction = transaction.transaction.write().await;
             lock_timer.succeeded();
             drop(lock_timer);
             scan_prefix_transaction(
@@ -3501,7 +3501,7 @@ impl Storage {
                     .setup
                     .measure(timing.enabled, async {
                         let slot = self.transaction(&transaction_id).await?;
-                        let transaction = slot.transaction.lock().await;
+                        let transaction = slot.transaction.write().await;
                         let iterator = scan_prefix_transaction(
                             transaction
                                 .as_ref()
@@ -3602,7 +3602,7 @@ impl Storage {
             slot.last_touched_ms.load(Ordering::Relaxed),
             now,
             self.transaction_idle_timeout_ms,
-        ) || slot.transaction.lock().await.is_none()
+        ) || slot.transaction.write().await.is_none()
         {
             return Err(transaction_not_found("scan transaction expired or closed"));
         }
@@ -3713,7 +3713,7 @@ impl Storage {
         }
         let transaction = self.transaction(&request.transaction_id).await?;
         let mut lock_timer = self.attribution.transaction_slot_lock_wait.timer();
-        let transaction = transaction.transaction.lock().await;
+        let transaction = transaction.transaction.write().await;
         lock_timer.succeeded();
         drop(lock_timer);
         let transaction = transaction
@@ -3789,7 +3789,7 @@ impl Storage {
             transactions.insert(
                 id.clone(),
                 Arc::new(TransactionSlot {
-                    transaction: Mutex::new(Some(transaction)),
+                    transaction: RwLock::new(Some(transaction)),
                     last_touched_ms: AtomicU64::new(now),
                 }),
             );
@@ -3862,9 +3862,16 @@ impl Storage {
             .await
             .map_err(TransactionFailure::before_consumption)?;
         let mut lock_timer = self.attribution.transaction_slot_lock_wait.timer();
-        let transaction = transaction.transaction.lock().await.take().ok_or_else(|| {
-            TransactionFailure::after_consumption(transaction_not_found("transaction was closed"))
-        })?;
+        let transaction = transaction
+            .transaction
+            .write()
+            .await
+            .take()
+            .ok_or_else(|| {
+                TransactionFailure::after_consumption(transaction_not_found(
+                    "transaction was closed",
+                ))
+            })?;
         lock_timer.succeeded();
         drop(lock_timer);
         if let Some(key) = record_key {
@@ -3976,9 +3983,16 @@ impl Storage {
             .await
             .map_err(TransactionFailure::before_consumption)?;
         let mut lock_timer = self.attribution.transaction_slot_lock_wait.timer();
-        let transaction = transaction.transaction.lock().await.take().ok_or_else(|| {
-            TransactionFailure::after_consumption(transaction_not_found("transaction was closed"))
-        })?;
+        let transaction = transaction
+            .transaction
+            .write()
+            .await
+            .take()
+            .ok_or_else(|| {
+                TransactionFailure::after_consumption(transaction_not_found(
+                    "transaction was closed",
+                ))
+            })?;
         lock_timer.succeeded();
         drop(lock_timer);
         transaction.rollback();

@@ -79,7 +79,7 @@ mod tests {
         for suffix in [b"".as_slice(), b"01023", b"01023x", b"99999"] {
             let before = attribution.object_store_main.snapshot().get.timing.completed;
             let slot = storage.transaction(&transaction_id).await.unwrap();
-            let transaction = slot.transaction.lock().await;
+            let transaction = slot.transaction.write().await;
             let mut iterator = scan_prefix_transaction(
                 transaction.as_ref().unwrap(), b"scan:", suffix, &ScanOptions::default(),
             ).await.unwrap();
@@ -2453,10 +2453,25 @@ mod tests {
                 b"missing".to_vec(),
                 b"present".to_vec(),
             ];
-            let results = storage
-                .multi_get(&keys, &transaction_id, usize::MAX)
-                .await
-                .unwrap();
+            let slot = storage.transaction(&transaction_id).await.unwrap();
+            let read_guard = slot.transaction.read().await;
+            assert!(slot.transaction.try_write().is_err());
+            let single = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                storage.get(b"present", &transaction_id),
+            )
+            .await
+            .expect("Get must share the transaction read guard")
+            .unwrap();
+            assert_eq!(single.value, b"value");
+            let results = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                storage.multi_get(&keys, &transaction_id, usize::MAX),
+            )
+            .await
+            .expect("MultiGet must share the transaction read guard")
+            .unwrap();
+            drop(read_guard);
             assert_eq!(
                 results
                     .iter()
@@ -2492,9 +2507,24 @@ mod tests {
                     .transaction_slot_lock_wait
                     .snapshot()
                     .completed,
-                5
+                6
             );
-            storage.rollback(&transaction_id).await.unwrap();
+            let read_guard = slot.transaction.read().await;
+            let rollback = storage.rollback(&transaction_id);
+            tokio::pin!(rollback);
+            tokio::select! {
+                biased;
+                _ = &mut rollback => panic!("rollback consumed a transaction with an active reader"),
+                _ = std::future::ready(()) => {}
+            }
+            assert!(read_guard.is_some());
+            drop(read_guard);
+            assert!(rollback.await.unwrap().consumed);
+            assert!(slot.transaction.read().await.is_none());
+            assert_eq!(
+                storage.get(b"present", &transaction_id).await.unwrap_err().code(),
+                tonic::Code::NotFound
+            );
             storage.close().await.unwrap();
         }
     }

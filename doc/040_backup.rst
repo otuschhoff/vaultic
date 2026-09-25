@@ -126,6 +126,10 @@ them. Text mode reports a short summary through verbose progress output.
 The measured 64 MiB run used only about 8.3 MiB of accounted entries with no
 evictions, while every size RPC requested a single handle and averaged about
 53 ms. Increasing the budget cannot eliminate those first-time misses.
+Allowing concurrent point reads within the daemon's pinned transaction reduced
+mean RPC time to about 19 ms in a subsequent run, but the daemon's sampled peak
+memory rose to about 36 GiB. Low CLI memory is not a bound on combined resource
+usage; monitor the daemon as well as the backup process.
 
 Parallel and selective crawling
 *******************************

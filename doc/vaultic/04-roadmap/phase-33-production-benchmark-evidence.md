@@ -1,5 +1,88 @@
 # Phase 33 Production Benchmark Evidence
 
+## Concurrent pinned-transaction reads, R23 (2026-09-25)
+
+Following R22's single-handle admission stalls exposed a server-side bottleneck:
+Get and MultiGet held the same exclusive transaction-slot mutex across storage
+reads. All four client lookup slots therefore serialized on their pinned read
+transaction. With native SlateDB MultiGet disabled, grouping client calls alone
+would still execute a sequential per-key fallback under that lock.
+
+TransactionSlot now uses a Tokio RwLock. Get, MultiGet and read-session validation
+use shared guards; mutations, scans, stream setup, commit, rollback and other
+lifecycle paths retain exclusive guards. This leaves transaction consumption
+exclusive and preserves existing write/scan behavior while allowing concurrent
+point reads on the same pinned view. Client batching, lookup concurrency, cache
+budget, native MultiGet selection and daemon configuration are unchanged.
+
+The existing MultiGet regression now holds a read guard while Get and MultiGet
+complete, for both native and fallback modes. It verifies write exclusion,
+rollback waiting until the guard is released, transaction consumption afterward,
+and NotFound for later reads. All193 daemon tests pass serially. The default
+parallel run had two cross-test InventoryWal failpoint failures: the rebuild
+test received the failure intended for the dedicated-WAL inventory test. This
+test-isolation issue was not changed here. Native transaction/read-session,
+publication-fence, atomic snapshot-export, pack-recovery and encrypted-overlay
+tests passed three race repetitions against the exact newly built release.
+Rust formatting and diff whitespace checks pass; the existing unused
+ATTRIBUTES_XATTR warning remains in the Rust test build.
+
+The user explicitly approved deploying this candidate and running the comparison.
+After verifying zero active transactions/intents, the writer was demoted, stopped,
+and replaced. The unchanged service now runs PID1210406 at writer epoch57, SHA256
+`e26ca0e3869d38f55be5bf7cd6b68c87abe073fec4f57572f31da51a10bd27be`.
+The prior executable, candidate, source delta, test output, hashes and snapshot
+sets are retained in
+`/volume2/NASDA2/rustic/db.test/daemon-shared-reads-20260925-86oyPo`.
+All143 snapshot IDs and the service-unit hash were unchanged after restart.
+
+R23 reused R22's exact profiling CLI (SHA256 `e6259738...`),52 roots, explicit
+cwalk32, two file readers,64MiB result cache, four lookup slots, exclusions,
+repository cache and600s cap/45s grace. Artifacts, exact binaries, sampler,
+profiles and analysis are in
+`/volume2/NASDA2/rustic/db.test/backup-shared-reads-20260925-r23-7lGMQM`.
+
+| Metric | R22 exclusive slot | R23 shared point reads |
+| --- | --- | --- |
+| Files at600s |21,434|50,754|
+| Logical bytes at600s |28,226,857,074|98,973,507,929|
+| Mean size RPC |52.961ms|18.714ms|
+| Size RPCs /handles |45,104 /45,104|125,072 /125,072|
+| Aggregate transaction-slot wait |1771.797393s|0.005764s|
+| Slot acquisitions |71,636|160,527|
+| CLI peak RSS |986,408KiB|1,320,520KiB|
+| CLI /daemon CPU |210s /1349.37s|709.96s /4043.2s|
+| Daemon sampled peak RSS |13.24GiB|35.99GiB|
+| Metadata-object body bytes |649,906,425,032|1,697,757,934,919|
+| Wrapper exit /duration |124 /607.572s|124 /626.438s|
+
+R23 made714,816 metadata-object GETs. Its cache peaked at125,068 entries,
+24,013,056 accounted bytes (35.8% capacity), with zero evictions and zero location
+RPCs. Probe hits were156,273, including33,337 negative hits, with512,521 misses;
+these are rechecked probes, not unique requests. Aggregate overlapping size-RPC
+time was2340.648s. The daemon started at0.067GiB RSS after restart and ended at
+35.646GiB; R22 started at10.984GiB and ended at13.098GiB. The larger retained
+server working set is a material tradeoff, not a bounded-system-memory result.
+
+All143 snapshots remained unchanged, with no completed snapshot. There were
+15,914 engine writes and12,026 commits. The daemon remained read-write at epoch57
+with zero active transactions/intents, scratch was empty and no sampler errors
+occurred. Cancellation completed within grace, though cleanup took about26s
+after the cap rather than R22's8s; final counters were still emitted.
+
+Decision: retain the shared-read fix, which removes directly measured unintended
+serialization without raising configured client concurrency. The observed file
+progress is2.37 times R22 and logical bytes3.51 times, but restart/cache warmth,
+earlier writes and reached data prevent treating these ratios as isolated or
+general end-to-end speedups. No representative backup completed, and full-index
+R19 still reached more logical data. On-demand remains experimental.
+
+The next priority is explaining and bounding daemon memory and reducing metadata
+read amplification before increasing concurrency further. Result-cache capacity
+is still not limiting. Bounded cross-call batches may become useful with a
+verified native MultiGet path, but were deliberately not combined with this
+lock change; production cache/MultiGet settings were not silently altered.
+
 ## Cache budget and measured cold-lookup cost, R22 (2026-09-25)
 
 Backup now exposes `--metadata-cache-mib` with the existing64MiB default,
