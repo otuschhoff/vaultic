@@ -3,7 +3,9 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"math"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -72,11 +74,24 @@ func TestReadSessionPinsSnapshotAndClosesTransaction(t *testing.T) {
 		if size != want {
 			t.Fatalf("batch result %d=%v, want %v", ordinal, size, want)
 		}
+		blobs, err := session.LookupContext(ctx, handles[ordinal])
+		if err != nil || (len(blobs) != 0) != want.Found {
+			t.Fatalf("pinned location lookup %d=%v err=%v", ordinal, blobs, err)
+		}
+		if want.Found && (len(blobs) != 1 || blobs[0].PackID() != vaultic.ID(firstPack) || blobs[0].Handle() != handles[ordinal] || blobs[0].PlaintextLength() != want.Size) {
+			t.Fatalf("incorrect packed location: %v", blobs)
+		}
 	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
 	if _, err := session.LookupBlobSizesContext(canceled, handles); !errors.Is(err, context.Canceled) {
 		t.Fatalf("batch ignored cancellation: %v", err)
+	}
+	if _, err := session.LookupContext(canceled, handles[0]); !errors.Is(err, context.Canceled) {
+		t.Fatalf("location lookup ignored cancellation: %v", err)
+	}
+	if _, err := session.LookupContext(ctx, vaultic.BlobHandle{Type: vaultic.InvalidBlob}); err == nil {
+		t.Fatal("location lookup accepted invalid type")
 	}
 	if _, err := session.LookupBlobSizesContext(ctx, make([]vaultic.BlobHandle, vaultic.BlobLookupBatchSize+1)); err == nil {
 		t.Fatal("oversized batch accepted")
@@ -123,6 +138,9 @@ func TestReadSessionPinsSnapshotAndClosesTransaction(t *testing.T) {
 	if _, err := session.LookupBlobSizesContext(ctx, handles); err == nil {
 		t.Fatal("batch succeeded after session close")
 	}
+	if _, err := session.LookupContext(ctx, handles[0]); err == nil {
+		t.Fatal("location lookup succeeded after session close")
+	}
 }
 
 func TestDecodeBlobSizes(t *testing.T) {
@@ -139,9 +157,29 @@ func TestDecodeBlobSizes(t *testing.T) {
 	if err != nil || sizes[vaultic.DataBlob] != (vaultic.BlobSize{Size: 7, Found: true}) || sizes[vaultic.TreeBlob] != (vaultic.BlobSize{Size: 123, Found: true}) {
 		t.Fatalf("decoded sizes=%v err=%v", sizes, err)
 	}
+	for _, blobType := range []vaultic.BlobType{vaultic.DataBlob, vaultic.TreeBlob} {
+		handle := vaultic.BlobHandle{ID: vaultic.NewRandomID(), Type: blobType}
+		blobs, err := decodeBlobLocations(encoded, handle)
+		wantCount := 2
+		if blobType == vaultic.TreeBlob {
+			wantCount = 1
+		}
+		if err != nil || len(blobs) != wantCount {
+			t.Fatalf("locations=%v err=%v", blobs, err)
+		}
+		for _, blob := range blobs {
+			if blob.Handle() != handle || blob.PackID() != vaultic.ID(location.PackID) || blob.PlaintextLength() != sizes[blobType].Size {
+				t.Fatalf("incorrect location: %+v", blob)
+			}
+		}
+		if blobType == vaultic.DataBlob && (blobs[0].IsCompressed() || !blobs[1].IsCompressed()) {
+			t.Fatal("compression metadata lost")
+		}
+	}
 	for _, invalid := range []schema.BlobLocation{
 		{PackID: location.PackID, Length: 1, Type: schema.BlobData},
 		{PackID: location.PackID, Length: location.Length, UncompressedSize: 8, Type: schema.BlobData},
+		{PackID: location.PackID, Offset: uint64(math.MaxUint32) + 1, Length: location.Length, Type: schema.BlobData},
 	} {
 		encoded, err := (schema.BlobRecord{Locations: []schema.BlobLocation{location, invalid}}).MarshalBinary()
 		if err != nil {
@@ -150,9 +188,37 @@ func TestDecodeBlobSizes(t *testing.T) {
 		if _, err := decodeBlobSizes(encoded); !errors.Is(err, schema.ErrMalformed) {
 			t.Fatalf("invalid sizes accepted: %v", err)
 		}
+		if blobs, err := decodeBlobLocations(encoded, vaultic.BlobHandle{Type: vaultic.DataBlob}); !errors.Is(err, schema.ErrMalformed) || len(blobs) != 0 {
+			t.Fatalf("invalid locations accepted: %v, %v", blobs, err)
+		}
 	}
 	if _, err := decodeBlobSizes([]byte("corrupt")); err == nil {
 		t.Fatal("corrupt blob record accepted")
+	}
+	if _, err := decodeBlobLocations([]byte("corrupt"), vaultic.BlobHandle{Type: vaultic.DataBlob}); err == nil {
+		t.Fatal("corrupt locations accepted")
+	}
+}
+
+func BenchmarkDecodeBlobLocations(b *testing.B) {
+	for _, count := range []int{1, 16, 256} {
+		b.Run(fmt.Sprint(count), func(b *testing.B) {
+			locations := make([]schema.BlobLocation, count)
+			for ordinal := range locations {
+				locations[ordinal] = schema.BlobLocation{PackID: daemonTestID(1), Offset: uint64(ordinal) * 100, Length: 100, UncompressedSize: 123, Type: schema.BlobTree}
+			}
+			encoded, err := (schema.BlobRecord{Locations: locations}).MarshalBinary()
+			if err != nil {
+				b.Fatal(err)
+			}
+			handle := vaultic.BlobHandle{ID: vaultic.NewRandomID(), Type: vaultic.TreeBlob}
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := decodeBlobLocations(encoded, handle); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
 
@@ -171,6 +237,35 @@ func (rpc *blockedBatchRPC) MultiGet(ctx context.Context, _ *vaulticdbv1.MultiGe
 	close(rpc.started)
 	<-ctx.Done()
 	return nil, ctx.Err()
+}
+
+func (rpc *blockedBatchRPC) Get(ctx context.Context, _ *vaulticdbv1.GetRequest, _ ...grpc.CallOption) (*vaulticdbv1.GetResponse, error) {
+	close(rpc.started)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestReadSessionLocationFailureCancelsInFlightRPC(t *testing.T) {
+	rpc := &blockedBatchRPC{started: make(chan struct{})}
+	client := &Client{rpc: rpc, limits: Limits{MaxMessageBytes: 1 << 20}}
+	client.initializeSubclients()
+	sessionCtx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+	session := &ReadSession{SchemaStore: NewSchemaStore(client), transaction: &Transaction{client: client, id: "pinned"}, ctx: sessionCtx}
+	failure := errors.New("read session lease lost")
+	caller, stop := context.WithTimeout(t.Context(), 5*time.Second)
+	defer stop()
+	done := make(chan error, 1)
+	go func() { _, err := session.LookupContext(caller, vaultic.NewRandomBlobHandle()); done <- err }()
+	select {
+	case <-rpc.started:
+		cancel(failure)
+	case <-caller.Done():
+		t.Fatal("location RPC did not start")
+	}
+	if err := <-done; !errors.Is(err, failure) {
+		t.Fatalf("location RPC lost session cause: %v", err)
+	}
 }
 
 func TestReadSessionBatchFailureCancelsInFlightRPC(t *testing.T) {

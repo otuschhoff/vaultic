@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
@@ -37,6 +38,85 @@ type CachedBlobLookup struct {
 	mutex   sync.Mutex
 	pending map[vaultic.BlobHandle]blobLookupResult
 	workers sync.WaitGroup
+}
+
+var _ ContextReadEngine = (*CachedBlobLookup)(nil)
+var _ ContextBatchReadEngine = (*CachedBlobLookup)(nil)
+var _ ContextWriteEngine = (*CachedBlobLookup)(nil)
+
+func (lookup *CachedBlobLookup) LookupSizeContext(ctx context.Context, handle vaultic.BlobHandle) (uint, bool, error) {
+	sizes, err := lookup.LookupSizesContext(ctx, []vaultic.BlobHandle{handle})
+	if err != nil {
+		return 0, false, err
+	}
+	return sizes[0].Size, sizes[0].Found, nil
+}
+
+func (lookup *CachedBlobLookup) LookupContext(ctx context.Context, handle vaultic.BlobHandle) ([]*pack.PackedBlob, error) {
+	if err := vaultic.ValidateBlobLookupBatch([]vaultic.BlobHandle{handle}); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := context.Cause(lookup.ctx); err != nil {
+		return nil, err
+	}
+	if blobs := lookup.local.Lookup(handle); len(blobs) != 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := context.Cause(lookup.ctx); err != nil {
+			return nil, err
+		}
+		return blobs, nil
+	}
+	select {
+	case lookup.slots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-lookup.ctx.Done():
+		return nil, context.Cause(lookup.ctx)
+	}
+	lookup.mutex.Lock()
+	if err := context.Cause(lookup.ctx); err != nil {
+		lookup.mutex.Unlock()
+		<-lookup.slots
+		return nil, err
+	}
+	lookup.workers.Add(1)
+	lookup.mutex.Unlock()
+	defer func() {
+		<-lookup.slots
+		lookup.workers.Done()
+	}()
+	provider, ok := lookup.session.(interface {
+		LookupContext(context.Context, vaultic.BlobHandle) ([]*pack.PackedBlob, error)
+	})
+	if !ok {
+		err := fmt.Errorf("blob lookup session does not support location reads")
+		lookup.cancel(err)
+		return nil, err
+	}
+	rpcCtx, cancel := context.WithCancelCause(ctx)
+	stop := context.AfterFunc(lookup.ctx, func() { cancel(context.Cause(lookup.ctx)) })
+	defer stop()
+	defer cancel(nil)
+	blobs, err := provider.LookupContext(rpcCtx, handle)
+	if cause := context.Cause(lookup.ctx); cause != nil {
+		return nil, cause
+	}
+	if cause := ctx.Err(); cause != nil {
+		return nil, cause
+	}
+	if err != nil {
+		lookup.cancel(err)
+		return nil, err
+	}
+	if current := lookup.local.Lookup(handle); len(current) != 0 {
+		blobs = current
+	}
+	return blobs, nil
 }
 
 func NewCachedBlobLookup(session blobLookupSession, local *LegacyEngine, budgetBytes, concurrency int) (*CachedBlobLookup, error) {

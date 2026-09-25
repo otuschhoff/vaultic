@@ -3,17 +3,87 @@ package index
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 type testBlobLookupSession struct {
-	ctx   context.Context
-	query func(context.Context, []vaultic.BlobHandle) ([]vaultic.BlobSize, error)
+	ctx       context.Context
+	query     func(context.Context, []vaultic.BlobHandle) ([]vaultic.BlobSize, error)
+	locations func(context.Context, vaultic.BlobHandle) ([]*pack.PackedBlob, error)
+}
+
+func (session *testBlobLookupSession) LookupContext(ctx context.Context, handle vaultic.BlobHandle) ([]*pack.PackedBlob, error) {
+	return session.locations(ctx, handle)
+}
+
+func TestCachedBlobLocationLookup(t *testing.T) {
+	for _, closing := range []bool{false, true} {
+		t.Run(fmt.Sprint(closing), func(t *testing.T) {
+			started := make(chan struct{})
+			session := &testBlobLookupSession{ctx: t.Context(), locations: func(ctx context.Context, _ vaultic.BlobHandle) ([]*pack.PackedBlob, error) {
+				close(started)
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}}
+			lookup, err := NewCachedBlobLookup(session, NewLegacyEngine(), blobLookupCacheEntryBytes, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lookup.Close()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { _, err := lookup.LookupContext(ctx, vaultic.NewRandomBlobHandle()); done <- err }()
+			<-started
+			if closing {
+				lookup.Close()
+			} else {
+				cancel()
+			}
+			if err := <-done; !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancellation=%v", err)
+			}
+			if !closing && lookup.ctx.Err() != nil {
+				t.Fatal("individual cancellation poisoned lookup")
+			}
+		})
+	}
+	for _, failure := range []error{nil, errors.New("location RPC failed")} {
+		handle := vaultic.NewRandomBlobHandle()
+		blob := &pack.PackedBlob{Pack: vaultic.NewRandomID(), Blob: pack.Blob{BlobHandle: handle, Length: 100}}
+		session := &testBlobLookupSession{ctx: t.Context(), locations: func(context.Context, vaultic.BlobHandle) ([]*pack.PackedBlob, error) {
+			return []*pack.PackedBlob{blob}, failure
+		}}
+		local := NewLegacyEngine()
+		lookup, err := NewCachedBlobLookup(session, local, blobLookupCacheEntryBytes, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer lookup.Close()
+		blobs, err := lookup.LookupContext(t.Context(), handle)
+		if !errors.Is(err, failure) {
+			t.Fatalf("location err=%v", err)
+		}
+		if failure == nil && (len(blobs) != 1 || blobs[0] != blob) {
+			t.Fatalf("locations=%v", blobs)
+		}
+		if failure != nil {
+			if len(blobs) != 0 {
+				t.Fatal("failure returned usable locations")
+			}
+			local.AddPending(handle, 99)
+			if _, _, err := lookup.LookupSizeContext(t.Context(), handle); !errors.Is(err, failure) {
+				t.Fatalf("local size hid location failure: %v", err)
+			}
+		}
+	}
 }
 
 func (session *testBlobLookupSession) Context() context.Context { return session.ctx }

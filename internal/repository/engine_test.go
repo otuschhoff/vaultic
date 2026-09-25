@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -318,6 +319,18 @@ func TestCachedAuthoritativeLookupWithPublishedOverlay(t *testing.T) {
 	if err != nil || results[0] != (vaultic.BlobSize{Size: 321, Found: true}) {
 		t.Fatalf("flushed overlay: results=%v err=%v", results, err)
 	}
+	for _, handle := range []vaultic.BlobHandle{original, written} {
+		blobs, err := lookup.LookupContext(ctx, handle)
+		if err != nil || len(blobs) != 1 || blobs[0].Handle() != handle {
+			t.Fatalf("native location lookup: blobs=%v err=%v", blobs, err)
+		}
+		if handle == written && blobs[0].PlaintextLength() != 321 {
+			t.Fatal("flushed location overlay lost plaintext length")
+		}
+	}
+	if blobs, err := session.LookupContext(ctx, written); err != nil || len(blobs) != 0 {
+		t.Fatalf("pinned locations advanced: %v, %v", blobs, err)
+	}
 	results, err = session.LookupBlobSizesContext(ctx, []vaultic.BlobHandle{written})
 	if err != nil || results[0].Found {
 		t.Fatalf("pinned snapshot advanced: results=%v err=%v", results, err)
@@ -331,6 +344,72 @@ func TestCachedAuthoritativeLookupWithPublishedOverlay(t *testing.T) {
 	status, err := client.WriterStatus(ctx)
 	if err != nil || status.ActiveTransactions != 0 || status.ActiveWriteIntents != 0 {
 		t.Fatalf("leaked session: status=%+v err=%v", status, err)
+	}
+}
+
+type pointReadTestEngine struct {
+	*enginepkg.LegacyEngine
+	enginepkg.ContextReadEngine
+	enginepkg.ContextBatchReadEngine
+	enginepkg.ContextWriteEngine
+}
+
+func TestAuthoritativePointReadLoadsEncryptedBlobs(t *testing.T) {
+	ctx := t.Context()
+	client, err := daemon.Ensure(ctx, daemon.Options{
+		Socket: gcTestSocket(t), RepositoryID: t.Name(), DaemonPath: testGCDaemonPath(t),
+		DataDir: t.TempDir(), ObjectStore: "memory",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close(context.Background()) })
+	repo := TestRepository(t)
+	repo.SetEngine(enginepkg.NewDaemonEngine(client))
+	payload := bytes.Repeat([]byte("authoritative point read "), 1024)
+	handles := []vaultic.BlobHandle{{ID: vaultic.Hash(payload), Type: vaultic.DataBlob}, {ID: vaultic.Hash(payload), Type: vaultic.TreeBlob}}
+	if err := repo.WithBlobUploader(ctx, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
+		for _, handle := range handles {
+			for range 2 {
+				if _, _, _, err := uploader.SaveBlob(ctx, handle.Type, payload, handle.ID, true); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	session, err := daemon.NewSchemaStore(client).BeginReadSession(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close(context.Background()) })
+	local := enginepkg.NewLegacyEngine()
+	lookup, err := enginepkg.NewCachedBlobLookup(session, local, 192*2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lookup.Close() })
+	repo.SetEngine(&pointReadTestEngine{LegacyEngine: local, ContextReadEngine: lookup, ContextBatchReadEngine: lookup, ContextWriteEngine: lookup})
+	for _, handle := range handles {
+		if len(local.Lookup(handle)) != 0 {
+			t.Fatal("point read test has a loaded catalog")
+		}
+		blobs, err := lookup.LookupContext(ctx, handle)
+		if err != nil || len(blobs) != 2 {
+			t.Fatalf("duplicate locations=%v err=%v", blobs, err)
+		}
+		actual, err := repo.LoadBlob(ctx, handle, nil)
+		if err != nil || !bytes.Equal(actual, payload) {
+			t.Fatalf("encrypted point read: size=%d err=%v", len(actual), err)
+		}
+	}
+	if err := session.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.LoadBlob(ctx, handles[0], nil); !errors.Is(err, vaultic.ErrMetadataLookup) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("closed session load=%v", err)
 	}
 }
 

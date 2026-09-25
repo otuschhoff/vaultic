@@ -12,6 +12,7 @@ import (
 
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 	"github.com/otuschhoff/vaultic/internal/repository/crypto"
+	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -317,13 +318,91 @@ func (session *ReadSession) LookupBlobSizesContext(ctx context.Context, handles 
 	return results, nil
 }
 
-func decodeBlobSizes(encoded []byte) ([vaultic.NumBlobTypes]vaultic.BlobSize, error) {
-	var sizes [vaultic.NumBlobTypes]vaultic.BlobSize
+func (session *ReadSession) LookupContext(ctx context.Context, handle vaultic.BlobHandle) ([]*pack.PackedBlob, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := context.Cause(session.Context()); err != nil {
+		return nil, err
+	}
+	if err := vaultic.ValidateBlobLookupBatch([]vaultic.BlobHandle{handle}); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithCancelCause(ctx)
+	stop := context.AfterFunc(session.Context(), func() { cancel(context.Cause(session.Context())) })
+	defer stop()
+	defer cancel(nil)
+	encoded, found, err := session.Get(ctx, schema.BlobKey(schema.ID(handle.ID)))
+	if cause := context.Cause(session.Context()); cause != nil {
+		return nil, cause
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return nil, cause
+	}
+	if err != nil || !found {
+		return nil, err
+	}
+	blobs, err := decodeBlobLocations(encoded, handle)
+	if cause := context.Cause(session.Context()); cause != nil {
+		return nil, cause
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return nil, cause
+	}
+	return blobs, err
+}
+
+func decodeBlobLocations(encoded []byte, handle vaultic.BlobHandle) ([]*pack.PackedBlob, error) {
 	record, err := schema.UnmarshalBlobRecord(encoded)
 	if err != nil {
-		return sizes, err
+		return nil, err
 	}
+	if _, err := blobRecordSizes(record); err != nil {
+		return nil, err
+	}
+	kind := schema.BlobData
+	if handle.Type == vaultic.TreeBlob {
+		kind = schema.BlobTree
+	}
+	count := 0
 	for _, location := range record.Locations {
+		if location.Type == kind {
+			count++
+		}
+	}
+	if count == 0 {
+		return nil, nil
+	}
+	packed := make([]pack.PackedBlob, count)
+	blobs := make([]*pack.PackedBlob, 0, count)
+	for _, location := range record.Locations {
+		if location.Type != kind {
+			continue
+		}
+		blob := &packed[len(blobs)]
+		*blob = pack.PackedBlob{Pack: vaultic.ID(location.PackID), Blob: pack.Blob{
+			BlobHandle: handle, Offset: uint(location.Offset), Length: uint(location.Length),
+			UncompressedLength: uint(location.UncompressedSize),
+		}}
+		blobs = append(blobs, blob)
+	}
+	return blobs, nil
+}
+
+func decodeBlobSizes(encoded []byte) ([vaultic.NumBlobTypes]vaultic.BlobSize, error) {
+	record, err := schema.UnmarshalBlobRecord(encoded)
+	if err != nil {
+		return [vaultic.NumBlobTypes]vaultic.BlobSize{}, err
+	}
+	return blobRecordSizes(record)
+}
+
+func blobRecordSizes(record schema.BlobRecord) ([vaultic.NumBlobTypes]vaultic.BlobSize, error) {
+	var sizes [vaultic.NumBlobTypes]vaultic.BlobSize
+	for _, location := range record.Locations {
+		if location.Offset > math.MaxUint32 {
+			return sizes, fmt.Errorf("%w: blob offset exceeds pack index range", schema.ErrMalformed)
+		}
 		blobType := vaultic.DataBlob
 		if location.Type == schema.BlobTree {
 			blobType = vaultic.TreeBlob

@@ -1,5 +1,63 @@
 # Phase 33 Production Benchmark Evidence
 
+## Authoritative blob-location point reads (2026-09-25)
+
+Pinned read sessions now expose single-blob location reads through the existing
+Get RPC. The provider checks caller and session cancellation before and after
+the RPC and decoding, cancels blocked Get requests when the session fails, and
+preserves the session failure cause. Missing keys and wrong blob types return
+no locations; provider and decoding errors remain errors. All matching stored
+copies are returned in record order, including compressed and uncompressed
+locations. Size and location reads share checks for ciphertext overhead,
+conflicting plaintext sizes and offsets beyond the existing32-bit pack index
+range. Schema decoding continues to reject malformed records and invalid types.
+
+`CachedBlobLookup` now implements the complete context-read capability, including
+single-size forwarding. Location requests share the size-batch RPC semaphore and
+shutdown tracking, but location arrays are deliberately not retained in the
+fixed-entry size LRU. Local published locations take precedence, with another
+local check after RPC completion. A caller cancellation leaves the session usable;
+a provider error poisons the lookup object so a later local/cache hit cannot hide
+the metadata failure. Close cancels and joins active location requests as well as
+size batches. Results still scale with the number of copies of the requested blob
+within the RPC message limit; this is not a constant-memory location response.
+
+Native integration tests load encrypted data and tree blobs through the repository
+with an empty local index and no catalog load, including two locations per type
+and the same content ID used for both types. Closing the session makes subsequent
+loads fail with the metadata-error classification. Additional native checks verify
+that locations published after pinning remain absent from the session but visible
+through the write overlay after compatibility export flush. Decoder, blocked-Get
+session failure, adapter cancellation/shutdown, native visibility and encrypted
+load tests pass ten race-enabled repetitions.
+
+Full archiver, backupcmd, engine and repository-index race suites pass with
+child-only permission-capability drops. Targeted repository admission/error
+propagation/catalog-loading tests and all read-session lifecycle tests also pass.
+Editor diagnostics and patch whitespace checks are clean.
+
+The focused `BenchmarkDecodeBlobLocations` compares initial per-location heap
+objects with an exactly sized contiguous location array plus pointer slice. Three
+repetitions before and after, in nanoseconds per decode:
+
+| Locations | Before (ns) | After (ns) | Allocations Before/After | Bytes Before/After |
+| --- | --- | --- | --- | --- |
+| 1 | 222.8 / 220.3 / 223.6 | 201.9 / 205.4 / 205.7 | 4 / 4 | 200 / 200 |
+| 16 | 2136 / 2164 / 2168 | 1873 / 1871 / 1531 | 20 / 4 | 2656 / 2592 |
+| 256 | 30797 / 28860 / 32391 | 19096 / 21169 / 23544 | 264 / 4 | 43360 / 41248 |
+
+At256 locations, mean decoder time falls from30.7 to21.3 microseconds (about31%),
+with98.5% fewer allocations. These are in-memory decoder measurements, not RPC
+latency or whole-backup throughput. Ordinary one-location records still use four
+allocations. The test does not establish production replica-count distribution.
+
+Production backup selection is unchanged and still loads the full catalog. Point
+reads are now usable through the existing repository error-aware boundary in tests,
+but activation still requires bounded write retention, scan-free pending-export
+recovery and exact startup sizing, plus session validation/publication fencing.
+No production backup run, daemon restart, deployment or wire change occurred in
+this stage; cwalk settings remain unchanged.
+
 ## Bounded pinned-session lookup cache and write visibility (2026-09-25)
 
 `CachedBlobLookup` provides a bounded size-result cache over the authoritative
