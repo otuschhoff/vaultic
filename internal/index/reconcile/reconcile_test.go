@@ -682,6 +682,99 @@ type gatedPublicationStore struct {
 	peak    atomic.Int32
 }
 
+type blockAllocationStore struct {
+	*fakeStore
+	requests []uint64
+	failure  error
+}
+
+func (store *blockAllocationStore) AllocateRevisionBlock(ctx context.Context, count uint64) (uint64, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	store.requests = append(store.requests, count)
+	if store.failure != nil {
+		return 0, store.failure
+	}
+	start := store.next + 1
+	store.next += count
+	return start, nil
+}
+
+func publicationTestBatch(first, count int) []preparedItem {
+	batch := make([]preparedItem, count)
+	for index := range batch {
+		name := fmt.Sprintf("file%d", first+index)
+		inode := uint64(100 + first + index)
+		batch[index] = preparedItem{
+			workItem: workItem{sourcePath: "/root/" + name, snapshotPath: "/" + name, node: *fileNode(name, 1)},
+			identity: identity{fsid: 1, inode: inode}, parent: identity{fsid: 1, inode: 10}, stat: fileInfo(1, inode, 1, 1),
+		}
+	}
+	return batch
+}
+
+func TestPublicationRevisionBlocksAreLazyAndGroupScoped(t *testing.T) {
+	store := &blockAllocationStore{fakeStore: newFakeStore()}
+	reconciler := &Reconciler{ctx: context.Background(), filesystem: testFilesystem(), store: store}
+	published := make(map[string]publishedItem)
+	first := publicationTestBatch(0, publicationConcurrency)
+	reconciler.publishInodes(first, published)
+	reconciler.publishInodes(first, published)
+	if len(store.requests) != 1 || store.next != publicationConcurrency || len(store.published) != publicationConcurrency {
+		t.Fatalf("reuse allocated revisions: requests=%v next=%d published=%d", store.requests, store.next, len(store.published))
+	}
+	mixed := append(append([]preparedItem(nil), first[:3]...), publicationTestBatch(4, 1)...)
+	reconciler.publishInodes(mixed, published)
+	if store.next != 8 || store.published[4].Revision != 5 {
+		t.Fatalf("partial group: next=%d revision=%d", store.next, store.published[4].Revision)
+	}
+	reconciler.publishInodes(publicationTestBatch(5, publicationConcurrency), published)
+	if len(store.requests) != 3 || store.next != 12 || len(published) != 9 || len(reconciler.errors) != 0 {
+		t.Fatalf("groups: requests=%v next=%d published=%d errors=%v", store.requests, store.next, len(published), reconciler.errors)
+	}
+	seen := make(map[uint64]bool)
+	for _, item := range store.published {
+		if seen[item.Revision] || item.Revision == 0 || (item.Revision >= 6 && item.Revision <= 8) {
+			t.Fatalf("duplicate or carried-over revision %d", item.Revision)
+		}
+		seen[item.Revision] = true
+	}
+	for _, count := range store.requests {
+		if count != publicationConcurrency {
+			t.Fatalf("unbounded reservation: %d", count)
+		}
+	}
+}
+
+func TestPublicationRevisionBlockFailureAndCancellation(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("canceled=%t", canceled), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			failure := errors.New("reservation failed")
+			store := &blockAllocationStore{fakeStore: newFakeStore(), failure: failure}
+			if canceled {
+				cancel()
+				failure = context.Canceled
+			}
+			reconciler := &Reconciler{ctx: ctx, filesystem: testFilesystem(), store: store}
+			published := make(map[string]publishedItem)
+			reconciler.publishInodes(publicationTestBatch(0, publicationConcurrency), published)
+			if len(published) != 0 || len(store.published) != 0 || store.next != 0 || len(reconciler.errors) != publicationConcurrency {
+				t.Fatalf("failed reservation published work: published=%d next=%d errors=%v", len(published), store.next, reconciler.errors)
+			}
+			for _, err := range reconciler.errors {
+				if !errors.Is(err, failure) {
+					t.Fatalf("expected %v, got %v", failure, err)
+				}
+			}
+		})
+	}
+}
+
 func (store *gatedPublicationStore) PublishReconciledRevision(ctx context.Context, revision daemon.ReconciledRevision) error {
 	active := store.active.Add(1)
 	defer store.active.Add(-1)
@@ -1105,6 +1198,52 @@ func TestDefaultWorkerCountAppliesBackpressure(t *testing.T) {
 		t.Fatal("128-worker producer did not resume")
 	}
 	_ = reconciler.Close()
+}
+
+func TestDaemonBackedPublicationRevisionBlocks(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	socketDirectory, err := os.MkdirTemp("", "vaultic-reconcile-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDirectory) })
+	client, err := daemon.Ensure(ctx, daemon.Options{
+		Socket: filepath.Join(socketDirectory, "daemon.sock"), RepositoryID: "reconcile-blocks",
+		DaemonPath: reconciliationDaemonBinary(t), DataDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	store := daemon.NewSchemaStore(client)
+	reconciler := &Reconciler{ctx: ctx, filesystem: testFilesystem(), store: store}
+	published := make(map[string]publishedItem)
+	batch := publicationTestBatch(0, publicationConcurrency)
+	reconciler.publishInodes(batch, published)
+	reconciler.publishInodes(batch, published)
+	if len(published) != publicationConcurrency || len(reconciler.errors) != 0 {
+		t.Fatalf("published=%d errors=%v", len(published), reconciler.errors)
+	}
+	seen := make(map[uint64]bool)
+	for _, item := range batch {
+		value, found, err := store.Get(ctx, schema.CurrentInodeKey(item.identity.fsid, item.identity.inode))
+		if err != nil || !found {
+			t.Fatalf("current inode: found=%t err=%v", found, err)
+		}
+		pointer, err := schema.UnmarshalCurrentPointer(value)
+		if err != nil || pointer.Revision == 0 || pointer.Revision > publicationConcurrency || seen[pointer.Revision] {
+			t.Fatalf("invalid revision: pointer=%+v err=%v", pointer, err)
+		}
+		seen[pointer.Revision] = true
+	}
+	if next, err := store.AllocateRevision(ctx); err != nil || next != publicationConcurrency+1 {
+		t.Fatalf("post-group revision=%d err=%v", next, err)
+	}
+	writer, err := client.WriterStatus(ctx)
+	if err != nil || writer.ActiveTransactions != 0 || writer.ActiveWriteIntents != 0 {
+		t.Fatalf("publication cleanup: writer=%+v err=%v", writer, err)
+	}
 }
 
 func TestDaemonBackedPostImportReconciliation(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -339,6 +340,89 @@ func TestStorageRoundTripTransactionsPaginationAndRestart(t *testing.T) {
 	value, foundAfterRestart, err := client.Get(ctx, []byte("tx:commit"), "")
 	if err != nil || !foundAfterRestart || string(value) != "visible" {
 		t.Fatalf("restart read = %q, %t, %v", value, foundAfterRestart, err)
+	}
+}
+
+func TestSchemaStoreRevisionAllocationContention(t *testing.T) {
+	for _, mode := range []string{"concurrent", "serialized", "grouped"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+			dataDirectory := t.TempDir()
+			if root := os.Getenv("VAULTICDB_TEST_DATA_ROOT"); root != "" {
+				var err error
+				dataDirectory, err = os.MkdirTemp(root, "allocation-")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.RemoveAll(dataDirectory) })
+			}
+			client, err := Ensure(ctx, Options{
+				Socket: testSocket(t), RepositoryID: "allocation-contention",
+				DaemonPath: daemonBinary(t), DataDir: dataDirectory,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close(context.Background())
+			store := NewSchemaStore(client)
+			before, err := client.WriterStatus(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const count = 128
+			concurrency, allocationSize := 4, 1
+			if mode != "concurrent" {
+				concurrency = 1
+			}
+			if mode == "grouped" {
+				allocationSize = 4
+			}
+			revisions := make([]uint64, count)
+			allocationErrors := make([]error, count)
+			var workers sync.WaitGroup
+			start := make(chan struct{})
+			for worker := range concurrency {
+				workers.Go(func() {
+					<-start
+					for index := worker * allocationSize; index < count; index += concurrency * allocationSize {
+						first, err := store.AllocateRevisionBlock(ctx, uint64(allocationSize))
+						for offset := range allocationSize {
+							revisions[index+offset], allocationErrors[index+offset] = first+uint64(offset), err
+						}
+					}
+				})
+			}
+			started := time.Now()
+			close(start)
+			workers.Wait()
+			elapsed := time.Since(started)
+			for _, err := range allocationErrors {
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			sort.Slice(revisions, func(left, right int) bool { return revisions[left] < revisions[right] })
+			for index, revision := range revisions {
+				if revision != uint64(index+1) {
+					t.Fatalf("revision[%d]=%d", index, revision)
+				}
+			}
+			after, err := client.WriterStatus(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			attempts := after.Attribution.CommitRequest.Attempts - before.Attribution.CommitRequest.Attempts
+			failures := after.Attribution.CommitRequest.Failures - before.Attribution.CommitRequest.Failures
+			if after.ActiveTransactions != 0 || after.ActiveWriteIntents != 0 || attempts-failures != uint64(count/allocationSize) {
+				t.Fatalf("allocation cleanup/accounting: attempts=%d failures=%d transactions=%d intents=%d",
+					attempts, failures, after.ActiveTransactions, after.ActiveWriteIntents)
+			}
+			if mode != "concurrent" && failures != 0 {
+				t.Fatalf("uncontended allocation had %d failed commits", failures)
+			}
+			t.Logf("revisions=%d seconds=%.6f attempts=%d failures=%d data_dir=%s", count, elapsed.Seconds(), attempts, failures, dataDirectory)
+		})
 	}
 }
 

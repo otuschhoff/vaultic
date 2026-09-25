@@ -648,10 +648,34 @@ func (reconciler *Reconciler) publishInodes(items []preparedItem, published map[
 		err error
 	}
 	results := make([]result, len(items))
+	allocate := reconciler.store.AllocateRevision
+	if store, ok := reconciler.store.(interface {
+		AllocateRevisionBlock(context.Context, uint64) (uint64, error)
+	}); ok {
+		var allocationMu sync.Mutex
+		var next uint64
+		allocate = func(ctx context.Context) (uint64, error) {
+			allocationMu.Lock()
+			defer allocationMu.Unlock()
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
+			if next == 0 {
+				start, err := store.AllocateRevisionBlock(ctx, uint64(len(items)))
+				if err != nil {
+					return 0, err
+				}
+				next = start
+			}
+			revision := next
+			next++
+			return revision, nil
+		}
+	}
 	var workers sync.WaitGroup
 	for index, item := range items {
 		workers.Go(func() {
-			results[index].key, results[index].err = reconciler.publishInodeRecord(item, false)
+			results[index].key, results[index].err = reconciler.publishInodeRecordWithAllocator(item, false, allocate)
 		})
 	}
 	workers.Wait()
@@ -865,6 +889,14 @@ func mergeDebtKeys(links []preparedItem) [][]byte {
 }
 
 func (reconciler *Reconciler) publishInodeRecord(item preparedItem, hardlink bool) ([]byte, error) {
+	return reconciler.publishInodeRecordWithAllocator(item, hardlink, reconciler.store.AllocateRevision)
+}
+
+func (reconciler *Reconciler) publishInodeRecordWithAllocator(
+	item preparedItem,
+	hardlink bool,
+	allocate func(context.Context) (uint64, error),
+) ([]byte, error) {
 	known := schema.KnownMTime | schema.KnownCTime | schema.KnownSize | schema.KnownMode
 	known |= schema.KnownUID | schema.KnownGID | schema.KnownParent | schema.KnownPath
 	record := schema.InodeRevision{
@@ -896,7 +928,7 @@ func (reconciler *Reconciler) publishInodeRecord(item preparedItem, hardlink boo
 	if err != nil {
 		return nil, err
 	}
-	key, reused, err := reconciler.publishRecord(item, value, false, content)
+	key, reused, err := reconciler.publishRecordWithAllocator(item, value, false, content, allocate)
 	if err != nil {
 		return nil, err
 	}
@@ -914,6 +946,16 @@ func (reconciler *Reconciler) publishRecord(
 	value []byte,
 	directory bool,
 	content []schema.ID,
+) ([]byte, bool, error) {
+	return reconciler.publishRecordWithAllocator(item, value, directory, content, reconciler.store.AllocateRevision)
+}
+
+func (reconciler *Reconciler) publishRecordWithAllocator(
+	item preparedItem,
+	value []byte,
+	directory bool,
+	content []schema.ID,
+	allocate func(context.Context) (uint64, error),
 ) ([]byte, bool, error) {
 	currentKey := schema.CurrentInodeKey(item.identity.fsid, item.identity.inode)
 	if directory {
@@ -934,7 +976,7 @@ func (reconciler *Reconciler) publishRecord(
 			return reusedKey, true, nil
 		}
 	}
-	revision, err := reconciler.store.AllocateRevision(reconciler.ctx)
+	revision, err := allocate(reconciler.ctx)
 	if err != nil {
 		return nil, false, err
 	}

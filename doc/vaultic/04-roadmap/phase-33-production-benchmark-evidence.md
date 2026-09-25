@@ -1,5 +1,81 @@
 # Phase 33 Production Benchmark Evidence
 
+## Group-scoped revision reservation, isolated R30 (2026-09-25)
+
+R29's aggregate commit failures do not distinguish allocation from publication.
+Inspection found that each new inode first allocates a revision through the same
+repository-wide counter. Four concurrent publications therefore contend on that
+counter even when their inode and path identities are independent. The existing
+`AllocateRevisionBlock` API already durably reserves a bounded sequence in one
+serializable transaction and is used by snapshot import.
+
+A first candidate serialized scalar allocation within each reconciler. An
+isolated native comparison rejected it: eliminating failed attempts also removed
+overlap of durable waits, making128 allocations approximately four times slower.
+That production-code candidate was removed before committing. Reconciliation now
+lazily reserves at most one successful block per pending publication group, sized
+to that group (at most four). Unchanged groups allocate nothing. Each changed
+inode receives one unique reserved revision and retains its own serializable,
+durable publication transaction and conflict retries. Unused numbers are discarded
+when the group joins; no reservation survives into another group, directories,
+hardlinks or snapshot-root/fence allocation. Gaps are permitted by the existing
+reservation contract. Stores without the optional block API retain scalar
+allocation. No larger process-wide revision cache or relaxed fence was added.
+
+The user was unavailable to explicitly approve another temporary production
+cache-setting change. Production was therefore neither restarted nor modified.
+R30 here is an isolated native allocation experiment, **not a cwalk backup run**.
+No backup was invoked. A matched ten-minute cwalk comparison with R29's temporary
+1GiB metadata budget remains pending explicit approval; the existing600s cap
+and restoration requirements still apply.
+
+Three repetitions per mode used fresh disposable HDD-NFS databases, runtime
+sockets under `/run`, and the exact unchanged12f686c29 daemon from R29. Each
+mode allocated128 unique contiguous revisions. The concurrent mode used four
+scalar allocators; serialized used one; grouped reserved32 consecutive blocks
+of four. Tests verified revision uniqueness, successful-commit counts, and zero
+active transactions/intents. There were no overlapping builds or other test
+jobs during the measured repetitions.
+
+| Allocation mode | Mean seconds | Commit attempts per run | Successful commits | Failed attempts |
+| --- | --- | --- | --- | --- |
+| Four concurrent scalar callers |3.232456|320|128|192|
+| Serialized scalar caller |12.940688|128|128|0|
+| Grouped, four revisions per reservation |3.233254|32|32|0|
+
+All three repetitions had identical attempt/success/failure counts within each
+mode. Grouping reduced allocation attempts90% and successful allocation commits
+75%, with effectively unchanged allocation throughput versus concurrent scalar
+callers. These results isolate counter contention and avoided work, not an
+end-to-end speedup, CPU reduction, or proof that all9,021 R29 failures came from
+allocation. Shared-content publication can still conflict. Full backup, matched
+cwalk throughput, cancellation under the representative workload, and completed
+snapshot/reopen validation remain outstanding for this candidate.
+
+Regressions cover lazy reservation, partial groups, unused-number disposal,
+unique revisions, reservation failure/cancellation, and scalar fallback through
+the existing overlap tests. A native reconciliation regression publishes four
+nodes, reuses them without allocating again, verifies the next scalar revision
+follows the reserved block, and checks cleanup; it passes three race repetitions.
+The complete native-backed reconciliation suite also passes three repetitions.
+Broad archiver/backup/index/repository-index race gates pass, native
+transaction/session/publication tests pass three repetitions, new-code lint
+reports zero issues, and the profiling CLI builds successfully.
+
+An initial fixture attempt placed sockets on HDD-NFS and failed before any
+measurement because inherited permissions violated the daemon's0700 runtime
+directory requirement. The test-only `VAULTICDB_TEST_DATA_ROOT` override now
+separates database storage from socket/runtime storage. The failed preflight log
+is retained and excluded from the table above. Production remained
+PID1260903/epoch68, read-write,128MiB metadata/512MiB block cache, zero active
+work, with original executable and unit hashes. No daemon/CLI deployment or
+shared-cache policy change occurred.
+
+Artifacts and measurement logs:
+`/volume2/NASDA2/rustic/db.test/allocation-r30-UVmGty`.
+The source patch is relative todfacb5b4f. The profiling candidate is
+`/run/vaultic-phase33-attribution/vaultic-group-revisions`.
+
 ## Bounded concurrent inode publication, R29 (2026-09-25)
 
 R28's late profile showed serialized durable revision publication holding up
