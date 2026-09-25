@@ -1,5 +1,29 @@
 # Phase 33 Production Benchmark Evidence
 
+## Eight-root overlap rejected, r12 (2026-09-25)
+
+The next candidate doubled root lanes to eight while retaining32 total cwalk
+workers. Repeated crawl and focused archiver race checks passed. The unchanged
+52-root/HDD-NFS run exits124 cleanly at603.551 seconds, after403.427 seconds of
+manifest work:2,405,394 directories,15,518,694 entries and2/52 completed roots.
+Relative to four-lane r11, directory counts fall8.9%, entry counts rise4.4%,
+and completed roots fall from3 to2. Root mixes differ, so these are not equal-work
+runtime ratios. With no compelling improvement, the eight-lane source changes
+are removed and four lanes retained.
+
+CLI CPU is1,656.74 seconds and peak RSS30,290,100KiB. Daemon CPU is736.09 seconds
+over604.286 seconds, with42,064 GETs,65.658390 aggregate service seconds and
+43,087,562,419 logical body bytes. All143 snapshots remain identical and metadata
+writes/commits remain zero; no sampler errors or forced kill occurred.
+Artifacts: `/volume2/NASDA2/rustic/db.test/backup-cwalk-roots8-2026-09-25-r12/`.
+
+Manifest construction still prevents any new backup from completing within the
+ten-minute experiment cap. Further ideas remain, especially an incremental
+directory-manifest consumer and reducing serialized directory-marker reads.
+They require separate lifecycle/selection correctness work. A longer explicitly
+authorized run is needed to validate completion and end-to-end runtime before
+treating the discovery gains as production backup acceleration.
+
 ## Bounded four-root manifest overlap, r11 (2026-09-25)
 
 Manifest construction now admits up to four roots concurrently, dynamically
