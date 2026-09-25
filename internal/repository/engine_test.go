@@ -260,6 +260,80 @@ func TestAuthoritativeCatalogLoadStreamsAndCleansUp(t *testing.T) {
 	}
 }
 
+func TestCachedAuthoritativeLookupWithPublishedOverlay(t *testing.T) {
+	ctx := t.Context()
+	client, err := daemon.Ensure(ctx, daemon.Options{
+		Socket: gcTestSocket(t), RepositoryID: t.Name(), DaemonPath: testGCDaemonPath(t),
+		DataDir: t.TempDir(), ObjectStore: "memory",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close(context.Background()) })
+	store := daemon.NewSchemaStore(client)
+	original := vaultic.NewRandomBlobHandle()
+	original.Type = vaultic.DataBlob
+	packID := schema.ID(vaultic.NewRandomID())
+	if err := store.PublishPack(ctx, daemon.PublishedPack{
+		PackID: packID,
+		Record: schema.PackRecord{Type: schema.PackData, BlobCount: 1, PayloadSize: 100, Lifecycle: schema.PackExportPending},
+		Blobs: map[schema.ID]schema.BlobRecord{schema.ID(original.ID): {Locations: []schema.BlobLocation{
+			{PackID: packID, Type: schema.BlobData, Length: 100, UncompressedSize: 123},
+		}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	session, err := store.BeginReadSession(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close(context.Background()) })
+	local := enginepkg.NewLegacyEngine()
+	lookup, err := enginepkg.NewCachedBlobLookup(session, local, 192, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lookup.Close() })
+	results, err := lookup.LookupSizesContext(ctx, []vaultic.BlobHandle{original, original})
+	if err != nil || len(results) != 2 || results[0] != (vaultic.BlobSize{Size: 123, Found: true}) || results[1] != results[0] {
+		t.Fatalf("native batch: results=%v err=%v", results, err)
+	}
+	written := vaultic.NewRandomBlobHandle()
+	if added, err := lookup.AddPendingContext(ctx, written, 321); err != nil || !added {
+		t.Fatalf("admit: added=%v err=%v", added, err)
+	}
+	repo := TestRepository(t)
+	engine := enginepkg.NewDaemonEngine(client, local)
+	repo.SetEngine(engine)
+	if err := engine.StorePack(ctx, vaultic.NewRandomID(), pack.Blobs{{BlobHandle: written, Length: 100, UncompressedLength: 321}}, &internalRepository{repo}); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Flush(ctx, &internalRepository{repo}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lookup.LookupSizesContext(ctx, []vaultic.BlobHandle{original}); err != nil {
+		t.Fatal(err)
+	}
+	results, err = lookup.LookupSizesContext(ctx, []vaultic.BlobHandle{written})
+	if err != nil || results[0] != (vaultic.BlobSize{Size: 321, Found: true}) {
+		t.Fatalf("flushed overlay: results=%v err=%v", results, err)
+	}
+	results, err = session.LookupBlobSizesContext(ctx, []vaultic.BlobHandle{written})
+	if err != nil || results[0].Found {
+		t.Fatalf("pinned snapshot advanced: results=%v err=%v", results, err)
+	}
+	if err := lookup.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	status, err := client.WriterStatus(ctx)
+	if err != nil || status.ActiveTransactions != 0 || status.ActiveWriteIntents != 0 {
+		t.Fatalf("leaked session: status=%+v err=%v", status, err)
+	}
+}
+
 func newEngineTestRepository(t *testing.T, be backend.Backend) *Repository {
 	t.Helper()
 	repo, err := New(be, Options{})

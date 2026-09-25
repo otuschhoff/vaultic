@@ -1,5 +1,59 @@
 # Phase 33 Production Benchmark Evidence
 
+## Bounded pinned-session lookup cache and write visibility (2026-09-25)
+
+`CachedBlobLookup` provides a bounded size-result cache over the authoritative
+pinned-session batch provider. It uses the existing LRU dependency, with a fixed
+192-byte accounting charge per entry to turn the supplied byte budget into an
+entry cap. This is conservative accounting for fixed-size keys/results, not an
+exact Go heap or RSS guarantee. Both positive and negative results are cached;
+errors and malformed reply counts poison the cache rather than becoming misses.
+Session health is checked on hits as well as misses, including write-index hits.
+
+RPC concurrency is independently bounded. Each active batch contains at most256
+distinct handles; overlapping requests share pending results. Cache hits bypass
+RPC slots, and callers waiting for slots can cancel. Canceling one caller does
+not cancel shared work needed by another caller: RPCs remain owned by the cache's
+session context until completion, session failure or cache close. Close rejects
+new work, cancels outstanding RPCs, joins workers and purges retained results.
+Closing the pinned session remains the owner's responsibility after cache close.
+
+The existing write index takes precedence over cached snapshot results, with a
+second check after RPC completion. Admission remains atomic through the existing
+pending-blob index. New writes stay visible after publication, compatibility
+export flush and cache eviction even though the pinned snapshot cannot see them.
+This reuses the existing index; it does NOT bound that index's retention of newly
+written blobs. A bounded or spilled write overlay is still needed before claiming
+bounded memory for an entire backup.
+
+Focused tests pass ten race-enabled repetitions, including real-daemon snapshot
+isolation, publication/flush/eviction,16-way single-blob admission, an in-flight
+miss racing a write, independent cancellation, failure handling and shutdown.
+With32 simultaneous256-handle callers and two RPC slots, the blocked-provider
+test observes exactly two RPCs and512 pending handles; queued requests cannot
+start after close. Full archiver, backupcmd, engine and repository-index race
+suites pass with child-only permission-capability drops. Editor diagnostics are
+clean.
+
+`BenchmarkCachedBlobLookup` uses256 handles and a synthetic zero-latency provider,
+not production storage. Its cold case purges the LRU before each operation, so
+timing includes purge and refill. Initial cold runs measured
+273,852/272,967/275,127 ns, about107.6KB and783 allocations per batch. Replacing
+per-handle completion channels with shared per-RPC completion state measured
+169,482/168,136/167,952 ns, about69.4KB and273 allocations: approximately38.5% less
+time and65.1% fewer allocations for this synthetic cold path. Both versions issue
+one provider batch per operation. Warm initial runs were
+23,093/23,363/23,169 ns; final runs were23,536/23,792/24,017 ns, with4,096 bytes,
+one allocation and zero provider batches per operation. No warm-path speedup is
+claimed, and these figures are not whole-backup or RPC-latency measurements.
+
+The cache is implemented and tested but not yet selected by the production
+engine. Backup still loads the full catalog. Remaining activation work includes
+blob-location point reads, bounded write retention, export recovery and exact
+startup sizing without a full blob scan, plus session validation and publication
+fencing. There was no new production backup run, daemon restart, deployment or
+wire-protocol change in this stage. Existing cwalk backup settings are unchanged.
+
 ## Bounded blob-size batches and authoritative point reads (2026-09-25)
 
 Unchanged-file content checks now use batches of at most256 blob handles through
