@@ -85,7 +85,7 @@ Metadata WAL flush cadence
 
 For backups using VaulticDB metadata, ``VAULTICDB_WAL_FLUSH_INTERVAL`` in the
 daemon environment controls the SlateDB WAL flush interval, for example
-``10ms``. A daemon restart is required. Check the effective value in the
+``100ms``. A daemon restart is required. Check the effective value in the
 ``engine_flush_interval_ms`` field of ``index writer status --json`` rather
 than assuming that the requested setting took effect.
 
@@ -99,6 +99,16 @@ Isolated allocation improvements are not evidence of a completed-backup speedup.
 Coordinate writer demotion/restart with active clients and preserve the original
 setting for rollback. Do not disable the WAL or use deferred commits as a
 substitute for measuring flush cadence.
+
+.. warning::
+
+  The phase-33 R34 production trial at ``10ms`` failed with a SlateDB fencing
+  error and subsequently could not reopen because WAL sequence ranges were
+  out of order. The root cause remains unresolved. Do not adopt this interval
+  for that deployment based on the earlier isolated allocation results.
+  Restoring the original interval did not restore database availability.
+  Preserve the database and investigate recovery on an isolated copy; do not
+  delete WAL files or bypass replay/fencing checks to make startup succeed.
 
 
 Compression

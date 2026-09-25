@@ -1,5 +1,97 @@
 # Phase 33 Production Benchmark Evidence
 
+## R34 rejected: fencing failure and blocked WAL replay (2026-09-25)
+
+**Incident state: the metadata service is stopped, not restored to availability.**
+The temporary settings were removed and the original unit validated/reloaded,
+but normal restart cannot open the database. Do not restart the optimization
+loop or treat this as an accepted performance result. Recovery needs preserved
+database/WAL state and investigation on an isolated copy before any live repair.
+No WAL files were deleted, fencing/replay checks bypassed, writer claim manually
+changed, or replacement daemon deployed.
+
+The user explicitly approved the ten-minute cwalk trial using10ms WAL flush
+and1GiB metadata cache, followed by restoration. R34 reused byte-identical R32
+CLI/daemon binaries (8064db714 CLI,12f686c29 daemon),52 roots, cwalk32, two file
+readers,64MiB result cache, HDD-NFS storage/scratch and600s cap/45s grace.
+Before measurement the writer was idle and effective interval/cache budgets
+were asserted. Original daemon/unit/shared-policy/quota hashes and snapshot
+filenames were archived. No builds or tests overlapped the run.
+
+The backup exited1 after578.78s, before the cap, with:
+
+```text
+metadata lookup failed: admit blob bfa33a9e:
+SlateDB operation failed: Closed error: detected newer DB client
+```
+
+The final snapshot query also failed with this error, so the standard analysis
+harness did not complete. Writer status still reported read-write/epoch73 with
+zero active transactions/intents despite the closed database. Status role and
+idle counters alone are therefore not sufficient post-run health checks. Final
+lookup statistics were emitted and scratch was empty; those cleanup results
+do not establish metadata integrity or successful snapshot publication.
+
+Normal non-forced demotion failed when it tried to flush the closed writer.
+The override was removed, original configuration reloaded, and a normal systemd
+restart attempted without forced writer takeover. Startup first reported
+`writer_claim_already_active` and opened a non-fencing reader, then failed with:
+
+```text
+WAL replay saw out-of-order seqs across WAL files.
+[wal_id=83951, min_seq=245877, last_seq=279193]
+```
+
+A readiness-event wait for the initial restart timed out. Inspection then found
+an automatic restart loop; the service was explicitly stopped at restart
+counter43. Final state was MainPID0, inactive/dead. Original100ms flush and
+128MiB metadata/512MiB block configuration is restored on disk, not verified
+through a working database. All143 repository snapshot filenames match the
+pre-trial set, but the post-recovery snapshot API read did not succeed. This is
+not a restore/integrity guarantee. Only one local vaulticdb process was present
+when the initial failure was inspected; remote writers have not been excluded.
+
+Read-only inspection of the pinned SlateDB source found that WAL `PutMode::Create`
+returning `AlreadyExists` can become `SlateDBError::Fenced`. That is one possible
+source of the newer-client message, not proof of the trigger in this incident.
+Replay requires strictly increasing sequence ranges across WAL files; the
+reported overlap violates that invariant. The causal chain between10ms cadence,
+writer ownership, WAL allocation and replay remains unresolved. The successful
+small R33 graceful-reopen tests did not cover this sustained workload/state.
+
+Diagnostic counters below cover different windows and reached data. They are
+not a valid capped throughput comparison or grounds to retain10ms:
+
+| Metric | R32 completed cap,100ms | R34 failed before cap,10ms |
+| --- | --- | --- |
+| Last file progress |119,023|143,903 at577s|
+| Logical bytes at that status |194,242,030,245|194,800,514,796|
+| Commit attempts /failures |40,114 /217|65,119 /1,603|
+| Durable waits /failures |8,422 /0|25,991 /4|
+| Mean accumulated durable wait |90.479ms|14.208ms|
+| Instrumented WAL PUT attempt delta |9,482|31,890|
+| Instrumented WAL PUT byte delta |7,404,597|23,081,870|
+| Metadata-object body bytes |37,064,973,533|41,003,246,466|
+| Daemon CPU seconds |501.55|699.37|
+| CLI CPU seconds /peak RSS KiB |1,128.81 /1,510,584|1,189.47 /1,537,656|
+
+WAL attempt counts are instrumentation outcomes, not unique object counts or a
+classification of physical storage errors. Counter deltas subtract the recorded
+pre-run baseline. The CLI emitted283,468 single-handle size RPCs and no cache
+evictions/location RPCs. No snapshot completed. R34 is rejected and was not
+repeated. Recovery-copy investigation was proposed, but the user was unavailable
+to explicitly authorize broader recovery; no live repair or database-copy
+operation was undertaken. Preserve the stopped state pending an operator-approved
+copy and recovery plan; do not discard offending WALs or silently roll back data.
+
+Incident artifacts, exact binaries, snapshots-before, failed-run metrics,
+original/stopped hashes, and full recovery journal:
+`/volume2/NASDA2/rustic/db.test/backup-flush10ms-20260925-r34-yJr3Hv`.
+`daemon-incident.log` records the restart failure. `snapshots.after.json` and a
+successful `writer-restored.json` are unavailable; empty files from failed
+commands must not be interpreted as successful evidence. The workspace revision
+was cbf236cf9, with CLI source separately recorded as8064db714. No push occurred.
+
 ## Durable flush-cadence experiment, isolated R33 (2026-09-25)
 
 R32's effective `engine_flush_interval_ms` was100. Its8,422 durable waits
@@ -49,10 +141,10 @@ The user was unavailable to explicitly approve the proposed temporary10ms WAL
 and1GiB metadata-cache production trial. Therefore no production restart,
 configuration change or backup was performed in R33. Production was verified
 unchanged at PID1281656/epoch72, read-write,100ms flush,128MiB metadata/512MiB
-block cache, and zero active transactions/intents. A matched600s cwalk trial
-with WAL traffic/latency attribution and restoration to these original settings
-is pending explicit approval. Longer snapshot completion/reopen/restore
-acceptance remains separately outstanding.
+block cache, and zero active transactions/intents. The subsequently approved
+R34 cwalk trial failed and recovery is blocked, as recorded above; this isolated
+result is not sufficient to recommend10ms. Longer snapshot completion/reopen/
+restore acceptance remains separately outstanding.
 
 Artifacts, source patch, binary hashes, measurements and gate logs:
 `/volume2/NASDA2/rustic/db.test/flush-cadence-20260925-r33-Hk2tYW`.
