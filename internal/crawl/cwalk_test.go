@@ -9,13 +9,15 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestBuildDirectoryManifestCancellationCleansTemporaryState(t *testing.T) {
 	for _, beforeStart := range []bool{true, false} {
 		t.Run(map[bool]string{true: "before-start", false: "during-first-root"}[beforeStart], func(t *testing.T) {
 			first, second, scratch := t.TempDir(), t.TempDir(), t.TempDir()
-			for _, root := range []string{first, second} {
+			roots := []string{first, t.TempDir(), t.TempDir(), t.TempDir(), second}
+			for _, root := range roots {
 				if err := os.Mkdir(filepath.Join(root, "child"), 0o700); err != nil {
 					t.Fatal(err)
 				}
@@ -27,7 +29,7 @@ func TestBuildDirectoryManifestCancellationCleansTemporaryState(t *testing.T) {
 				cancel()
 			}
 			var laterRoot atomic.Bool
-			manifest, err := BuildDirectoryManifest(ctx, []string{first, second}, 32, 1, func(item string, _ os.FileInfo) bool {
+			manifest, err := BuildDirectoryManifest(ctx, roots, 32, 1, func(item string, _ os.FileInfo) bool {
 				if strings.HasPrefix(item, second+string(filepath.Separator)) {
 					laterRoot.Store(true)
 				}
@@ -42,6 +44,85 @@ func TestBuildDirectoryManifestCancellationCleansTemporaryState(t *testing.T) {
 				t.Fatalf("canceled manifest retained temporary state: %v, %v", entries, err)
 			}
 		})
+	}
+}
+
+func TestManifestRootsOverlapAndJoin(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "complete", true: "canceled"}[canceled], func(t *testing.T) {
+			roots := []string{t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()}
+			for _, root := range roots {
+				if err := os.Mkdir(filepath.Join(root, "child"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			entered := make(chan struct{}, len(roots))
+			release := make(chan struct{})
+			done := make(chan struct{})
+			var manifest *DirectoryManifest
+			var err error
+			go func() {
+				defer close(done)
+				manifest, err = BuildDirectoryManifest(ctx, roots, 4, 1, func(string, os.FileInfo) bool {
+					entered <- struct{}{}
+					select {
+					case <-release:
+					case <-ctx.Done():
+					}
+					return false
+				})
+			}()
+			for range roots {
+				select {
+				case <-entered:
+				case <-ctx.Done():
+					<-done
+					t.Fatal("independent roots did not overlap")
+				}
+			}
+			if canceled {
+				cancel()
+			}
+			close(release)
+			<-done
+			if canceled {
+				if !errors.Is(err, context.Canceled) || manifest != nil {
+					t.Fatalf("expected canceled manifest, got %v, %v", manifest, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer manifest.Close()
+			for _, root := range roots {
+				names, found, err := manifest.Names(root)
+				if err != nil || !found || len(names) != 1 || names[0] != "child" {
+					t.Fatalf("incomplete root %s: %v, %v, %v", root, names, found, err)
+				}
+			}
+		})
+	}
+}
+
+func TestManifestRootFailureCancelsPeers(t *testing.T) {
+	scratch := t.TempDir()
+	t.Setenv("TMPDIR", scratch)
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "child"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	manifest, err := BuildDirectoryManifest(ctx, []string{root, filepath.Join(root, "missing")}, 4, 1, nil)
+	if manifest != nil || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected original root failure, got %v, %v", manifest, err)
+	}
+	entries, err := os.ReadDir(scratch)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("failed manifest retained temporary state: %v, %v", entries, err)
 	}
 }
 

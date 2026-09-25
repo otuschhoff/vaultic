@@ -1,5 +1,34 @@
 # Phase 33 Production Benchmark Evidence
 
+## Bounded four-root manifest overlap, r11 (2026-09-25)
+
+Manifest construction now admits up to four roots concurrently, dynamically
+taking the next root when a lane finishes. The total cwalk worker budget is
+divided across lanes, including any remainder; the bounded writer queue stays
+shared. The first root failure cancels active walkers and all lane goroutines
+are joined before writer shutdown. Tests gate callbacks to prove overlap,
+check every completed root's contents, retain queued-root cancellation coverage,
+and check original failure propagation/temporary-state cleanup. Repeated crawl
+race tests and focused archiver/backupcmd race tests pass.
+
+Explicit cwalk32/52-root/HDD-NFS r11 exits124 cleanly at603.534 seconds.
+The404.884-second manifest phase reads2,639,668 directories and lists14,863,532
+entries, completing3/52 roots versus r10's2/52. Compared with r10's403.480-second
+phase, raw directory work is2.50x and entry work2.97x. These are discovery counts
+across differently scheduled roots, not an equal-work or completed-backup speedup.
+CLI CPU rises from1,028.31 to1,637.60 seconds; peak RSS rises from29,833,424 to
+31,071,540KiB. Daemon CPU is737.22 seconds over604.279 seconds, with42,045 GETs,
+66.448638 aggregate service seconds and43,059,069,630 logical body bytes.
+All143 snapshot IDs remain identical and metadata writes/commits remain zero.
+There are no sampler errors or forced kills; the full manifest still blocks
+archiving when the ten-minute cap expires.
+
+Artifacts: `/volume2/NASDA2/rustic/db.test/backup-cwalk-roots4-2026-09-25-r11/`.
+Root overlap improves bounded discovery throughput provisionally. The next
+bounded comparison will test eight root lanes under the same32-worker budget;
+completion-level acceptance still requires a longer authorized run or removal
+of the eager whole-manifest startup barrier.
+
 ## Manifest progress observability, r10 (2026-09-25)
 
 An optional serialized manifest observer now reports roots completed, successful

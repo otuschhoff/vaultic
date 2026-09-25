@@ -75,6 +75,9 @@ defaults to 32. Use ``--no-cwalk`` to restore the legacy traversal. A bounded
 internal queue applies backpressure to concurrent callbacks. Non-local filesystem
 implementations use the standard scanner automatically.
 
+Manifest preparation overlaps up to four source roots. The configured worker
+count is divided among the active root lanes, not multiplied per root.
+
 JSON output includes ``cwalk_status`` records during manifest preparation, with
 total/completed roots, successful directory reads, listed entries and elapsed
 seconds. These are discovery counters, not archived files or transferred bytes.

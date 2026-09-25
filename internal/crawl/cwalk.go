@@ -177,6 +177,53 @@ func walkManifestRoots(
 	walkers *[]*cwalk.Walker,
 	counters *manifestCounters,
 ) error {
+	lanes := min(4, workers, len(roots))
+	if lanes <= 1 {
+		return walkManifestRootBatch(ctx, cancel, roots, workers, ignore, records, walkersMu, walkers, counters)
+	}
+	var next atomic.Uint64
+	var group sync.WaitGroup
+	var failOnce sync.Once
+	var firstErr error
+	for lane := 0; lane < lanes; lane++ {
+		budget := workers / lanes
+		if lane < workers%lanes {
+			budget++
+		}
+		group.Go(func() {
+			for ctx.Err() == nil {
+				index := int(next.Add(1) - 1)
+				if index >= len(roots) {
+					return
+				}
+				if err := walkManifestRootBatch(ctx, cancel, roots[index:index+1], budget, ignore, records, walkersMu, walkers, counters); err != nil {
+					failOnce.Do(func() {
+						firstErr = err
+						cancel()
+					})
+					return
+				}
+			}
+		})
+	}
+	group.Wait()
+	if firstErr != nil {
+		return firstErr
+	}
+	return ctx.Err()
+}
+
+func walkManifestRootBatch(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	roots []string,
+	workers int,
+	ignore func(string, os.FileInfo) bool,
+	records chan<- directoryRecord,
+	walkersMu *sync.Mutex,
+	walkers *[]*cwalk.Walker,
+	counters *manifestCounters,
+) error {
 	for _, root := range roots {
 		if err := ctx.Err(); err != nil {
 			return err
