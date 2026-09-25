@@ -531,6 +531,34 @@ func (arch *Archiver) lookupBlobSize(ctx context.Context, handle vaultic.BlobHan
 }
 
 func (arch *Archiver) allBlobsPresent(ctx context.Context, previous *data.Node) (bool, error) {
+	if reader, ok := arch.Repo.(vaultic.ContextBlobSizeBatchLookup); ok {
+		var handles [vaultic.BlobLookupBatchSize]vaultic.BlobHandle
+		for start := 0; start < len(previous.Content); start += len(handles) {
+			if err := ctx.Err(); err != nil {
+				return false, err
+			}
+			count := min(len(handles), len(previous.Content)-start)
+			for ordinal, id := range previous.Content[start : start+count] {
+				handles[ordinal] = vaultic.BlobHandle{Type: vaultic.DataBlob, ID: id}
+			}
+			sizes, err := reader.LookupBlobSizesContext(ctx, handles[:count])
+			if err != nil {
+				return false, fmt.Errorf("%w: %w", vaultic.ErrMetadataLookup, err)
+			}
+			if err := ctx.Err(); err != nil {
+				return false, err
+			}
+			if len(sizes) != count {
+				return false, fmt.Errorf("%w: batch returned %d results for %d blobs", vaultic.ErrMetadataLookup, len(sizes), count)
+			}
+			for _, size := range sizes {
+				if !size.Found {
+					return false, nil
+				}
+			}
+		}
+		return true, nil
+	}
 	// check if all blobs are contained in index
 	for _, id := range previous.Content {
 		_, found, err := arch.lookupBlobSize(ctx, vaultic.BlobHandle{Type: vaultic.DataBlob, ID: id})

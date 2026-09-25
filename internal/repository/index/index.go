@@ -276,6 +276,20 @@ func (idx *Index) LookupSize(bh vaultic.BlobHandle) (plaintextLength uint, found
 	idx.m.RLock()
 	defer idx.m.RUnlock()
 
+	return idx.lookupSize(bh)
+}
+
+func (idx *Index) lookupSizes(handles []vaultic.BlobHandle, sizes []vaultic.BlobSize) {
+	idx.m.RLock()
+	defer idx.m.RUnlock()
+	for ordinal, handle := range handles {
+		if !sizes[ordinal].Found {
+			sizes[ordinal].Size, sizes[ordinal].Found = idx.lookupSize(handle)
+		}
+	}
+}
+
+func (idx *Index) lookupSize(bh vaultic.BlobHandle) (uint, bool) {
 	e := idx.byType[bh.Type].get(bh.ID)
 	if e == nil {
 		return 0, false

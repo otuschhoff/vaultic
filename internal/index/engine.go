@@ -102,6 +102,10 @@ type ContextReadEngine interface {
 	LookupSizeContext(context.Context, vaultic.BlobHandle) (uint, bool, error)
 }
 
+type ContextBatchReadEngine interface {
+	LookupSizesContext(context.Context, []vaultic.BlobHandle) ([]vaultic.BlobSize, error)
+}
+
 // ScanEngine exposes read-only iteration for diagnostics and pack inspection.
 type ScanEngine interface {
 	Engine

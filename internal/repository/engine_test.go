@@ -31,6 +31,59 @@ type failingAdmissionEngine struct {
 	legacyCalled bool
 }
 
+type batchLookupEngine struct {
+	*enginepkg.LegacyEngine
+	results []vaultic.BlobSize
+	err     error
+	calls   int
+}
+
+func (engine *batchLookupEngine) LookupSizesContext(context.Context, []vaultic.BlobHandle) ([]vaultic.BlobSize, error) {
+	engine.calls++
+	return engine.results, engine.err
+}
+
+func TestRepositoryBatchLookup(t *testing.T) {
+	repo := TestRepository(t)
+	engine := &batchLookupEngine{LegacyEngine: enginepkg.NewLegacyEngine(), results: []vaultic.BlobSize{{Size: 123, Found: true}, {}}}
+	repo.SetEngine(engine)
+	reader := repo.AppendTransaction().(vaultic.ContextBlobSizeBatchLookup)
+	handles := []vaultic.BlobHandle{vaultic.NewRandomBlobHandle(), vaultic.NewRandomBlobHandle()}
+	results, err := reader.LookupBlobSizesContext(t.Context(), handles)
+	if err != nil || len(results) != 2 || results[0] != engine.results[0] || results[1].Found || engine.calls != 1 {
+		t.Fatalf("batch=%v err=%v calls=%d", results, err, engine.calls)
+	}
+	engine.results = engine.results[:1]
+	if results, err := reader.LookupBlobSizesContext(t.Context(), handles); results != nil || !errors.Is(err, vaultic.ErrMetadataLookup) {
+		t.Fatalf("short reply accepted: %v, %v", results, err)
+	}
+	engine.err = errors.New("batch unavailable")
+	if results, err := reader.LookupBlobSizesContext(t.Context(), handles); results != nil || !errors.Is(err, engine.err) {
+		t.Fatalf("provider failure lost: %v, %v", results, err)
+	}
+	calls := engine.calls
+	for _, invalid := range [][]vaultic.BlobHandle{make([]vaultic.BlobHandle, vaultic.BlobLookupBatchSize+1), {{Type: vaultic.InvalidBlob}}} {
+		if _, err := reader.LookupBlobSizesContext(t.Context(), invalid); !errors.Is(err, vaultic.ErrMetadataLookup) {
+			t.Fatalf("invalid batch accepted: %v", err)
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := reader.LookupBlobSizesContext(ctx, handles); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation ignored: %v", err)
+	}
+	if _, err := reader.LookupBlobSizesContext(t.Context(), nil); err != nil || engine.calls != calls {
+		t.Fatalf("invalid, canceled or empty request reached provider: err=%v calls=%d want=%d", err, engine.calls, calls)
+	}
+	legacy := enginepkg.NewLegacyEngine()
+	legacy.AddPending(handles[0], 321)
+	repo.SetEngine(legacy)
+	results, err = reader.LookupBlobSizesContext(t.Context(), handles)
+	if err != nil || results[0] != (vaultic.BlobSize{Size: 321, Found: true}) || results[1].Found {
+		t.Fatalf("legacy fallback=%v err=%v", results, err)
+	}
+}
+
 func (engine *failingAdmissionEngine) AddPendingContext(context.Context, vaultic.BlobHandle, uint) (bool, error) {
 	return false, engine.err
 }

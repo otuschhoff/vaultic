@@ -29,8 +29,61 @@ type metadataFailureRepo struct {
 	failTree bool
 }
 
+type boundedBatchRepo struct {
+	*repository.Repository
+	calls   []int
+	missing bool
+	short   bool
+	cancel  context.CancelFunc
+}
+
+func (repo *boundedBatchRepo) LookupBlobSizesContext(_ context.Context, handles []vaultic.BlobHandle) ([]vaultic.BlobSize, error) {
+	repo.calls = append(repo.calls, len(handles))
+	if repo.cancel != nil {
+		repo.cancel()
+	}
+	results := make([]vaultic.BlobSize, len(handles))
+	for ordinal := range results {
+		results[ordinal].Found = !repo.missing
+	}
+	if repo.short {
+		return results[:len(results)-1], nil
+	}
+	return results, nil
+}
+
+func TestArchiverBoundedBlobLookups(t *testing.T) {
+	previous := &data.Node{Content: make(vaultic.IDs, 2*vaultic.BlobLookupBatchSize+1)}
+	reader := &boundedBatchRepo{}
+	arch := New(reader, fs.NewLocal(), Options{})
+	present, err := arch.allBlobsPresent(t.Context(), previous)
+	if !present || err != nil || fmt.Sprint(reader.calls) != "[256 256 1]" {
+		t.Fatalf("bounded lookup: present=%v err=%v calls=%v", present, err, reader.calls)
+	}
+	reader.calls, reader.missing = nil, true
+	present, err = arch.allBlobsPresent(t.Context(), previous)
+	if present || err != nil || len(reader.calls) != 1 {
+		t.Fatalf("missing lookup: present=%v err=%v calls=%v", present, err, reader.calls)
+	}
+	reader.missing, reader.short = false, true
+	if _, err := arch.allBlobsPresent(t.Context(), previous); !errors.Is(err, vaultic.ErrMetadataLookup) {
+		t.Fatalf("short response accepted: %v", err)
+	}
+	reader.short = false
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	reader.cancel = cancel
+	if _, err := arch.allBlobsPresent(ctx, previous); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation after response ignored: %v", err)
+	}
+}
+
 func (repo *metadataFailureRepo) LookupBlobSizeContext(context.Context, vaultic.BlobHandle) (uint, bool, error) {
 	return 0, false, repo.failure
+}
+
+func (repo *metadataFailureRepo) LookupBlobSizesContext(context.Context, []vaultic.BlobHandle) ([]vaultic.BlobSize, error) {
+	return nil, repo.failure
 }
 
 func (repo *metadataFailureRepo) LoadBlob(ctx context.Context, handle vaultic.BlobHandle, buf []byte) ([]byte, error) {

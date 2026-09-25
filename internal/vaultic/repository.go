@@ -16,6 +16,29 @@ type ContextBlobSizeLookup interface {
 	LookupBlobSizeContext(context.Context, BlobHandle) (uint, bool, error)
 }
 
+const BlobLookupBatchSize = 256
+
+type BlobSize struct {
+	Size  uint
+	Found bool
+}
+
+type ContextBlobSizeBatchLookup interface {
+	LookupBlobSizesContext(context.Context, []BlobHandle) ([]BlobSize, error)
+}
+
+func ValidateBlobLookupBatch(handles []BlobHandle) error {
+	if len(handles) > BlobLookupBatchSize {
+		return errors.Errorf("blob lookup batch has %d items, limit is %d", len(handles), BlobLookupBatchSize)
+	}
+	for _, handle := range handles {
+		if handle.Type != DataBlob && handle.Type != TreeBlob {
+			return errors.Errorf("invalid blob lookup type %d", handle.Type)
+		}
+	}
+	return nil
+}
+
 // Repository stores data in a backend. It provides high-level functions and
 // transparently encrypts/decrypts data.
 type Repository interface {

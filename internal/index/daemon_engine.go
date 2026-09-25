@@ -412,6 +412,20 @@ func (engine *DaemonEngine) LookupSizeContext(ctx context.Context, handle vaulti
 	return size, found, nil
 }
 
+func (engine *DaemonEngine) LookupSizesContext(ctx context.Context, handles []vaultic.BlobHandle) ([]vaultic.BlobSize, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := vaultic.ValidateBlobLookupBatch(handles); err != nil {
+		return nil, err
+	}
+	sizes := engine.legacy.master.LookupSizes(handles)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return sizes, nil
+}
+
 func (engine *DaemonEngine) AddPendingContext(ctx context.Context, handle vaultic.BlobHandle, size uint) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err

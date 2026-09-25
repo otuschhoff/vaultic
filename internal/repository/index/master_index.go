@@ -71,6 +71,19 @@ func (mi *MasterIndex) LookupSize(bh vaultic.BlobHandle) (uint, bool) {
 	return 0, false
 }
 
+func (mi *MasterIndex) LookupSizes(handles []vaultic.BlobHandle) []vaultic.BlobSize {
+	mi.idxMutex.RLock()
+	defer mi.idxMutex.RUnlock()
+	sizes := make([]vaultic.BlobSize, len(handles))
+	for ordinal, handle := range handles {
+		sizes[ordinal].Size, sizes[ordinal].Found = mi.pendingBlobs[handle]
+	}
+	for _, idx := range mi.idx {
+		idx.lookupSizes(handles, sizes)
+	}
+	return sizes
+}
+
 // AddPending adds a given blob to list of pending Blobs
 // Before doing so it checks if this blob is already known.
 // Returns true if adding was successful and false if the blob

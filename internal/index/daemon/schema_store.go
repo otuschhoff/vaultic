@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/index/schema"
+	"github.com/otuschhoff/vaultic/internal/repository/crypto"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -253,6 +255,92 @@ func (session *ReadSession) MultiGet(ctx context.Context, keys [][]byte) ([]KeyV
 		}
 	}
 	return session.transaction.MultiGet(ctx, keys)
+}
+
+func (session *ReadSession) LookupBlobSizesContext(ctx context.Context, handles []vaultic.BlobHandle) ([]vaultic.BlobSize, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := context.Cause(session.Context()); err != nil {
+		return nil, err
+	}
+	if err := vaultic.ValidateBlobLookupBatch(handles); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithCancelCause(ctx)
+	stop := context.AfterFunc(session.Context(), func() { cancel(context.Cause(session.Context())) })
+	defer stop()
+	defer cancel(nil)
+	keys := make([][]byte, 0, len(handles))
+	ordinals := make(map[vaultic.ID]int, len(handles))
+	for _, handle := range handles {
+		if _, found := ordinals[handle.ID]; !found {
+			ordinals[handle.ID] = len(keys)
+			keys = append(keys, schema.BlobKey(schema.ID(handle.ID)))
+		}
+	}
+	limit := min(uint64(vaultic.BlobLookupBatchSize), uint64(session.client.Limits().MaxBatchItems))
+	if limit == 0 {
+		return nil, fmt.Errorf("daemon does not support batched blob lookups")
+	}
+	resolved := make([][vaultic.NumBlobTypes]vaultic.BlobSize, len(keys))
+	for start := 0; start < len(keys); start += int(limit) {
+		end := min(start+int(limit), len(keys))
+		values, found, err := session.MultiGet(ctx, keys[start:end])
+		if err != nil {
+			if cause := context.Cause(ctx); cause != nil {
+				return nil, cause
+			}
+			return nil, err
+		}
+		for ordinal, value := range values {
+			if !found[ordinal] {
+				continue
+			}
+			sizes, err := decodeBlobSizes(value.Value)
+			if err != nil {
+				return nil, fmt.Errorf("decode blob lookup: %w", err)
+			}
+			resolved[start+ordinal] = sizes
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := context.Cause(session.Context()); err != nil {
+		return nil, err
+	}
+	results := make([]vaultic.BlobSize, len(handles))
+	for ordinal, handle := range handles {
+		results[ordinal] = resolved[ordinals[handle.ID]][handle.Type]
+	}
+	return results, nil
+}
+
+func decodeBlobSizes(encoded []byte) ([vaultic.NumBlobTypes]vaultic.BlobSize, error) {
+	var sizes [vaultic.NumBlobTypes]vaultic.BlobSize
+	record, err := schema.UnmarshalBlobRecord(encoded)
+	if err != nil {
+		return sizes, err
+	}
+	for _, location := range record.Locations {
+		blobType := vaultic.DataBlob
+		if location.Type == schema.BlobTree {
+			blobType = vaultic.TreeBlob
+		}
+		if uint64(location.Length) < uint64(crypto.CiphertextLength(0)) {
+			return sizes, fmt.Errorf("%w: blob ciphertext is shorter than its overhead", schema.ErrMalformed)
+		}
+		size := uint(location.UncompressedSize)
+		if size == 0 {
+			size = uint(crypto.PlaintextLength(int(location.Length)))
+		}
+		if sizes[blobType].Found && sizes[blobType].Size != size {
+			return sizes, fmt.Errorf("%w: conflicting plaintext sizes for blob locations", schema.ErrMalformed)
+		}
+		sizes[blobType] = vaultic.BlobSize{Size: size, Found: true}
+	}
+	return sizes, nil
 }
 
 func (session *ReadSession) ScanPrefix(ctx context.Context, prefix, afterKey []byte, pageSize uint32) ([]KeyValue, bool, error) {

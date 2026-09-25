@@ -1,5 +1,49 @@
 # Phase 33 Production Benchmark Evidence
 
+## Bounded blob-size batches and authoritative point reads (2026-09-25)
+
+Unchanged-file content checks now use batches of at most256 blob handles through
+an optional engine/repository capability. Append transactions forward the batch
+contract. The daemon's loaded-index implementation checks pending blobs first
+and acquires each index lock once per batch, preserving first-match precedence,
+duplicate ordering and missing results. Callers without the capability retain
+context-aware individual lookup fallback. Invalid types, oversized requests,
+provider errors and malformed reply counts fail closed; missing blobs stop
+further reuse batches. The archiver retains only one256-handle request at a time.
+
+The focused `BenchmarkMasterIndexLookupSizes` compares the same256 IDs across
+four projections. Three repetitions measured individual lookup batches at
+46,784/45,470/47,264 ns and batched lookups at30,712/30,593/31,374 ns. Mean lookup
+time falls from46.5 to30.9 microseconds, about34%, with one4,096-byte allocation
+per batch instead of zero allocations. This is a microbenchmark of content
+lookup, not a measured whole-backup runtime improvement.
+
+A pinned ReadSession now also provides the batch contract using the existing
+VaulticDB MultiGet RPC. It coalesces duplicate blob IDs, splits requests at the
+negotiated item limit, decodes each unique record once, and restores requested
+order and blob types. Corrupt records, ciphertext shorter than encryption
+overhead, and conflicting plaintext sizes are errors rather than misses.
+Session failure cancels in-flight RPCs even with an independent caller context;
+closed/failed sessions and canceled callers cannot return successful results.
+
+Real-daemon tests verify that batches see the session's original snapshot and
+not later publications, including a negotiated limit of two keys, duplicate IDs,
+wrong blob types, absent keys and session closure. Additional tests cover pending
+zero-sized blobs, compressed/uncompressed size parity, malformed replies,
+513-ID partitioning into256/256/1, cancellation after a provider response, and
+session failure during a blocked RPC. Full archiver, backupcmd, engine and index
+race suites pass with child-only permission-capability drops; targeted repository
+and repeated read-session/decoder race tests also pass. The blocked-RPC fixture
+initially lacked KV subclient initialization; correcting the fixture passes the
+same checks without a production change.
+
+Backup still loads the full catalog and uses the loaded-index batch provider.
+The authoritative session batch provider is implemented and tested, but is not
+yet selected by the backup engine. Next work remains a bounded cache/new-write
+overlay and a startup mode that avoids full enumeration while preserving export
+recovery, sizing, session validation and publication fencing. No new production
+benchmark, daemon restart, deployment or wire-protocol change is claimed here.
+
 ## Error-aware backup lookup boundary (2026-09-25)
 
 After committing the R19 sizing improvement as `db519782c`, the next local

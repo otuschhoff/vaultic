@@ -177,6 +177,10 @@ func (tx *appendTransaction) LookupBlobSizeContext(ctx context.Context, h vaulti
 	return tx.repo.LookupBlobSizeContext(ctx, h)
 }
 
+func (tx *appendTransaction) LookupBlobSizesContext(ctx context.Context, handles []vaultic.BlobHandle) ([]vaultic.BlobSize, error) {
+	return tx.repo.LookupBlobSizesContext(ctx, handles)
+}
+
 func (tx *appendTransaction) WithBlobUploader(ctx context.Context, fn func(context.Context, vaultic.BlobSaverWithAsync) error) error {
 	return tx.repo.WithBlobUploader(ctx, fn)
 }

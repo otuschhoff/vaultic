@@ -238,6 +238,40 @@ func (r *Repository) LookupBlobSizeContext(ctx context.Context, handle vaultic.B
 	return size, found, nil
 }
 
+func (r *Repository) LookupBlobSizesContext(ctx context.Context, handles []vaultic.BlobHandle) ([]vaultic.BlobSize, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := vaultic.ValidateBlobLookupBatch(handles); err != nil {
+		return nil, fmt.Errorf("%w: %w", vaultic.ErrMetadataLookup, err)
+	}
+	if len(handles) == 0 {
+		return []vaultic.BlobSize{}, nil
+	}
+	if reader, ok := r.Engine().(enginepkg.ContextBatchReadEngine); ok {
+		sizes, err := reader.LookupSizesContext(ctx, handles)
+		if err != nil {
+			return nil, fmt.Errorf("%w: batch: %w", vaultic.ErrMetadataLookup, err)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if len(sizes) != len(handles) {
+			return nil, fmt.Errorf("%w: batch returned %d results for %d blobs", vaultic.ErrMetadataLookup, len(sizes), len(handles))
+		}
+		return sizes, nil
+	}
+	sizes := make([]vaultic.BlobSize, len(handles))
+	for ordinal, handle := range handles {
+		size, found, err := r.LookupBlobSizeContext(ctx, handle)
+		if err != nil {
+			return nil, err
+		}
+		sizes[ordinal] = vaultic.BlobSize{Size: size, Found: found}
+	}
+	return sizes, nil
+}
+
 // ListBlobs runs fn on all blobs known to the index. When the context is cancelled,
 // the index iteration returns immediately with ctx.Err(). This blocks any modification of the index.
 func (r *Repository) ListBlobs(ctx context.Context, fn func(vaultic.PackBlob)) error {

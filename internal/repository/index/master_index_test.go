@@ -75,6 +75,16 @@ func TestMasterIndex(t *testing.T) {
 	mIdx := index.NewMasterIndex()
 	mIdx.Insert(idx1)
 	mIdx.Insert(idx2)
+	pending := vaultic.NewRandomBlobHandle()
+	rtest.Assert(t, mIdx.AddPending(pending, 0), "pending blob was not admitted")
+	handles := []vaultic.BlobHandle{bhInIdx1, bhInIdx2, bhInIdx12, pending, vaultic.NewRandomBlobHandle(), bhInIdx1}
+	batched := mIdx.LookupSizes(handles)
+	rtest.Equals(t, len(handles), len(batched))
+	for ordinal, handle := range handles {
+		size, found := mIdx.LookupSize(handle)
+		rtest.Equals(t, vaultic.BlobSize{Size: size, Found: found}, batched[ordinal])
+	}
+	rtest.Equals(t, 0, len(mIdx.LookupSizes(nil)))
 
 	// test idInIdx1
 	blobs := mIdx.Lookup(bhInIdx1)
@@ -120,6 +130,35 @@ func TestMasterIndex(t *testing.T) {
 	rtest.Assert(t, blobs == nil, "Expected no blobs when fetching with a random id")
 	_, found = mIdx.LookupSize(vaultic.NewRandomBlobHandle())
 	rtest.Assert(t, !found, "Expected no blobs when fetching with a random id")
+}
+
+func BenchmarkMasterIndexLookupSizes(b *testing.B) {
+	master := index.NewMasterIndex()
+	handles := make([]vaultic.BlobHandle, vaultic.BlobLookupBatchSize)
+	for shard := range 4 {
+		projection := index.NewIndex()
+		var blobs pack.Blobs
+		for ordinal := shard; ordinal < len(handles); ordinal += 4 {
+			handles[ordinal] = vaultic.NewRandomBlobHandle()
+			blobs = append(blobs, pack.Blob{BlobHandle: handles[ordinal], Length: 100, Offset: uint(ordinal * 100)})
+		}
+		projection.StorePack(vaultic.NewRandomID(), blobs)
+		master.Insert(projection)
+	}
+	b.Run("individual", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			for _, handle := range handles {
+				master.LookupSize(handle)
+			}
+		}
+	})
+	b.Run("batch", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			master.LookupSizes(handles)
+		}
+	})
 }
 
 func TestMasterIndexAddPending(t *testing.T) {
