@@ -1,5 +1,40 @@
 # Phase 33 Production Benchmark Evidence
 
+## Recursive component filter reduction, r7/r8 (2026-09-25)
+
+The r6 profile exposed recursive wildcard expansion in exclusions. Patterns
+`**/component` and `**/component/**` now reduce to the existing component-search
+matcher, retaining original pattern text, negation, malformed-component errors,
+and the old minimum path length for the trailing recursive form. The first
+literal-only candidate caught a one-component relative-path edge case in tests;
+the final candidate preserves it and supports glob components as well.
+An explicit wildcard-expansion oracle covers literals, wildcards, classes,
+escapes, malformed patterns, roots and short paths. The full filter race suite
+and affected crawl/backup tests pass.
+
+R7 (literals only) still spent 190.45 sampled CPU seconds in filter.match,
+versus r6's 251.52; the remaining recursive Trash wildcard was active in stacks.
+R8 includes glob components. Both runs use the same cwalk32/52-root/HDD-NFS
+scope and ten-minute cap, reach manifest preparation after catalog reads plateau
+around 205 seconds, and cancel cleanly without publishing a snapshot.
+
+| Metric | r7 | r8 |
+| --- | ---: | ---: |
+| Wall seconds | 603.423 | 603.015 |
+| CLI CPU seconds | 1,220.20 | 1,072.40 |
+| Peak CLI RSS, KiB | 30,445,032 | 29,752,232 |
+| Daemon CPU seconds | 734.47 | 733.53 |
+| Main GETs | 42,044 | 42,064 |
+| Logical body bytes | 43,074,542,380 | 43,107,706,747 |
+
+These are bounded runs, not equal completed-work measurements: manifest record
+progress is not yet exposed, so lower CPU is not a proven throughput ratio.
+All 143 snapshot IDs remain unchanged; metadata writes/commits and sampler errors
+are zero. R8's late stack moves to metadata exclusion checks, including marker
+file Lstat inside serialized selection. Evidence is retained under
+`db.test/backup-cwalk-filter-2026-09-25-r7` and
+`db.test/backup-cwalk-component-2026-09-25-r8`.
+
 ## Cwalk metadata read concurrency, r6 (2026-09-25)
 
 Manifest selection previously held one mutex across name selection, a second

@@ -400,6 +400,97 @@ func TestFilterPatternsFile(t *testing.T) {
 	}
 }
 
+func TestRecursiveLiteralPatternEquivalence(t *testing.T) {
+	for _, pair := range [][2]string{
+		{"**/.snapshot/**", "**/[.]snapshot/**"},
+		{"**/.snapshot", "**/[.]snapshot"},
+		{"**/lost+found/**", "**/[l]ost+found/**"},
+	} {
+		for _, path := range []string{"", "/", ".snapshot", "/.snapshot", "root/.snapshot", "/root/.snapshot/child",
+			"/root/lost+found/child", "lost+found", "root/ordinary/deep/path", "/root/.snapshot-other/child"} {
+			for _, negation := range []string{"", "!"} {
+				fast := filter.ParsePatterns([]string{"ordinary", negation + pair[0]})
+				generic := filter.ParsePatterns([]string{"ordinary", negation + pair[1]})
+				got, gotChild, gotErr := filter.ListWithChild(fast, path)
+				want, wantChild, wantErr := filter.ListWithChild(generic, path)
+				if got != want || gotChild != wantChild || (gotErr == nil) != (wantErr == nil) {
+					t.Fatalf("pattern %q path %q: fast (%v,%v,%v), generic (%v,%v,%v)", negation+pair[0], path,
+						got, gotChild, gotErr, want, wantChild, wantErr)
+				}
+			}
+		}
+	}
+}
+
+func expandedComponentMatch(component, path string, trailing bool) (bool, error) {
+	if path == "" {
+		return filter.Match(component, path)
+	}
+	components := len(strings.Split(filepath.ToSlash(path), "/"))
+	minimum := 1
+	if trailing {
+		minimum = 2
+	}
+	for leading := 0; leading <= components-minimum; leading++ {
+		last := 0
+		if trailing {
+			last = components - leading - 1
+		}
+		for ending := 0; ending <= last; ending++ {
+			pattern := strings.Repeat("*/", leading) + component + strings.Repeat("/*", ending)
+			matched, err := filter.Match(pattern, path)
+			if err != nil || matched {
+				return matched, err
+			}
+		}
+	}
+	return false, nil
+}
+
+func TestRecursiveComponentMatchesExpansion(t *testing.T) {
+	for _, component := range []string{".snapshot", ".Trash-*", "*", "?", "[ab]*", "[^a]*", "file?.txt", "[", "a[", "[!]", `\*`} {
+		for _, prefix := range []string{"", "/", "root/", "/root/"} {
+			for _, name := range []string{"", ".snapshot", ".Trash-123", "alpha", "beta", "file1.txt", "*"} {
+				for _, suffix := range []string{"", "/child", "/child/grandchild"} {
+					path := prefix + name + suffix
+					for _, trailing := range []bool{false, true} {
+						pattern := "**/" + component
+						if trailing {
+							pattern += "/**"
+						}
+						got, gotErr := filter.Match(pattern, path)
+						want, wantErr := expandedComponentMatch(component, path, trailing)
+						if got != want || fmt.Sprint(gotErr) != fmt.Sprint(wantErr) {
+							t.Fatalf("pattern %q path %q: optimized (%v,%v), expanded (%v,%v)", pattern, path, got, gotErr, want, wantErr)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func BenchmarkRecursiveLiteralExclusions(b *testing.B) {
+	for _, variant := range []struct {
+		name     string
+		patterns []string
+	}{
+		{"CharacterClass", []string{"**/[.]snapshot/**", "**/[.]snapshot", "**/[l]ost+found/**"}},
+		{"Literal", []string{"**/.snapshot/**", "**/.snapshot", "**/lost+found/**"}},
+	} {
+		b.Run(variant.name, func(b *testing.B) {
+			patterns := filter.ParsePatterns(variant.patterns)
+			b.ReportAllocs()
+			for iteration := 0; iteration < b.N; iteration++ {
+				matched, err := filter.List(patterns, "/server/source/project/work/current/design/documents/file.dat")
+				if err != nil || matched {
+					b.Fatalf("unexpected filter result: %v, %v", matched, err)
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkFilterLines(b *testing.B) {
 	pattern := "sdk/*/cpp/*/*vars.html"
 	lines := extractTestLines(b)

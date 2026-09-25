@@ -52,6 +52,10 @@ func preparePattern(patternStr string) Pattern {
 		parts[i] = patternPart{part, isSimple}
 	}
 
+	if len(parts) == 2 && parts[0].pattern == "" && parts[1].pattern != "" {
+		parts = parts[1:]
+	}
+
 	return Pattern{originalPattern, parts, negate}
 }
 
@@ -147,6 +151,10 @@ func hasDoubleWildcard(list Pattern) (ok bool, pos int) {
 
 //nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
 func match(pattern Pattern, strs []string) (matched bool, err error) {
+	if len(strs) >= 2 && len(pattern.parts) == 3 && pattern.parts[0].pattern == "" &&
+		pattern.parts[2].pattern == "" && pattern.parts[1].pattern != "" {
+		pattern.parts = pattern.parts[1:2]
+	}
 	if ok, pos := hasDoubleWildcard(pattern); ok {
 		// gradually expand '**' into separate wildcards
 		newPat := make([]patternPart, len(strs))
