@@ -289,8 +289,7 @@ func TestCachedAuthoritativeLookupWithPublishedOverlay(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = session.Close(context.Background()) })
-	local := enginepkg.NewLegacyEngine()
-	lookup, err := enginepkg.NewCachedBlobLookup(session, local, 192, 2)
+	lookup, local, err := enginepkg.NewSpillingBlobLookup(session, t.TempDir(), 192, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,12 +311,18 @@ func TestCachedAuthoritativeLookupWithPublishedOverlay(t *testing.T) {
 	if err := engine.Flush(ctx, &internalRepository{repo}); err != nil {
 		t.Fatal(err)
 	}
+	for range local.Values() {
+		t.Fatal("exported write retained in memory")
+	}
 	if _, err := lookup.LookupSizesContext(ctx, []vaultic.BlobHandle{original}); err != nil {
 		t.Fatal(err)
 	}
 	results, err = lookup.LookupSizesContext(ctx, []vaultic.BlobHandle{written})
 	if err != nil || results[0] != (vaultic.BlobSize{Size: 321, Found: true}) {
 		t.Fatalf("flushed overlay: results=%v err=%v", results, err)
+	}
+	if added, err := lookup.AddPendingContext(ctx, written, 321); err != nil || added {
+		t.Fatalf("spilled write readmitted: %v %v", added, err)
 	}
 	for _, handle := range []vaultic.BlobHandle{original, written} {
 		blobs, err := lookup.LookupContext(ctx, handle)

@@ -2,6 +2,7 @@ package index_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"runtime"
@@ -19,6 +20,41 @@ import (
 	"github.com/otuschhoff/vaultic/internal/ui/progress"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
+
+func TestMasterIndexSavedSpill(t *testing.T) {
+	for _, failing := range []bool{false, true} {
+		t.Run(fmt.Sprint(failing), func(t *testing.T) {
+			_, repo, _ := repository.TestRepositoryWithVersion(t, 2)
+			failure := errors.New("spill unavailable")
+			calls := 0
+			master := index.NewSpillingMasterIndex(func(ctx context.Context, saved *index.Index) error {
+				calls++
+				ids, err := saved.IDs()
+				if err != nil || len(ids) == 0 {
+					t.Fatal("spill ran before successful export")
+				}
+				if failing {
+					return failure
+				}
+				return ctx.Err()
+			})
+			handle := vaultic.NewRandomBlobHandle()
+			blob := pack.Blob{BlobHandle: handle, Length: uint(crypto.CiphertextLength(12))}
+			rtest.OK(t, master.StorePack(t.Context(), vaultic.NewRandomID(), pack.Blobs{blob}, repo))
+			err := master.Flush(t.Context(), repo)
+			if failing {
+				if !errors.Is(err, failure) {
+					t.Fatalf("spill error=%v", err)
+				}
+			} else {
+				rtest.OK(t, err)
+			}
+			if calls != 1 || (len(master.Lookup(handle)) != 0) != failing {
+				t.Fatalf("calls=%d retained=%v", calls, master.Lookup(handle))
+			}
+		})
+	}
+}
 
 func TestMasterIndex(t *testing.T) {
 	bhInIdx1 := vaultic.NewRandomBlobHandle()

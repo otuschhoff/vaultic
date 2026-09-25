@@ -1,5 +1,73 @@
 # Phase 33 Production Benchmark Evidence
 
+## Encrypted spill for exported write indexes (2026-09-25)
+
+`NewSpillingBlobLookup` creates an opt-in write index and temporary encrypted
+overlay. Successfully exported indexes are handed to the overlay before being
+removed from the in-memory master index. Failed compatibility export or failed
+handoff retains the entries and returns an error. Existing constructors keep
+their original retention behavior. This spill-backed index is intended for the
+context-aware lookup adapter, not synchronous maintenance callers that expect
+the master index to contain every location.
+
+The active index retains the existing50,000-blob rotation threshold and bounded
+pack-sized overshoot. Exported entries use Pebble with an8MiB block cache,
+4MiB memtables, a two-memtable write-stop threshold and write batches capped at
+approximately1MiB. These are component budgets, not an exact heap/RSS cap: active
+uploads, index export encoding, concurrent exporters, Pebble overhead, OS cache
+and individual returned location lists also consume memory. Disk usage grows
+with new writes. The daemon engine's pending-pack map still requires bounded
+bookkeeping before claiming bounded memory for the whole backup.
+
+Scratch values use AES-GCM with random nonces and key-bound authentication;
+handle and location lookup tokens use HMAC-SHA256. Encryption/token keys are
+random per instance and are not stored on disk. The constructor requires an
+explicit scratch parent, creates a private temporary directory and removes it
+on close. The overlay uses non-sync writes because it is disposable process
+state: authoritative pack publication and compatibility export precede eviction.
+It is not a crash-recovery database and is not reopened after process restart.
+Known disk/authentication failures are sticky and cannot be hidden by cache hits.
+
+Lookups check active writes, spilled writes and then pinned-snapshot results.
+Positive spill sizes reuse the existing bounded LRU; negative snapshot hits
+still check local writes. Admission rechecks local visibility under its lock.
+Tests cover32 export cycles retaining zero exported in-memory locations while
+all512 spilled locations remain readable, automatic export/spill of50,001
+entries,16 concurrent readers/admitters racing eviction, failed export/handoff,
+encrypted-value tampering and cleanup. A real-daemon test confirms that a write
+published after snapshot pinning remains visible after export and eviction,
+cannot be admitted again, and stays absent from the pinned snapshot itself.
+
+The concurrent handoff test passes ten race-enabled repetitions; spill/cache and
+native visibility tests pass repeated race runs. Full archiver, backupcmd, engine
+and repository-index race suites pass, as do targeted native recovery, point-read,
+catalog-loading and metadata-error tests. Editor diagnostics are clean. The first
+handoff test needed the existing unrestricted test saver rather than the public
+append-only repository interface; correcting that fixture passes the same check.
+
+`BenchmarkWrittenBlobLookup` compares repeated256-handle size batches before
+and after spill. Scratch was under the HDD-backed NFS path
+`/volume2/NASDA2/rustic/db.test`, with no overlapping tests. The working set is
+small and warm; this does not measure cold HDD latency or a full backup.
+
+| Path | Initial ns/op (three runs) | Final ns/op (three runs) | Initial/Final Allocations |
+| --- | --- | --- | --- |
+| Active index | 22933 / 22700 / 22800 | 22808 / 23046 / 23433 | 1 / 1 |
+| Spilled entries | 744554 / 748621 / 741027 | 24563 / 24416 / 24194 | 3073 / 1 |
+
+The initial spill path performed a Pebble iterator/decryption for every handle
+on every request, allocating about202.5KB per batch. Bounded positive-cache reuse
+reduces warmed spill batches from about744.7 to24.4 microseconds and to about4.1KB
+per batch. Final active-index batches average23.1 microseconds and4,096 bytes.
+The spill benchmark includes its initial cache fill amortized over repetitions;
+cold reads and working sets larger than the LRU remain more expensive.
+
+Production does not yet select the spill-backed adapter and still loads the
+full catalog. Next work is owned session/publication fencing, pending-pack
+bookkeeping and activation with conservative handling of unavailable sizing.
+There was no production backup run, daemon restart, deployment or wire change;
+cwalk settings are unchanged.
+
 ## Pack-scoped sizing and pending-export recovery (2026-09-25)
 
 `ReadSession.ScanPackInventory` streams the pinned `p:` catalog in bounded pages

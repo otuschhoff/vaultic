@@ -2,10 +2,12 @@ package index
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
 	lru "github.com/hashicorp/golang-lru/v2"
+	legacyindex "github.com/otuschhoff/vaultic/internal/repository/index"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
@@ -38,6 +40,73 @@ type CachedBlobLookup struct {
 	mutex   sync.Mutex
 	pending map[vaultic.BlobHandle]blobLookupResult
 	workers sync.WaitGroup
+	written *writtenBlobStore
+}
+
+func NewSpillingBlobLookup(session blobLookupSession, directory string, budgetBytes, concurrency int) (*CachedBlobLookup, *LegacyEngine, error) {
+	written, err := newWrittenBlobStore(directory)
+	if err != nil {
+		return nil, nil, err
+	}
+	local := NewLegacyEngine(legacyindex.NewSpillingMasterIndex(written.StoreIndex))
+	lookup, err := NewCachedBlobLookup(session, local, budgetBytes, concurrency)
+	if err != nil {
+		return nil, nil, errors.Join(err, written.Close())
+	}
+	lookup.written = written
+	return lookup, local, nil
+}
+
+func (lookup *CachedBlobLookup) localSizes(ctx context.Context, handles []vaultic.BlobHandle) ([]vaultic.BlobSize, error) {
+	if lookup.written != nil {
+		if err := lookup.written.Error(); err != nil {
+			lookup.cancel(err)
+			return nil, err
+		}
+	}
+	sizes := lookup.local.master.LookupSizes(handles)
+	if lookup.written == nil {
+		return sizes, nil
+	}
+	for ordinal, handle := range handles {
+		if sizes[ordinal].Found {
+			continue
+		}
+		if size, cached := lookup.cache.Get(handle); cached && size.Found {
+			sizes[ordinal] = size
+			continue
+		}
+		blobs, err := lookup.written.lookup(ctx, handle, true)
+		if err != nil {
+			if ctx.Err() == nil {
+				lookup.cancel(err)
+			}
+			return nil, err
+		}
+		if len(blobs) != 0 {
+			sizes[ordinal] = vaultic.BlobSize{Size: blobs[0].PlaintextLength(), Found: true}
+			lookup.cache.Add(handle, sizes[ordinal])
+		}
+	}
+	return sizes, nil
+}
+
+func (lookup *CachedBlobLookup) localLocations(ctx context.Context, handle vaultic.BlobHandle) ([]*pack.PackedBlob, error) {
+	if lookup.written != nil {
+		if err := lookup.written.Error(); err != nil {
+			lookup.cancel(err)
+			return nil, err
+		}
+	}
+	blobs := lookup.local.Lookup(handle)
+	if len(blobs) != 0 || lookup.written == nil {
+		return blobs, nil
+	}
+	blobs, err := lookup.written.lookup(ctx, handle, false)
+	if err != nil && ctx.Err() == nil {
+		lookup.cancel(err)
+	}
+	return blobs, err
 }
 
 var _ ContextReadEngine = (*CachedBlobLookup)(nil)
@@ -62,14 +131,18 @@ func (lookup *CachedBlobLookup) LookupContext(ctx context.Context, handle vaulti
 	if err := context.Cause(lookup.ctx); err != nil {
 		return nil, err
 	}
-	if blobs := lookup.local.Lookup(handle); len(blobs) != 0 {
+	local, err := lookup.localLocations(ctx, handle)
+	if err != nil {
+		return nil, err
+	}
+	if len(local) != 0 {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		if err := context.Cause(lookup.ctx); err != nil {
 			return nil, err
 		}
-		return blobs, nil
+		return local, nil
 	}
 	select {
 	case lookup.slots <- struct{}{}:
@@ -113,7 +186,11 @@ func (lookup *CachedBlobLookup) LookupContext(ctx context.Context, handle vaulti
 		lookup.cancel(err)
 		return nil, err
 	}
-	if current := lookup.local.Lookup(handle); len(current) != 0 {
+	current, err := lookup.localLocations(ctx, handle)
+	if err != nil {
+		return nil, err
+	}
+	if len(current) != 0 {
 		blobs = current
 	}
 	return blobs, nil
@@ -147,7 +224,11 @@ func (lookup *CachedBlobLookup) LookupSizesContext(ctx context.Context, handles 
 		lookup.mutex.Unlock()
 		return nil, err
 	}
-	results := lookup.local.master.LookupSizes(handles)
+	results, err := lookup.localSizes(ctx, handles)
+	if err != nil {
+		lookup.mutex.Unlock()
+		return nil, err
+	}
 	cached := true
 	for ordinal, handle := range handles {
 		if results[ordinal].Found {
@@ -177,7 +258,11 @@ func (lookup *CachedBlobLookup) LookupSizesContext(ctx context.Context, handles 
 	case <-lookup.ctx.Done():
 		return nil, context.Cause(lookup.ctx)
 	}
-	results = lookup.local.master.LookupSizes(handles)
+	results, err = lookup.localSizes(ctx, handles)
+	if err != nil {
+		<-lookup.slots
+		return nil, err
+	}
 	waiting := make([]blobLookupResult, len(handles))
 	var missing []vaultic.BlobHandle
 	var batch *blobLookupBatch
@@ -235,7 +320,11 @@ func (lookup *CachedBlobLookup) LookupSizesContext(ctx context.Context, handles 
 	if err := context.Cause(lookup.ctx); err != nil {
 		return nil, err
 	}
-	for ordinal, current := range lookup.local.master.LookupSizes(handles) {
+	currentSizes, err := lookup.localSizes(ctx, handles)
+	if err != nil {
+		return nil, err
+	}
+	for ordinal, current := range currentSizes {
 		if current.Found {
 			results[ordinal] = current
 		}
@@ -287,6 +376,13 @@ func (lookup *CachedBlobLookup) AddPendingContext(ctx context.Context, handle va
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
+	current, err := lookup.localSizes(ctx, []vaultic.BlobHandle{handle})
+	if err != nil {
+		return false, err
+	}
+	if current[0].Found {
+		return false, nil
+	}
 	return lookup.local.AddPending(handle, size), nil
 }
 
@@ -296,5 +392,8 @@ func (lookup *CachedBlobLookup) Close() error {
 	lookup.mutex.Unlock()
 	lookup.workers.Wait()
 	lookup.cache.Purge()
+	if lookup.written != nil {
+		return lookup.written.Close()
+	}
 	return nil
 }

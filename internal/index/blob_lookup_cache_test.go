@@ -1,14 +1,18 @@
 package index
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/pebble"
+	legacyindex "github.com/otuschhoff/vaultic/internal/repository/index"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
@@ -343,6 +347,249 @@ func TestCachedBlobLookupBoundsInflightBatches(t *testing.T) {
 	callers.Wait()
 	if calls.Load() != 2 {
 		t.Fatalf("queued RPC ran after close: %d", calls.Load())
+	}
+}
+
+type overlayTestSaver struct{ err error }
+
+func (saver *overlayTestSaver) Connections() uint { return 1 }
+func (saver *overlayTestSaver) SaveUnpacked(_ context.Context, _ vaultic.FileType, value []byte) (vaultic.ID, error) {
+	return vaultic.Hash(value), saver.err
+}
+
+func TestSpillingBlobLookup(t *testing.T) {
+	session := &testBlobLookupSession{ctx: t.Context(), query: func(_ context.Context, handles []vaultic.BlobHandle) ([]vaultic.BlobSize, error) {
+		return make([]vaultic.BlobSize, len(handles)), nil
+	}}
+	lookup, local, err := NewSpillingBlobLookup(session, t.TempDir(), blobLookupCacheEntryBytes, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lookup.Close()
+	var expected []*pack.PackedBlob
+	for cycle := range 32 {
+		packID := vaultic.NewRandomID()
+		var blobs pack.Blobs
+		for ordinal := range 16 {
+			handle := vaultic.NewRandomBlobHandle()
+			if ordinal%2 == 0 {
+				handle.Type = vaultic.TreeBlob
+			} else {
+				handle.Type = vaultic.DataBlob
+			}
+			if added, err := lookup.AddPendingContext(t.Context(), handle, 123); err != nil || !added {
+				t.Fatalf("admission=%v err=%v", added, err)
+			}
+			blob := pack.Blob{BlobHandle: handle, Offset: uint(ordinal * 100), Length: 100, UncompressedLength: 123}
+			blobs = append(blobs, blob)
+			expected = append(expected, &pack.PackedBlob{Pack: packID, Blob: blob})
+		}
+		if err := local.StorePack(t.Context(), packID, blobs, &overlayTestSaver{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := local.Flush(t.Context(), &overlayTestSaver{}); err != nil {
+			t.Fatal(err)
+		}
+		for range local.Values() {
+			t.Fatalf("cycle %d retained exported locations", cycle)
+		}
+	}
+	for _, want := range expected {
+		got, err := lookup.LookupContext(t.Context(), want.Handle())
+		if err != nil || len(got) != 1 || *got[0] != *want {
+			t.Fatalf("spilled location mismatch: %v %v", got, err)
+		}
+		if size, found, err := lookup.LookupSizeContext(t.Context(), want.Handle()); err != nil || !found || size != 123 {
+			t.Fatalf("spilled size=%d found=%v err=%v", size, found, err)
+		}
+		if added, err := lookup.AddPendingContext(t.Context(), want.Handle(), 123); err != nil || added {
+			t.Fatalf("readmitted spilled blob: %v %v", added, err)
+		}
+	}
+	path := lookup.written.path
+	if err := lookup.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("overlay not removed: %v", err)
+	}
+}
+
+func TestSpillingBlobLookupAutomaticExport(t *testing.T) {
+	lookup, local, err := NewSpillingBlobLookup(&testBlobLookupSession{ctx: t.Context()}, t.TempDir(), blobLookupCacheEntryBytes, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lookup.Close()
+	blobs := make(pack.Blobs, 50001)
+	for ordinal := range blobs {
+		blobs[ordinal] = pack.Blob{BlobHandle: vaultic.NewRandomBlobHandle(), Offset: uint(ordinal * 100), Length: 100, UncompressedLength: 123}
+	}
+	if err := local.StorePack(t.Context(), vaultic.NewRandomID(), blobs, &overlayTestSaver{}); err != nil {
+		t.Fatal(err)
+	}
+	for range local.Values() {
+		t.Fatal("full exported index retained")
+	}
+	for _, ordinal := range []int{0, 25000, 50000} {
+		if size, found, err := lookup.LookupSizeContext(t.Context(), blobs[ordinal].BlobHandle); err != nil || !found || size != 123 {
+			t.Fatalf("automatic spill lookup: %d %v %v", size, found, err)
+		}
+	}
+}
+
+func TestSpillingBlobLookupConcurrentHandoff(t *testing.T) {
+	lookup, local, err := NewSpillingBlobLookup(&testBlobLookupSession{ctx: t.Context()}, t.TempDir(), blobLookupCacheEntryBytes, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lookup.Close()
+	handle := vaultic.NewRandomBlobHandle()
+	if err := local.StorePack(t.Context(), vaultic.NewRandomID(), pack.Blobs{{BlobHandle: handle, Length: 100, UncompressedLength: 123}}, &overlayTestSaver{}); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	for range 16 {
+		workers.Go(func() {
+			<-start
+			for range 32 {
+				if size, found, err := lookup.LookupSizeContext(t.Context(), handle); err != nil || !found || size != 123 {
+					t.Errorf("handoff lost blob: %d %v %v", size, found, err)
+				}
+				if admitted, err := lookup.AddPendingContext(t.Context(), handle, 123); err != nil || admitted {
+					t.Errorf("handoff readmitted blob: %v %v", admitted, err)
+				}
+			}
+		})
+	}
+	close(start)
+	if err := local.Flush(t.Context(), &overlayTestSaver{}); err != nil {
+		t.Fatal(err)
+	}
+	workers.Wait()
+}
+
+func BenchmarkWrittenBlobLookup(b *testing.B) {
+	for _, spilled := range []bool{false, true} {
+		b.Run(fmt.Sprint(spilled), func(b *testing.B) {
+			lookup, local, err := NewSpillingBlobLookup(&testBlobLookupSession{ctx: b.Context()}, b.TempDir(), 256*blobLookupCacheEntryBytes, 2)
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer lookup.Close()
+			handles := make([]vaultic.BlobHandle, 256)
+			blobs := make(pack.Blobs, len(handles))
+			for ordinal := range handles {
+				handles[ordinal] = vaultic.NewRandomBlobHandle()
+				blobs[ordinal] = pack.Blob{BlobHandle: handles[ordinal], Length: 100, UncompressedLength: 123}
+			}
+			if err := local.StorePack(b.Context(), vaultic.NewRandomID(), blobs, &overlayTestSaver{}); err != nil {
+				b.Fatal(err)
+			}
+			if spilled {
+				if err := local.Flush(b.Context(), &overlayTestSaver{}); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := lookup.LookupSizesContext(b.Context(), handles); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func TestWrittenBlobStoreEncryptionAndFailure(t *testing.T) {
+	store, err := newWrittenBlobStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	handle := vaultic.NewRandomBlobHandle()
+	packID := vaultic.NewRandomID()
+	index := legacyindex.NewIndex()
+	index.StorePack(packID, pack.Blobs{{BlobHandle: handle, Length: 100, UncompressedLength: 123}})
+	if err := store.StoreIndex(t.Context(), index); err != nil {
+		t.Fatal(err)
+	}
+	iterator, err := store.database.NewIter(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !iterator.First() {
+		t.Fatal("no encrypted entry")
+	}
+	key, value := bytes.Clone(iterator.Key()), bytes.Clone(iterator.Value())
+	if bytes.Contains(key, handle.ID[:]) || bytes.Contains(key, packID[:]) || bytes.Contains(value, packID[:]) {
+		t.Fatal("plaintext metadata in overlay")
+	}
+	if err := iterator.Close(); err != nil {
+		t.Fatal(err)
+	}
+	value[len(value)-1] ^= 1
+	if err := store.database.Set(key, value, pebble.NoSync); err != nil {
+		t.Fatal(err)
+	}
+	if blobs, err := store.lookup(t.Context(), handle, false); err == nil || len(blobs) != 0 {
+		t.Fatal("tampered entry accepted")
+	}
+	if blobs, err := store.lookup(t.Context(), vaultic.NewRandomBlobHandle(), true); err == nil || len(blobs) != 0 {
+		t.Fatal("tamper failure was not sticky")
+	}
+	if err := store.StoreIndex(t.Context(), index); err == nil {
+		t.Fatal("write after corruption succeeded")
+	}
+}
+
+func TestSpillingBlobLookupRetainsFailedExport(t *testing.T) {
+	t.Run("failed spill after successful export", func(t *testing.T) {
+		lookup, local, err := NewSpillingBlobLookup(&testBlobLookupSession{ctx: t.Context()}, t.TempDir(), blobLookupCacheEntryBytes, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer lookup.Close()
+		handle := vaultic.NewRandomBlobHandle()
+		if err := local.StorePack(t.Context(), vaultic.NewRandomID(), pack.Blobs{{BlobHandle: handle, Length: 100}}, &overlayTestSaver{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := lookup.written.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := local.Flush(t.Context(), &overlayTestSaver{}); err == nil {
+			t.Fatal("closed spill store accepted handoff")
+		}
+		if len(local.Lookup(handle)) != 1 {
+			t.Fatal("failed spill evicted entries")
+		}
+		if _, err := lookup.LookupContext(t.Context(), handle); err == nil {
+			t.Fatal("local hit hid spill failure")
+		}
+	})
+	session := &testBlobLookupSession{ctx: t.Context()}
+	lookup, local, err := NewSpillingBlobLookup(session, t.TempDir(), blobLookupCacheEntryBytes, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lookup.Close()
+	handle := vaultic.NewRandomBlobHandle()
+	if err := local.StorePack(t.Context(), vaultic.NewRandomID(), pack.Blobs{{BlobHandle: handle, Length: 100}}, &overlayTestSaver{}); err != nil {
+		t.Fatal(err)
+	}
+	failure := errors.New("export failed")
+	if err := local.Flush(t.Context(), &overlayTestSaver{err: failure}); !errors.Is(err, failure) {
+		t.Fatalf("export err=%v", err)
+	}
+	if len(local.Lookup(handle)) != 1 {
+		t.Fatal("failed export evicted entries")
+	}
+	if err := lookup.written.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := lookup.LookupSizeContext(t.Context(), handle); err == nil {
+		t.Fatal("local hit hid closed overlay")
 	}
 }
 

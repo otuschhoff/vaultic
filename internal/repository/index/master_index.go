@@ -18,6 +18,13 @@ type MasterIndex struct {
 	idx          []*Index
 	pendingBlobs map[vaultic.BlobHandle]uint
 	idxMutex     sync.RWMutex
+	spill        func(context.Context, *Index) error
+}
+
+func NewSpillingMasterIndex(spill func(context.Context, *Index) error) *MasterIndex {
+	master := NewMasterIndex()
+	master.spill = spill
+	return master
 }
 
 // NewMasterIndex creates a new master index.
@@ -759,8 +766,26 @@ func (mi *MasterIndex) saveIndex(ctx context.Context, r vaultic.SaverUnpacked[va
 		}
 
 		debug.Log("Saved index %d as %v", i, sid)
+		if mi.spill != nil {
+			if err := mi.spill(ctx, idx); err != nil {
+				return fmt.Errorf("spill saved index: %w", err)
+			}
+			mi.idxMutex.Lock()
+			for ordinal, current := range mi.idx {
+				if current == idx {
+					copy(mi.idx[ordinal:], mi.idx[ordinal+1:])
+					mi.idx[len(mi.idx)-1] = nil
+					mi.idx = mi.idx[:len(mi.idx)-1]
+					break
+				}
+			}
+			mi.idxMutex.Unlock()
+		}
 	}
 
+	if mi.spill != nil {
+		return nil
+	}
 	return mi.MergeFinalIndexes()
 }
 
