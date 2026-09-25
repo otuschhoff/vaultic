@@ -1,5 +1,58 @@
 # Phase 33 Production Benchmark Evidence
 
+## Authorized 60-minute cwalk validation, r13 (2026-09-25)
+
+The user explicitly approved one 60-minute validation of the retained four-root
+implementation before further architectural changes. R13 tests clean revision
+`937c9ec79bc53a2601d1b135b545ad2965256594`, using upstream cwalk v1.0.1,
+the unchanged 52 roots, explicit `--use-cwalk --cwalk-concurrency=32`, and
+HDD-backed NFS manifest scratch. Only the harness timeout and stack-capture
+schedule change. No builds or tests overlap the measurement.
+
+The run does not complete a manifest or backup. It exits124 after 3,604.868
+seconds, with graceful cleanup about five seconds after TERM and no forced kill.
+Manifest preparation lasts 3,403.678 seconds, reads 19,644,226 directories and
+lists 126,290,996 entries, completing only 5/52 roots. Final progress is
+`finished:true,complete:false`; stdout contains only `cwalk_status` records,
+not archival status or a snapshot summary. Average discovery rates are about
+5,771 directories/s and 37,104 entries/s. Root-count milestones first appear
+at manifest seconds5 (2 roots),345 (3),1080 (4), and1800 (5). Unequal root sizes
+make root counts unsuitable for extrapolating a completion time.
+
+CLI CPU totals 8,748.17 seconds and peak RSS is 33,931,504KiB (about32.36GiB).
+The daemon uses 757.69 CPU seconds over a 3,605.614-second observation window;
+metadata records 51,733 GETs, 68.564315 aggregate GET-service seconds and
+42,928,699,783 logical body bytes. The catalog phase finishes near200 seconds,
+so the remaining time is manifest work rather than catalog loading. All143
+snapshot IDs remain unchanged, metadata engine writes/commits remain zero,
+and active transactions/write intents are zero afterward. The original daemon
+remains healthy at PID431717/epoch55. Scratch is empty, the backup process has
+exited, and no sampler errors occurred. No daemon restart, deployment or push
+was performed.
+
+The CPU profile contains 8,634.73 sampled CPU seconds, of which 5,001.06 seconds
+(57.92%) are in `internal/runtime/syscall/linux.Syscall6`. At3550 seconds,
+25 cwalk workers wait on the selection mutex (14 before name selection and11
+before metadata selection). The lock holder is inside `RejectIfPresent` /
+`isDirExcludedByFile`, performing a marker-file `Lstat`; other workers are in
+directory reads or cwalk child stats. This is evidence of serialized filesystem
+selection work, not proof that all elapsed time is mutex waiting. The manifest
+writer remains active and discovery counters continue increasing until TERM.
+
+The hour validates sustained traversal and clean cancellation but still cannot
+establish completed-backup runtime or durability of a new snapshot. The next
+focused optimization target is directory-marker checks under the shared
+selection lock, preserving callback safety and exclusion semantics. An
+incremental manifest consumer remains a broader alternative to the eager
+whole-manifest barrier. Routine experiments retain the ten-minute cap; this
+authorization does not extend future runs automatically.
+
+Artifacts:
+`/volume2/NASDA2/rustic/db.test/backup-cwalk-roots4-60m-2026-09-25-r13/`.
+The directory contains the exact command and roots, binary fingerprints, clean
+source revision/patch, before/after snapshot and writer records, five-second
+samples, CPU profile, ten stack captures, and analyzer output.
+
 ## Eight-root overlap rejected, r12 (2026-09-25)
 
 The next candidate doubled root lanes to eight while retaining32 total cwalk
