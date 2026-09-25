@@ -1,5 +1,65 @@
 # Phase 33 Production Benchmark Evidence
 
+## Durable flush-cadence experiment, isolated R33 (2026-09-25)
+
+R32's effective `engine_flush_interval_ms` was100. Its8,422 durable waits
+accumulated762,016,399 microseconds, about90.5ms per wait. This is concurrent
+accumulated time, not elapsed backup time. The transaction commit implementation
+awaits the storage handle's `await_durable()` before acknowledging ordinary
+commits. The existing `VAULTICDB_WAL_FLUSH_INTERVAL` tuning parameter changes
+flush cadence without switching those commits to deferred durability.
+
+The existing native allocation comparison now explicitly selects100ms for its
+baseline modes and adds a grouped10ms case. It asserts the effective interval,
+unique revisions,32 successful durable commits for128 grouped revisions, no
+failed commits or active transactions/intents, and the next allocated revision
+after closing/reopening the database. Reopen happens outside the timed window.
+This is a graceful reopen check, not a forced-crash recovery test.
+
+Three race-enabled repetitions used fresh disposable HDD-NFS databases, private
+runtime sockets under `/run`, the exact unchanged12f686c29 daemon, and no
+overlapping builds/tests during measurement. Each case reserved32 groups of
+four revisions, retaining ordinary serializable durable transactions.
+
+| Metric |100ms interval|10ms interval|
+| --- | --- | --- |
+| Elapsed seconds, repetition1 |3.226927|0.359631|
+| Elapsed seconds, repetition2 |3.223664|0.355356|
+| Elapsed seconds, repetition3 |3.235672|0.363345|
+| Mean elapsed seconds |3.228754|0.359444|
+| Commit attempts /successes /failures per run |32 /32 /0|32 /32 /0|
+| Mean durable wait per commit |95.241ms|6.108ms|
+| Instrumented WAL PUT attempts per run |64|64|
+
+The isolated workload is about8.98 times faster at10ms. Equal instrumented
+WAL PUT attempt counts here do not establish equal object counts or cost under
+sustained backup traffic: this fixture submits one allocation transaction at a
+time. A shorter interval can reduce batching efficiency and increase WAL object
+creation/request rates in the full workload. Do not claim an end-to-end backup
+speedup or globally optimal interval from these results.
+
+Existing native transaction/session, atomic/shared-content publication and
+revision-allocation race gates pass three repetitions with10ms configured.
+The complete native-backed reconciliation suite also passes three repetitions
+at10ms. The comparison's effective-setting and graceful-reopen assertions pass
+for both measured intervals; new-code lint reports zero issues. No production
+code, daemon binary, durability contract or default setting was changed.
+
+The user was unavailable to explicitly approve the proposed temporary10ms WAL
+and1GiB metadata-cache production trial. Therefore no production restart,
+configuration change or backup was performed in R33. Production was verified
+unchanged at PID1281656/epoch72, read-write,100ms flush,128MiB metadata/512MiB
+block cache, and zero active transactions/intents. A matched600s cwalk trial
+with WAL traffic/latency attribution and restoration to these original settings
+is pending explicit approval. Longer snapshot completion/reopen/restore
+acceptance remains separately outstanding.
+
+Artifacts, source patch, binary hashes, measurements and gate logs:
+`/volume2/NASDA2/rustic/db.test/flush-cadence-20260925-r33-Hk2tYW`.
+The test patch is relative to19e519cc2; the production candidate would use the
+same8064db714 CLI and unchanged daemon as R31/R32, with only the approved
+temporary environment settings varied. No production deployment occurred.
+
 ## Group-reservation cwalk comparison and repeat, R31/R32 (2026-09-25)
 
 The user approved the proposed production comparison and confirmation plan.

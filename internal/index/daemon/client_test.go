@@ -344,7 +344,7 @@ func TestStorageRoundTripTransactionsPaginationAndRestart(t *testing.T) {
 }
 
 func TestSchemaStoreRevisionAllocationContention(t *testing.T) {
-	for _, mode := range []string{"concurrent", "serialized", "grouped"} {
+	for _, mode := range []string{"concurrent", "serialized", "grouped", "grouped-10ms"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer cancel()
@@ -357,10 +357,15 @@ func TestSchemaStoreRevisionAllocationContention(t *testing.T) {
 				}
 				t.Cleanup(func() { _ = os.RemoveAll(dataDirectory) })
 			}
-			client, err := Ensure(ctx, Options{
+			options := Options{
 				Socket: testSocket(t), RepositoryID: "allocation-contention",
 				DaemonPath: daemonBinary(t), DataDir: dataDirectory,
-			})
+				WALFlushInterval: 100 * time.Millisecond,
+			}
+			if mode == "grouped-10ms" {
+				options.WALFlushInterval = 10 * time.Millisecond
+			}
+			client, err := Ensure(ctx, options)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -370,12 +375,15 @@ func TestSchemaStoreRevisionAllocationContention(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if before.EngineFlushIntervalMS != uint64(options.WALFlushInterval.Milliseconds()) {
+				t.Fatalf("effective flush interval=%d", before.EngineFlushIntervalMS)
+			}
 			const count = 128
 			concurrency, allocationSize := 4, 1
 			if mode != "concurrent" {
 				concurrency = 1
 			}
-			if mode == "grouped" {
+			if strings.HasPrefix(mode, "grouped") {
 				allocationSize = 4
 			}
 			revisions := make([]uint64, count)
@@ -421,7 +429,26 @@ func TestSchemaStoreRevisionAllocationContention(t *testing.T) {
 			if mode != "concurrent" && failures != 0 {
 				t.Fatalf("uncontended allocation had %d failed commits", failures)
 			}
-			t.Logf("revisions=%d seconds=%.6f attempts=%d failures=%d data_dir=%s", count, elapsed.Seconds(), attempts, failures, dataDirectory)
+			durable := after.Attribution.DurableWait
+			durableBefore := before.Attribution.DurableWait
+			if durable.Failures != durableBefore.Failures || durable.Successes-durableBefore.Successes != uint64(count/allocationSize) {
+				t.Fatalf("durable allocation waits: before=%+v after=%+v", durableBefore, durable)
+			}
+			t.Logf("revisions=%d seconds=%.6f attempts=%d failures=%d durable_us=%d wal_put_attempts=%d flush_ms=%d data_dir=%s",
+				count, elapsed.Seconds(), attempts, failures, durable.TotalUS-durableBefore.TotalUS,
+				after.Attribution.ObjectStoreWAL.Put.Timing.Attempts-before.Attribution.ObjectStoreWAL.Put.Timing.Attempts,
+				before.EngineFlushIntervalMS, dataDirectory)
+			if err := client.Close(ctx); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := Ensure(ctx, options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close(context.Background())
+			if next, err := NewSchemaStore(reopened).AllocateRevision(ctx); err != nil || next != count+1 {
+				t.Fatalf("reopened revision=%d err=%v", next, err)
+			}
 		})
 	}
 }

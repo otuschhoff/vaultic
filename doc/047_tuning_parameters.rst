@@ -80,6 +80,27 @@ Compare enabled and disabled runs before using their timings as performance
 evidence. Remove the variable and restart the daemon after the diagnostic.
 
 
+Metadata WAL flush cadence
+==========================
+
+For backups using VaulticDB metadata, ``VAULTICDB_WAL_FLUSH_INTERVAL`` in the
+daemon environment controls the SlateDB WAL flush interval, for example
+``10ms``. A daemon restart is required. Check the effective value in the
+``engine_flush_interval_ms`` field of ``index writer status --json`` rather
+than assuming that the requested setting took effect.
+
+A shorter interval can reduce latency when revision allocation or publication
+waits for the next WAL flush. Normal durable commits still wait for storage
+acknowledgment; this setting does not enable deferred durability. Under sustained
+load, more frequent flushes can create more WAL objects, increase storage request
+rates and reduce batching efficiency. Compare backup progress, durable-wait time,
+WAL traffic, CPU and memory on the actual backend before retaining a change.
+Isolated allocation improvements are not evidence of a completed-backup speedup.
+Coordinate writer demotion/restart with active clients and preserve the original
+setting for rollback. Do not disable the WAL or use deferred commits as a
+substitute for measuring flush cadence.
+
+
 Compression
 ===========
 
