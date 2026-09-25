@@ -260,6 +260,17 @@ func (r *Repository) listPack(ctx context.Context, id vaultic.ID, size int64) (p
 	return pack.Blobs(entries), err
 }
 
+func (r *Repository) LoadPackHeader(ctx context.Context, id vaultic.ID) (pack.Blobs, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	info, err := r.be.Stat(ctx, backend.Handle{Type: backend.PackFile, Name: id.String()})
+	if err != nil {
+		return nil, err
+	}
+	return r.listPack(ctx, id, info.Size)
+}
+
 // ListPackHandles returns the blob handles stored in the pack file header.
 func (r *Repository) ListPackHandles(ctx context.Context, id vaultic.ID, size int64) ([]vaultic.BlobHandle, error) {
 	blobs, err := r.listPack(ctx, id, size)

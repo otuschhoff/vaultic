@@ -1,5 +1,65 @@
 # Phase 33 Production Benchmark Evidence
 
+## Pack-scoped sizing and pending-export recovery (2026-09-25)
+
+`ReadSession.ScanPackInventory` streams the pinned `p:` catalog in bounded pages
+and supplies pending exports to a callback instead of retaining all pack records.
+For active, classified pure packs with known physical sizes and header sizes
+consistent with the existing pack format, it accumulates exact growth-sizing
+totals. Mixed packs remain excluded, matching existing sizing. Unknown sizes or
+types, uncertain lifecycle states and inconsistent header sizes make the totals
+unavailable, not guessed. Overflow, malformed records, callback failures and
+cancellation return errors without partial totals. Pending callbacks can already
+have run when a later error occurs; callers must not treat them as an atomic
+publication operation.
+
+The existing production catalog loader now uses those totals when complete,
+skipping its additional global pack-summary map and merge. It still loads all
+blob locations for the compatibility projection and retains builder-local state.
+Incomplete pack metadata keeps the established blob-derived sizing fallback.
+This does not claim that imported repositories have complete physical sizes or
+that production startup is now independent of total catalog size.
+
+`ReadSession.ReadPendingPack` reads one authenticated pack header through the new
+repository `LoadPackHeader` method, then validates its locations against the pinned
+authoritative catalog in batches of at most256, further limited by the negotiated
+daemon batch cap. It checks pending lifecycle, count, exact location fields,
+payload sum and pack classification, and validates the read session before
+returning. Missing packs/blobs, mismatched headers, source errors and cancellation
+return no usable recovery entries. There is no full `b:` scan. Recovery retains
+one pack header plus one response batch, not an entire catalog; a large individual
+pack/header or blob record can still be large. The caller remains responsible for
+writing compatibility indexes and marking exports complete only after success.
+
+A real-daemon regression writes513 distinct data blobs and two duplicate tree
+entries, deliberately stopping before compatibility export. The new inventory
+reads two pack records; header recovery verifies all515 locations using bounded
+point batches. Totals are exactly50,200 data bytes and228 tree bytes, matching the
+original loaded index. The normal loader's complete-metadata path returns the same
+totals. After normal export flush, a fresh session reports no pending exports and
+rejects recovery of an already published pack. Tests also reject altered header
+offsets, header-read errors, absent packs and cancellation. Existing24,004-location
+catalog tests still pass through the incomplete-metadata fallback.
+
+These are correctness and work-scope observations on an in-memory native-daemon
+fixture, not storage-throughput or whole-backup runtime measurements. No production
+backup run was performed for this stage. Initial test failures were fixture-only:
+the additional native inventory scan changed cumulative stream counters, and the
+synthetic stream needed initialized KV/generation validation RPCs. Corrected
+fixtures pass the same focused race tests without weakening session validation.
+
+Repeated focused race tests cover both sizing paths and recovery. Full archiver,
+backupcmd, engine and repository-index race suites pass with child-only permission
+capability drops. Editor diagnostics and patch whitespace checks are clean. The
+inventory retains the loader's existing10,000-record page setting, capped by the
+daemon's negotiated limit.
+
+Activation of scan-free backup still requires bounded write retention and owned
+session/publication fencing, plus conservative handling of unavailable sizing.
+Pending recovery is available and tested but not yet selected by the default
+loader. No daemon restart, deployment or wire-format change occurred; cwalk
+settings remain unchanged.
+
 ## Authoritative blob-location point reads (2026-09-25)
 
 Pinned read sessions now expose single-blob location reads through the existing

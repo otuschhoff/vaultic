@@ -568,6 +568,9 @@ type catalogProgress struct {
 }
 
 func (counts *catalogProgress) collectSizes(ctx context.Context, builders ...*legacyindex.CatalogBuilder) error {
+	if counts.packSizes == nil {
+		return ctx.Err()
+	}
 	counts.sizesMutex.Lock()
 	defer counts.sizesMutex.Unlock()
 	for _, builder := range builders {
@@ -600,13 +603,17 @@ func (engine *DaemonEngine) loadCatalog(ctx context.Context, progress vaultic.Co
 		resultErr = errors.Join(resultErr, session.Close(cleanupCtx))
 	}()
 	ctx = session.Context()
-	pending, err = engine.loadPendingPacks(ctx, session)
+	var sizesAvailable bool
+	pending, sizes, sizesAvailable, err = engine.loadPackInventory(ctx, session)
 	if err != nil {
 		return nil, nil, sizes, err
 	}
 	const workers = 4
 	projections = make([]catalogProjection, workers)
-	counts := &catalogProgress{packSizes: make(map[vaultic.ID]legacyindex.CatalogPackSize)}
+	counts := &catalogProgress{}
+	if !sizesAvailable {
+		counts.packSizes = make(map[vaultic.ID]legacyindex.CatalogPackSize)
+	}
 	group, scanCtx := errgroup.WithContext(ctx)
 	for worker := range workers {
 		group.Go(func() error {
@@ -698,31 +705,16 @@ func (engine *DaemonEngine) loadBlobCatalog(ctx context.Context, session *daemon
 	return projection.Build(), recovery.Build(), nil
 }
 
-func (engine *DaemonEngine) loadPendingPacks(ctx context.Context, session *daemon.ReadSession) (map[vaultic.ID]struct{}, error) {
+func (engine *DaemonEngine) loadPackInventory(ctx context.Context, session *daemon.ReadSession) (map[vaultic.ID]struct{}, [vaultic.NumBlobTypes]uint64, bool, error) {
 	pending := make(map[vaultic.ID]struct{})
-	err := session.ScanRange(ctx, []byte("p:"), 10_000, func(entries []daemon.KeyValue) error {
-		for _, entry := range entries {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			parsed, parseErr := schema.ParseKey(entry.Key)
-			if parseErr != nil || parsed.Kind != schema.KeyPack {
-				return fmt.Errorf("invalid pack key")
-			}
-			record, decodeErr := schema.UnmarshalPackRecord(entry.Value)
-			if decodeErr != nil {
-				return decodeErr
-			}
-			if record.Lifecycle == schema.PackExportPending {
-				pending[vaultic.ID(parsed.ID)] = struct{}{}
-			}
-		}
+	sizes, available, err := session.ScanPackInventory(ctx, func(_ context.Context, id schema.ID, _ schema.PackRecord) error {
+		pending[vaultic.ID(id)] = struct{}{}
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("scan authoritative pack catalog: %w", err)
+		return nil, sizes, false, fmt.Errorf("scan authoritative pack catalog: %w", err)
 	}
-	return pending, nil
+	return pending, sizes, available, nil
 }
 
 func (engine *DaemonEngine) recoverPendingSnapshots(ctx context.Context, repo vaultic.LoaderUnpacked) error {

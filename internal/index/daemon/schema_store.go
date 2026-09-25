@@ -422,6 +422,182 @@ func blobRecordSizes(record schema.BlobRecord) ([vaultic.NumBlobTypes]vaultic.Bl
 	return sizes, nil
 }
 
+func (session *ReadSession) ReadPendingPack(ctx context.Context, id schema.ID, load func(context.Context, vaultic.ID) (pack.Blobs, error)) (result pack.Blobs, resultErr error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := context.Cause(session.Context()); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithCancelCause(ctx)
+	stop := context.AfterFunc(session.Context(), func() { cancel(context.Cause(session.Context())) })
+	defer stop()
+	defer cancel(nil)
+	defer func() {
+		if cause := context.Cause(session.Context()); cause != nil {
+			result, resultErr = nil, cause
+		} else if cause := context.Cause(ctx); cause != nil {
+			result, resultErr = nil, cause
+		}
+	}()
+	encoded, found, err := session.Get(ctx, schema.PackKey(id))
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, fmt.Errorf("pending pack is absent from pinned catalog")
+	}
+	record, err := schema.UnmarshalPackRecord(encoded)
+	if err != nil {
+		return nil, err
+	}
+	if record.Lifecycle != schema.PackExportPending {
+		return nil, fmt.Errorf("pack is not pending export")
+	}
+	blobs, err := load(ctx, vaultic.ID(id))
+	if err != nil {
+		return nil, err
+	}
+	if len(blobs) == 0 || uint64(len(blobs)) != record.BlobCount {
+		return nil, fmt.Errorf("pending pack header count differs from catalog")
+	}
+	limit := min(uint64(vaultic.BlobLookupBatchSize), uint64(session.client.Limits().MaxBatchItems))
+	if limit == 0 {
+		return nil, fmt.Errorf("daemon does not support pending pack batch validation")
+	}
+	var payload uint64
+	types := make([]schema.BlobType, 0, 2)
+	for start := 0; start < len(blobs); start += int(limit) {
+		end := min(start+int(limit), len(blobs))
+		keys := make([][]byte, end-start)
+		for ordinal, blob := range blobs[start:end] {
+			keys[ordinal] = schema.BlobKey(schema.ID(blob.ID))
+		}
+		values, found, err := session.MultiGet(ctx, keys)
+		if err != nil {
+			return nil, err
+		}
+		for ordinal, blob := range blobs[start:end] {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if !found[ordinal] {
+				return nil, fmt.Errorf("pending pack blob is absent from catalog")
+			}
+			locations, err := decodeBlobLocations(values[ordinal].Value, blob.BlobHandle)
+			if err != nil {
+				return nil, err
+			}
+			matched := false
+			for _, location := range locations {
+				if location.PackID() == vaultic.ID(id) && location.Blob == blob {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return nil, fmt.Errorf("pending pack header location differs from catalog")
+			}
+			if payload > math.MaxUint64-uint64(blob.Length) {
+				return nil, fmt.Errorf("pending pack payload overflows")
+			}
+			payload += uint64(blob.Length)
+			kind := schema.BlobData
+			if blob.Type == vaultic.TreeBlob {
+				kind = schema.BlobTree
+			}
+			if len(types) == 0 || (len(types) == 1 && types[0] != kind) {
+				types = append(types, kind)
+			}
+		}
+	}
+	if payload != record.PayloadSize || schema.ClassifyPack(types) != record.Type {
+		return nil, fmt.Errorf("pending pack header summary differs from catalog")
+	}
+	if err := session.Validate(ctx); err != nil {
+		return nil, err
+	}
+	return blobs, nil
+}
+
+func (session *ReadSession) ScanPackInventory(ctx context.Context, pending func(context.Context, schema.ID, schema.PackRecord) error) ([vaultic.NumBlobTypes]uint64, bool, error) {
+	var sizes [vaultic.NumBlobTypes]uint64
+	available := true
+	if err := ctx.Err(); err != nil {
+		return sizes, false, err
+	}
+	if err := context.Cause(session.Context()); err != nil {
+		return sizes, false, err
+	}
+	ctx, cancel := context.WithCancelCause(ctx)
+	stop := context.AfterFunc(session.Context(), func() { cancel(context.Cause(session.Context())) })
+	defer stop()
+	defer cancel(nil)
+	err := session.ScanRange(ctx, []byte("p:"), 10_000, func(entries []KeyValue) error {
+		for _, entry := range entries {
+			if err := context.Cause(ctx); err != nil {
+				return err
+			}
+			key, err := schema.ParseKey(entry.Key)
+			if err != nil || key.Kind != schema.KeyPack {
+				return fmt.Errorf("invalid pack inventory key")
+			}
+			record, err := schema.UnmarshalPackRecord(entry.Value)
+			if err != nil {
+				return err
+			}
+			if record.Lifecycle == schema.PackExportPending && pending != nil {
+				if err := pending(ctx, key.ID, record); err != nil {
+					return err
+				}
+			}
+			switch record.Lifecycle {
+			case schema.PackImported, schema.PackPublished, schema.PackExportPending:
+			default:
+				available = false
+				continue
+			}
+			if record.Type == schema.PackMixed {
+				continue
+			}
+			blobType := vaultic.DataBlob
+			if record.Type == schema.PackTree {
+				blobType = vaultic.TreeBlob
+			} else if record.Type != schema.PackData {
+				available = false
+				continue
+			}
+			fixed := uint64(pack.CalculateHeaderSize(nil))
+			plain := uint64(pack.CalculateEntrySize(false))
+			compressed := uint64(pack.CalculateEntrySize(true))
+			if !record.PhysicalSizeKnown || record.BlobCount == 0 || record.BlobCount > (math.MaxUint64-fixed)/compressed {
+				available = false
+				continue
+			}
+			minimum := fixed + record.BlobCount*plain
+			maximum := fixed + record.BlobCount*compressed
+			if record.PhysicalSize < record.PayloadSize || record.HeaderSize < minimum || record.HeaderSize > maximum || (record.HeaderSize-minimum)%(compressed-plain) != 0 {
+				available = false
+				continue
+			}
+			if sizes[blobType] > math.MaxUint64-record.PhysicalSize {
+				return fmt.Errorf("pack inventory size overflows")
+			}
+			sizes[blobType] += record.PhysicalSize
+		}
+		return nil
+	})
+	if cause := context.Cause(session.Context()); cause != nil {
+		err = cause
+	} else if cause := context.Cause(ctx); cause != nil {
+		err = cause
+	}
+	if err != nil || !available {
+		return [vaultic.NumBlobTypes]uint64{}, false, err
+	}
+	return sizes, true, nil
+}
+
 func (session *ReadSession) ScanPrefix(ctx context.Context, prefix, afterKey []byte, pageSize uint32) ([]KeyValue, bool, error) {
 	if pageSize > session.client.Limits().MaxPageItems {
 		pageSize = session.client.Limits().MaxPageItems

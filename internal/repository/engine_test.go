@@ -413,6 +413,123 @@ func TestAuthoritativePointReadLoadsEncryptedBlobs(t *testing.T) {
 	}
 }
 
+type pendingExportTestEngine struct{ *enginepkg.DaemonEngine }
+
+func (engine *pendingExportTestEngine) Flush(context.Context, vaultic.SaverUnpacked[vaultic.FileType]) error {
+	return nil
+}
+
+func TestAuthoritativePackInventoryAndRecovery(t *testing.T) {
+	ctx := t.Context()
+	client, err := daemon.Ensure(ctx, daemon.Options{
+		Socket: gcTestSocket(t), RepositoryID: t.Name(), DaemonPath: testGCDaemonPath(t),
+		DataDir: t.TempDir(), ObjectStore: "memory",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close(context.Background()) })
+	repo := TestRepository(t)
+	engine := &pendingExportTestEngine{enginepkg.NewDaemonEngine(client)}
+	repo.SetEngine(engine)
+	if err := repo.WithBlobUploader(ctx, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
+		for ordinal := range 513 {
+			payload := fmt.Appendf(nil, "pending blob %d", ordinal)
+			if _, _, _, err := uploader.SaveBlob(ctx, vaultic.DataBlob, payload, vaultic.ID{}, false); err != nil {
+				return err
+			}
+		}
+		for range 2 {
+			if _, _, _, err := uploader.SaveBlob(ctx, vaultic.TreeBlob, []byte("duplicate tree"), vaultic.ID{}, true); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := repo.currentBlobSizes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := daemon.NewSchemaStore(client).BeginReadSession(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close(context.Background()) })
+	var pending []schema.ID
+	var recovered int
+	sizes, available, err := session.ScanPackInventory(ctx, func(ctx context.Context, id schema.ID, record schema.PackRecord) error {
+		pending = append(pending, id)
+		blobs, err := session.ReadPendingPack(ctx, id, repo.LoadPackHeader)
+		if err != nil {
+			return err
+		}
+		if uint64(len(blobs)) != record.BlobCount {
+			return fmt.Errorf("recovered count mismatch")
+		}
+		for _, blob := range blobs {
+			found := false
+			for _, original := range engine.Lookup(blob.BlobHandle) {
+				if original.PackID() == vaultic.ID(id) && original.Blob == blob {
+					found = true
+				}
+			}
+			if !found {
+				return fmt.Errorf("recovered location differs from original")
+			}
+		}
+		recovered += len(blobs)
+		return nil
+	})
+	if err != nil || !available || sizes != expected || recovered != 515 || len(pending) == 0 {
+		t.Fatalf("inventory sizes=%v want=%v available=%v recovered=%d pending=%d err=%v", sizes, expected, available, recovered, len(pending), err)
+	}
+	t.Logf("pack-only inventory: %d pack records, %d recovered locations, sizes=%v", session.ScanStats().Records, recovered, sizes)
+	loaded := enginepkg.NewDaemonEngine(client)
+	if err := loaded.Load(ctx, repo, vaultic.NoopCounter, nil); err != nil {
+		t.Fatal(err)
+	}
+	if actual, valid, err := loaded.BlobSizes(ctx); err != nil || !valid || actual != expected {
+		t.Fatalf("loaded pack summary=%v valid=%v err=%v", actual, valid, err)
+	}
+	if blobs, err := session.ReadPendingPack(ctx, pending[0], func(ctx context.Context, id vaultic.ID) (pack.Blobs, error) {
+		blobs, err := repo.LoadPackHeader(ctx, id)
+		if err == nil {
+			blobs[0].Offset++
+		}
+		return blobs, err
+	}); err == nil || len(blobs) != 0 {
+		t.Fatalf("mismatched header accepted: %v, %v", blobs, err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if blobs, err := session.ReadPendingPack(canceled, pending[0], repo.LoadPackHeader); !errors.Is(err, context.Canceled) || len(blobs) != 0 {
+		t.Fatalf("canceled recovery: %v, %v", blobs, err)
+	}
+	failure := errors.New("header unavailable")
+	if blobs, err := session.ReadPendingPack(ctx, pending[0], func(context.Context, vaultic.ID) (pack.Blobs, error) { return nil, failure }); !errors.Is(err, failure) || len(blobs) != 0 {
+		t.Fatalf("header failure: %v, %v", blobs, err)
+	}
+	if blobs, err := session.ReadPendingPack(ctx, schema.ID(vaultic.NewRandomID()), repo.LoadPackHeader); err == nil || len(blobs) != 0 {
+		t.Fatalf("absent pack accepted: %v, %v", blobs, err)
+	}
+	if err := engine.DaemonEngine.Flush(ctx, &internalRepository{repo}); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := daemon.NewSchemaStore(client).BeginReadSession(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fresh.Close(context.Background()) })
+	if _, err := fresh.ReadPendingPack(ctx, pending[0], repo.LoadPackHeader); err == nil {
+		t.Fatal("published pack treated as pending")
+	}
+	if _, _, err := fresh.ScanPackInventory(ctx, func(context.Context, schema.ID, schema.PackRecord) error { return errors.New("export still pending") }); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func newEngineTestRepository(t *testing.T, be backend.Backend) *Repository {
 	t.Helper()
 	repo, err := New(be, Options{})

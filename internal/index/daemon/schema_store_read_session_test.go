@@ -13,6 +13,7 @@ import (
 	vaulticdbv1 "github.com/otuschhoff/vaultic/internal/index/proto/vaulticdb/v1"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 	"github.com/otuschhoff/vaultic/internal/repository/crypto"
+	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 	"google.golang.org/grpc"
 )
@@ -51,6 +52,17 @@ func TestReadSessionPinsSnapshotAndClosesTransaction(t *testing.T) {
 	}
 	if _, found, err := session.Get(ctx, schema.PackKey(secondPack)); err != nil || found {
 		t.Fatalf("post-snapshot value: found=%t err=%v", found, err)
+	}
+	pendingCount := 0
+	totals, available, err := session.ScanPackInventory(ctx, func(_ context.Context, id schema.ID, _ schema.PackRecord) error {
+		pendingCount++
+		if id != firstPack {
+			t.Fatal("pack inventory escaped pinned snapshot")
+		}
+		return nil
+	})
+	if err != nil || available || totals != ([vaultic.NumBlobTypes]uint64{}) || pendingCount != 1 {
+		t.Fatalf("unknown-size inventory: totals=%v available=%v pending=%d err=%v", totals, available, pendingCount, err)
 	}
 	handles := []vaultic.BlobHandle{
 		{ID: vaultic.ID(firstBlob), Type: vaultic.DataBlob},
@@ -117,7 +129,7 @@ func TestReadSessionPinsSnapshotAndClosesTransaction(t *testing.T) {
 		}
 	}
 	client.limits.ScanStream = true
-	if stats := session.ScanStats(); stats.Records != 1 || stats.Chunks != 1 || stats.Bytes == 0 || stats.IteratorSetupNS == 0 {
+	if stats := session.ScanStats(); stats.Records != 2 || stats.Chunks != 2 || stats.Bytes == 0 || stats.IteratorSetupNS == 0 {
 		t.Fatalf("stream counters: %+v", stats)
 	}
 	consumeErr := errors.New("stop consuming")
@@ -332,6 +344,95 @@ func TestScanStreamRejectsIncompleteOrInvalidResponses(t *testing.T) {
 			}
 			if rpc.context.Err() == nil {
 				t.Fatal("stream was not cancelled")
+			}
+		})
+	}
+}
+
+type inventoryStreamRPC struct{ scanStreamRPC }
+
+func (rpc *inventoryStreamRPC) Get(_ context.Context, request *vaulticdbv1.GetRequest, _ ...grpc.CallOption) (*vaulticdbv1.GetResponse, error) {
+	return &vaulticdbv1.GetResponse{Key: request.Key}, nil
+}
+
+func (rpc *inventoryStreamRPC) GenerationStatus(context.Context, *vaulticdbv1.GenerationStatusRequest, ...grpc.CallOption) (*vaulticdbv1.GenerationStatusResponse, error) {
+	return &vaulticdbv1.GenerationStatusResponse{}, nil
+}
+
+func TestReadSessionPackInventory(t *testing.T) {
+	header := uint64(pack.CalculateHeaderSize(nil) + pack.CalculateEntrySize(false))
+	base := schema.PackRecord{Type: schema.PackData, Lifecycle: schema.PackExportPending, BlobCount: 1,
+		PayloadSize: 100, HeaderSize: header, PhysicalSize: 100 + header, PhysicalSizeKnown: true}
+	for _, name := range []string{"complete", "unknown size", "unknown type", "mixed", "deleted", "header mismatch", "callback error", "canceled callback", "session failure", "overflow"} {
+		t.Run(name, func(t *testing.T) {
+			record := base
+			available := true
+			switch name {
+			case "unknown size":
+				record.PhysicalSizeKnown, record.PhysicalSize, record.HeaderSize, available = false, 0, 0, false
+			case "unknown type":
+				record.Type, available = schema.PackUnknown, false
+			case "mixed":
+				record.Type = schema.PackMixed
+			case "deleted":
+				record.Lifecycle, available = schema.PackDeleted, false
+			case "header mismatch":
+				record.HeaderSize++
+				record.PhysicalSize++
+				available = false
+			case "overflow":
+				record.PayloadSize = math.MaxUint64 - header
+				record.PhysicalSize = math.MaxUint64
+			}
+			encoded, err := record.MarshalBinary()
+			if err != nil {
+				t.Fatal(err)
+			}
+			first := &vaulticdbv1.KeyValue{Key: schema.PackKey(daemonTestID(1)), Value: encoded}
+			entries := []*vaulticdbv1.KeyValue{first}
+			if name == "overflow" {
+				entries = append(entries, &vaulticdbv1.KeyValue{Key: schema.PackKey(daemonTestID(2)), Value: encoded})
+			}
+			rpc := &inventoryStreamRPC{scanStreamRPC: scanStreamRPC{responses: []*vaulticdbv1.ScanResponse{{Entries: entries, Done: true}}}}
+			client := &Client{rpc: rpc, limits: Limits{ScanStream: true, MaxPageItems: 1000, MaxMessageBytes: 1 << 20}}
+			client.initializeSubclients()
+			sessionCtx, fail := context.WithCancelCause(t.Context())
+			defer fail(nil)
+			session := &ReadSession{SchemaStore: NewSchemaStore(client), transaction: &Transaction{client: client, id: "pinned"}, ctx: sessionCtx}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			failure := errors.New("inventory failure")
+			calls := 0
+			sizes, found, err := session.ScanPackInventory(ctx, func(context.Context, schema.ID, schema.PackRecord) error {
+				calls++
+				switch name {
+				case "callback error":
+					return failure
+				case "canceled callback":
+					cancel()
+				case "session failure":
+					fail(failure)
+				}
+				return nil
+			})
+			if name == "callback error" || name == "canceled callback" || name == "session failure" || name == "overflow" {
+				if err == nil || found || sizes != ([vaultic.NumBlobTypes]uint64{}) {
+					t.Fatalf("partial result escaped: %v %v %v", sizes, found, err)
+				}
+				if (name == "callback error" || name == "session failure") && !errors.Is(err, failure) {
+					t.Fatalf("failure cause lost: %v", err)
+				}
+				return
+			}
+			var want [vaultic.NumBlobTypes]uint64
+			if available && name != "mixed" {
+				want[vaultic.DataBlob] = base.PhysicalSize
+			}
+			if err != nil || found != available || sizes != want {
+				t.Fatalf("sizes=%v available=%v err=%v want=%v", sizes, found, err, want)
+			}
+			if name != "deleted" && calls != 1 {
+				t.Fatalf("pending callbacks=%d", calls)
 			}
 		})
 	}
