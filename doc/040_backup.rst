@@ -66,6 +66,40 @@ are the files currently being read by vaultic.
 Be aware that the live status shows the processed files and not the transferred
 data. Transferred volume might be lower (due to deduplication) or higher.
 
+On-demand authoritative metadata
+********************************
+
+Experimental ``--metadata-on-demand`` avoids loading the full blob catalog for
+an authoritative VaulticDB backup. It requires repository format version 2, a
+daemon advertising fenced snapshot publication, complete pack sizing metadata,
+and an explicit filesystem scratch directory:
+
+.. code-block:: console
+
+    $ vaultic -r /srv/vaultic-repo backup --use-cwalk \
+        --metadata-on-demand --metadata-scratch /srv/hdd/vaultic-scratch .
+
+Startup scans pack records for sizing and recovers unfinished compatibility
+exports one authenticated pack header at a time. Existing blobs are read through
+a renewable pinned session, with a 64 MiB accounted size cache and at most four
+lookup RPCs in flight. Exported new writes spill to temporary encrypted storage.
+These are component budgets, not a total memory limit; individual pack headers,
+blob location lists, active uploads and concurrent exports also consume memory.
+Scratch disk usage grows with new writes and is removed on normal close.
+
+Session or lookup failures stop publication. The daemon checks the pinned read
+transaction and expected metadata generation/decision when committing the
+snapshot. Older daemons and incomplete sizing metadata are rejected rather than
+silently falling back. The mode cannot be combined with deferred ingest or
+``--dry-run``. Omit the flags to retain normal full-index loading.
+
+Pack-cache pruning based on the full in-memory index is skipped in this mode.
+Maintenance and restore commands retain their existing full-index behavior.
+Validate intended source paths before production use: a nested absolute-source
+smoke test encountered an existing missing reconciled-root failure with both
+full-index and on-demand loading. Relative-source cwalk backups, parent reuse,
+restore and a full data check passed; the absolute-source issue remains open.
+
 Parallel and selective crawling
 *******************************
 

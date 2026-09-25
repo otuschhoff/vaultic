@@ -309,6 +309,20 @@ func (r *Repository) LoadIndex(ctx context.Context, p vaultic.TerminalCounterFac
 	return r.loadIndexWithCallback(ctx, p, nil)
 }
 
+func (r *Repository) LoadBackupIndex(ctx context.Context, p vaultic.TerminalCounterFactory, options enginepkg.BackupLookupOptions) error {
+	if r.cfg.Version != 2 {
+		return fmt.Errorf("on-demand backup requires repository format version 2")
+	}
+	current, ok := r.Engine().(*enginepkg.DaemonEngine)
+	if !ok {
+		return fmt.Errorf("on-demand backup requires authoritative VaulticDB metadata")
+	}
+	if err := current.EnableBackupLookups(ctx, options); err != nil {
+		return err
+	}
+	return current.Load(ctx, r, p.NewCounterTerminalOnly("pending packs recovered"), nil)
+}
+
 // SaveLegacyIndex writes one canonical JSON index for metadata export tools.
 func (r *Repository) SaveLegacyIndex(ctx context.Context, index *index.Index) (vaultic.ID, error) {
 	return index.SaveIndex(ctx, &internalRepository{Repository: r})

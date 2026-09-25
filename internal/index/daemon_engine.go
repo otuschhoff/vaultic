@@ -234,6 +234,11 @@ type DaemonEngine struct {
 	blobSizes        [vaultic.NumBlobTypes]uint64
 	blobSizesValid   bool
 	catalogVersion   uint64
+	session          *daemon.ReadSession
+	lookup           *CachedBlobLookup
+	backupLoaded     bool
+	closeOnce        sync.Once
+	closeErr         error
 }
 
 var _ LegacyIndexEngine = (*DaemonEngine)(nil)
@@ -255,6 +260,57 @@ func NewDaemonEngine(client *daemon.Client, legacy ...*LegacyEngine) *DaemonEngi
 	}
 	projection.master.SetSavedIndexCallback(engine.acknowledgeSavedIndex)
 	return engine
+}
+
+type BackupLookupOptions struct {
+	ScratchDirectory string
+	CacheBytes       int
+	Concurrency      int
+}
+
+func NewBackupDaemonEngine(ctx context.Context, client *daemon.Client, options BackupLookupOptions) (*DaemonEngine, error) {
+	if client == nil || !client.Limits().PublicationFence {
+		return nil, fmt.Errorf("on-demand backup requires a daemon with fenced snapshot publication")
+	}
+	session, err := daemon.NewSchemaStore(client).BeginReadSession(ctx)
+	if err != nil {
+		return nil, err
+	}
+	lookup, local, err := NewSpillingBlobLookup(session, options.ScratchDirectory, options.CacheBytes, options.Concurrency)
+	if err != nil {
+		return nil, errors.Join(err, session.Close(context.WithoutCancel(ctx)))
+	}
+	engine := NewDaemonEngine(client, local)
+	engine.session, engine.lookup = session, lookup
+	return engine, nil
+}
+
+func (engine *DaemonEngine) EnableBackupLookups(ctx context.Context, options BackupLookupOptions) error {
+	engine.writeMu.Lock()
+	defer engine.writeMu.Unlock()
+	if engine.lookup != nil || engine.catalogVersion != 0 {
+		return fmt.Errorf("on-demand backup must be enabled before index loading or writes")
+	}
+	for range engine.legacy.Values() {
+		return fmt.Errorf("on-demand backup cannot replace a loaded index")
+	}
+	owned, err := NewBackupDaemonEngine(ctx, engine.client, options)
+	if err != nil {
+		return err
+	}
+	engine.legacy, engine.session, engine.lookup = owned.legacy, owned.session, owned.lookup
+	engine.legacy.master.SetSavedIndexCallback(engine.acknowledgeSavedIndex)
+	return nil
+}
+
+func (engine *DaemonEngine) lookupError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if engine.lookup != nil {
+		return engine.lookup.Error()
+	}
+	return nil
 }
 
 // SetTierPolicy records how this repository routes packs. It must be called
@@ -318,6 +374,9 @@ func (engine *DaemonEngine) SetNextSnapshotRoot(rootKey []byte) {
 }
 
 func (engine *DaemonEngine) MarkSnapshotPending(ctx context.Context, id vaultic.ID, originalJSON []byte) error {
+	if err := engine.lookupError(ctx); err != nil {
+		return err
+	}
 	engine.mu.Lock()
 	rootKey := append([]byte(nil), engine.nextSnapshotRoot...)
 	engine.nextSnapshotRoot = nil
@@ -353,13 +412,22 @@ func (engine *DaemonEngine) PublishSnapshotScopeWithCrawl(
 	rootKey []byte,
 	crawl *daemon.AuthoritativeCrawlClaim,
 ) error {
+	engine.writeMu.Lock()
+	defer engine.writeMu.Unlock()
+	if err := engine.lookupError(ctx); err != nil {
+		return err
+	}
 	engine.mu.Lock()
 	originalJSON, found := engine.pendingSnapshots[id]
+	exportErr := engine.exportErr
 	engine.mu.Unlock()
+	if exportErr != nil {
+		return exportErr
+	}
 	if !found {
 		return fmt.Errorf("snapshot %s has no pending compatibility projection", id.Str())
 	}
-	if err := engine.store.PublishSnapshotScope(ctx,
+	if err := engine.publishSnapshotScope(ctx,
 		daemon.SnapshotScope{SnapshotID: schema.ID(id),
 			RootKey:      rootKey,
 			OriginalJSON: originalJSON,
@@ -371,6 +439,20 @@ func (engine *DaemonEngine) PublishSnapshotScopeWithCrawl(
 	engine.mu.Unlock()
 	engine.catchUpAnalytics(ctx)
 	return nil
+}
+
+func (engine *DaemonEngine) publishSnapshotScope(ctx context.Context, scope daemon.SnapshotScope) error {
+	if engine.session == nil {
+		return engine.store.PublishSnapshotScope(ctx, scope)
+	}
+	if err := engine.lookupError(ctx); err != nil {
+		return err
+	}
+	publicationCtx, cancel := context.WithCancelCause(ctx)
+	stop := context.AfterFunc(engine.lookup.ctx, func() { cancel(context.Cause(engine.lookup.ctx)) })
+	defer stop()
+	defer cancel(nil)
+	return engine.session.PublishSnapshotScope(publicationCtx, scope)
 }
 
 func (engine *DaemonEngine) ForgetSnapshot(ctx context.Context, id vaultic.ID) error {
@@ -402,6 +484,9 @@ func (engine *DaemonEngine) LookupSize(handle vaultic.BlobHandle) (uint, bool) {
 }
 
 func (engine *DaemonEngine) LookupContext(ctx context.Context, handle vaultic.BlobHandle) ([]*pack.PackedBlob, error) {
+	if engine.lookup != nil {
+		return engine.lookup.LookupContext(ctx, handle)
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -409,6 +494,9 @@ func (engine *DaemonEngine) LookupContext(ctx context.Context, handle vaultic.Bl
 }
 
 func (engine *DaemonEngine) LookupSizeContext(ctx context.Context, handle vaultic.BlobHandle) (uint, bool, error) {
+	if engine.lookup != nil {
+		return engine.lookup.LookupSizeContext(ctx, handle)
+	}
 	if err := ctx.Err(); err != nil {
 		return 0, false, err
 	}
@@ -417,6 +505,9 @@ func (engine *DaemonEngine) LookupSizeContext(ctx context.Context, handle vaulti
 }
 
 func (engine *DaemonEngine) LookupSizesContext(ctx context.Context, handles []vaultic.BlobHandle) ([]vaultic.BlobSize, error) {
+	if engine.lookup != nil {
+		return engine.lookup.LookupSizesContext(ctx, handles)
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -431,6 +522,9 @@ func (engine *DaemonEngine) LookupSizesContext(ctx context.Context, handles []va
 }
 
 func (engine *DaemonEngine) AddPendingContext(ctx context.Context, handle vaultic.BlobHandle, size uint) (bool, error) {
+	if engine.lookup != nil {
+		return engine.lookup.AddPendingContext(ctx, handle, size)
+	}
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -442,8 +536,14 @@ func (engine *DaemonEngine) Values() iter.Seq[*pack.PackedBlob] {
 }
 
 func (engine *DaemonEngine) BlobSizes(ctx context.Context) ([vaultic.NumBlobTypes]uint64, bool, error) {
+	if err := engine.lookupError(ctx); err != nil {
+		return [vaultic.NumBlobTypes]uint64{}, false, err
+	}
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
+	if engine.lookup != nil && !engine.blobSizesValid {
+		return engine.blobSizes, false, fmt.Errorf("on-demand backup requires exact pack size totals")
+	}
 	return engine.blobSizes, engine.blobSizesValid, ctx.Err()
 }
 
@@ -480,6 +580,9 @@ func (engine *DaemonEngine) storePack(
 ) (resultErr error) {
 	engine.writeMu.RLock()
 	defer engine.writeMu.RUnlock()
+	if err := engine.lookupError(ctx); err != nil {
+		return err
+	}
 	engine.mu.Lock()
 	priorErr := engine.exportErr
 	engine.mu.Unlock()
@@ -535,6 +638,12 @@ func (engine *DaemonEngine) Load(
 	progress vaultic.Counter,
 	callback func(vaultic.ID, *legacyindex.Index, error) error,
 ) error {
+	if engine.session != nil {
+		if callback != nil {
+			return fmt.Errorf("on-demand backup does not support index callbacks")
+		}
+		return engine.loadBackupCatalog(ctx, repo, progress)
+	}
 	_ = callback
 	engine.mu.Lock()
 	engine.blobSizesValid = false
@@ -758,7 +867,7 @@ func (engine *DaemonEngine) recoverPendingSnapshots(ctx context.Context, repo va
 				if loadErr != nil {
 					return fmt.Errorf("recover snapshot %s export: %w", snapshotID.Str(), loadErr)
 				}
-				if publishErr := engine.store.PublishSnapshotScope(ctx,
+				if publishErr := engine.publishSnapshotScope(ctx,
 					daemon.SnapshotScope{SnapshotID: parsed.ID,
 						RootKey:      checkpoint.RootKey,
 						OriginalJSON: originalJSON}); publishErr != nil {
@@ -817,6 +926,9 @@ func (engine *DaemonEngine) acknowledgePacks(ctx context.Context, pending []vaul
 func (engine *DaemonEngine) Flush(ctx context.Context, repo vaultic.SaverUnpacked[vaultic.FileType]) (resultErr error) {
 	engine.writeMu.Lock()
 	defer engine.writeMu.Unlock()
+	if err := engine.lookupError(ctx); err != nil {
+		return err
+	}
 	engine.mu.Lock()
 	priorErr := engine.exportErr
 	engine.mu.Unlock()
@@ -853,7 +965,16 @@ func (engine *DaemonEngine) ExportLegacy(ctx context.Context, sink LegacySink) e
 }
 
 func (engine *DaemonEngine) Close() error {
-	return errors.Join(engine.legacy.Close(), engine.client.Close(context.Background()))
+	engine.closeOnce.Do(func() {
+		if engine.lookup != nil {
+			engine.closeErr = engine.lookup.Close()
+		}
+		if engine.session != nil {
+			engine.closeErr = errors.Join(engine.closeErr, engine.session.Close(context.Background()))
+		}
+		engine.closeErr = errors.Join(engine.closeErr, engine.legacy.Close(), engine.client.Close(context.Background()))
+	})
+	return engine.closeErr
 }
 
 func schemaPack(

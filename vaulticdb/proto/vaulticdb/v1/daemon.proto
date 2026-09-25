@@ -105,6 +105,13 @@ message TransactionRequest {
   string idempotency_key = 3;
   bool defer_durability = 4;
   bool require_durability_token = 5;
+  PublicationFence publication_fence = 6;
+}
+
+message PublicationFence {
+  uint64 generation = 1;
+  uint64 decision = 2;
+  string read_session_id = 3;
 }
 
 message BeginResponse {
@@ -172,6 +179,7 @@ message CapabilitiesResponse {
   uint64 wal_oldest_segment_unix_ms = 30;
   uint64 wal_cleanup_failures = 31;
   bool scan_stream = 32;
+  bool publication_fence = 33;
 }
 
 message ReadCacheStatusRequest {

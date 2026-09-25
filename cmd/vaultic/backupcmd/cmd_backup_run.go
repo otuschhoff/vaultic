@@ -191,6 +191,11 @@ func (run *backupRun) close() {
 	if run.closeRepo != nil {
 		run.closeRepo()
 	}
+	if run.repo != nil {
+		if err := run.repo.Close(); err != nil {
+			run.printer.E("close backup repository: %v", err)
+		}
+	}
 }
 
 func prepareBackupTargets(run *backupRun) error {
@@ -333,6 +338,11 @@ func loadBackupParent(run *backupRun) error {
 	}
 	if !run.globalOptions.JSON {
 		run.printer.V("load index files")
+	}
+	if run.options.MetadataOnDemand {
+		return run.repo.LoadBackupIndex(run.ctx, run.printer, enginepkg.BackupLookupOptions{
+			ScratchDirectory: run.options.MetadataScratch, CacheBytes: 64 << 20, Concurrency: 4,
+		})
 	}
 	return run.repo.LoadIndex(run.ctx, run.printer)
 }

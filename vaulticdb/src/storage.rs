@@ -3252,6 +3252,15 @@ impl Storage {
         }
     }
 
+    pub(crate) async fn validate_read_session(&self, transaction_id: &str) -> Result<(), Status> {
+        let transaction = self.transaction(transaction_id).await?;
+        let transaction = transaction.transaction.lock().await;
+        if transaction.is_none() {
+            return Err(transaction_not_found("read session was closed"));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn get(
         &self,
         key: &[u8],

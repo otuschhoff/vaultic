@@ -471,10 +471,11 @@ type durableIdempotencyRecord struct {
 
 // Limits are the bounded-work capabilities advertised by vaulticdb.
 type Limits struct {
-	MaxBatchItems   uint32
-	MaxMessageBytes uint32
-	MaxPageItems    uint32
-	ScanStream      bool
+	MaxBatchItems    uint32
+	MaxMessageBytes  uint32
+	MaxPageItems     uint32
+	ScanStream       bool
+	PublicationFence bool
 }
 
 // KeyValue is one binary metadata record returned by a scan.
@@ -1359,10 +1360,11 @@ func (c *Client) validate(ctx context.Context) error {
 		return fmt.Errorf("%w: daemon advertised invalid storage limits", ErrIncompatibleDaemon)
 	}
 	c.limits = Limits{
-		MaxBatchItems:   capabilities.GetMaxBatchItems(),
-		MaxMessageBytes: capabilities.GetMaxMessageBytes(),
-		MaxPageItems:    capabilities.GetMaxPageItems(),
-		ScanStream:      capabilities.GetScanStream(),
+		MaxBatchItems:    capabilities.GetMaxBatchItems(),
+		MaxMessageBytes:  capabilities.GetMaxMessageBytes(),
+		MaxPageItems:     capabilities.GetMaxPageItems(),
+		ScanStream:       capabilities.GetScanStream(),
+		PublicationFence: capabilities.GetPublicationFence(),
 	}
 	c.encryption = EncryptionInfo{
 		Enabled: capabilities.GetEncryptionEnabled(), Algorithm: capabilities.GetEncryptionAlgorithm(),

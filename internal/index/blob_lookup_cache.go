@@ -43,6 +43,19 @@ type CachedBlobLookup struct {
 	written *writtenBlobStore
 }
 
+func (lookup *CachedBlobLookup) Error() error {
+	if err := context.Cause(lookup.ctx); err != nil {
+		return err
+	}
+	if lookup.written != nil {
+		if err := lookup.written.Error(); err != nil {
+			lookup.cancel(err)
+			return err
+		}
+	}
+	return nil
+}
+
 func NewSpillingBlobLookup(session blobLookupSession, directory string, budgetBytes, concurrency int) (*CachedBlobLookup, *LegacyEngine, error) {
 	written, err := newWrittenBlobStore(directory)
 	if err != nil {

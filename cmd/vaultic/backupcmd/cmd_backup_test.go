@@ -19,9 +19,37 @@ import (
 	"github.com/otuschhoff/vaultic/internal/global"
 	enginepkg "github.com/otuschhoff/vaultic/internal/index"
 	"github.com/otuschhoff/vaultic/internal/index/reconcile"
+	"github.com/otuschhoff/vaultic/internal/repository"
 	rtest "github.com/otuschhoff/vaultic/internal/test"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
+
+type backupCloseEngine struct {
+	*enginepkg.LegacyEngine
+	close func() error
+}
+
+func (engine *backupCloseEngine) Close() error { return engine.close() }
+
+func TestBackupCloseReleasesEngineAfterUnlock(t *testing.T) {
+	repo := repository.TestRepository(t)
+	unlocked, closes := false, 0
+	repo.SetEngine(&backupCloseEngine{LegacyEngine: enginepkg.NewLegacyEngine(), close: func() error {
+		if !unlocked {
+			t.Error("engine closed before repository unlock")
+		}
+		closes++
+		return nil
+	}})
+	run := &backupRun{repo: repo, closeRepo: func() { unlocked = true }}
+	run.close()
+	if err := repo.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if closes != 1 {
+		t.Fatalf("engine close calls=%d", closes)
+	}
+}
 
 func TestAutomaticDeferredFallbackDistinguishesUnavailableFromCorrupt(t *testing.T) {
 	options := backupOptions{AllowDeferredCommit: true, DeferredMode: "auto"}
@@ -123,6 +151,9 @@ func TestBackupCrawlOptionValidation(t *testing.T) {
 		want    string
 	}{
 		{"invalid-workers", backupOptions{UseCWalk: true}, "--cwalk-concurrency must be at least 1"},
+		{"on-demand-needs-scratch", backupOptions{MetadataOnDemand: true}, "--metadata-on-demand requires --metadata-scratch"},
+		{"scratch-needs-on-demand", backupOptions{MetadataScratch: "scratch"}, "--metadata-scratch requires --metadata-on-demand"},
+		{"on-demand-rejects-dry-run", backupOptions{MetadataOnDemand: true, MetadataScratch: "scratch", DryRun: true}, "--metadata-on-demand cannot use"},
 		{"pathdiff-needs-cwalk", backupOptions{UsePathdiff: true}, "--use-pathdiff requires --use-cwalk"},
 		{"pathdiff-needs-endpoint", backupOptions{UseCWalk: true, CWalkConcurrency: 1, UsePathdiff: true}, "--use-pathdiff requires --pathdiff-endpoint"},
 		{

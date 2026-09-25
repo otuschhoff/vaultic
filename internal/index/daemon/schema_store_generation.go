@@ -154,6 +154,28 @@ func (store *SchemaStore) MarkExportFailed(ctx context.Context, snapshotID schem
 // a commit sequence, creates the immutable snapshot record, and completes its
 // export checkpoint in one serializable transaction.
 func (store *SchemaStore) PublishSnapshotScope(ctx context.Context, scope SnapshotScope) error {
+	return store.publishSnapshotScope(ctx, scope, nil, nil)
+}
+
+func (session *ReadSession) PublishSnapshotScope(ctx context.Context, scope SnapshotScope) error {
+	if !session.client.Limits().PublicationFence {
+		return fmt.Errorf("daemon does not support fenced snapshot publication")
+	}
+	publicationCtx, cancel := context.WithCancelCause(ctx)
+	stop := context.AfterFunc(session.Context(), func() { cancel(context.Cause(session.Context())) })
+	defer stop()
+	defer cancel(nil)
+	if err := session.Validate(publicationCtx); err != nil {
+		return err
+	}
+	err := session.SchemaStore.publishSnapshotScope(publicationCtx, scope, session.Validate, session)
+	if err != nil && context.Cause(publicationCtx) != nil {
+		return context.Cause(publicationCtx)
+	}
+	return err
+}
+
+func (store *SchemaStore) publishSnapshotScope(ctx context.Context, scope SnapshotScope, validate func(context.Context) error, session *ReadSession) error {
 	root, err := schema.ParseKey(scope.RootKey)
 	if err != nil || root.Kind != schema.KeyDirectoryRevision || root.Revision == 0 ||
 		scope.SnapshotID == (schema.ID{}) {
@@ -184,7 +206,7 @@ func (store *SchemaStore) PublishSnapshotScope(ctx context.Context, scope Snapsh
 	}
 	backoff := 100 * time.Microsecond
 	for range revisionAllocationAttempts {
-		err := store.publishSnapshotScopeOnce(ctx, scope, root, identities, crawlIdentities, bindings)
+		err := store.publishSnapshotScopeOnce(ctx, scope, root, identities, crawlIdentities, bindings, validate, session)
 		if status.Code(err) != codes.Aborted {
 			return err
 		}
@@ -214,12 +236,19 @@ func (store *SchemaStore) publishSnapshotScopeOnce(
 	root schema.ParsedKey,
 	identities, crawlIdentities []schema.ParsedKey,
 	bindings map[string]schema.AuthoritativeSourceBindingRecord,
+	validate func(context.Context) error,
+	session *ReadSession,
 ) error {
 	transaction, err := store.client.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	fail := func(err error) error { rollbackTransaction(ctx, transaction); return err }
+	if validate != nil {
+		if err := validate(ctx); err != nil {
+			return fail(err)
+		}
+	}
 	plan, err := planSnapshotBase(ctx, transaction, scope, root)
 	if err != nil {
 		return fail(err)
@@ -233,7 +262,16 @@ func (store *SchemaStore) publishSnapshotScopeOnce(
 	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), plan.puts, nil); err != nil {
 		return fail(err)
 	}
-	if err := transaction.Commit(ctx); err != nil {
+	if validate != nil {
+		if err := validate(ctx); err != nil {
+			return fail(err)
+		}
+	}
+	commit := transaction.Commit
+	if session != nil {
+		commit = func(ctx context.Context) error { return transaction.CommitForSession(ctx, session) }
+	}
+	if err := commit(ctx); err != nil {
 		rollbackTransaction(ctx, transaction)
 		return err
 	}

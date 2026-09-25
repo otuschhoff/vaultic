@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sync/atomic"
 	"testing"
 
@@ -424,10 +425,47 @@ func (engine *pendingExportTestEngine) Flush(context.Context, vaultic.SaverUnpac
 	return nil
 }
 
-func TestAuthoritativePackInventoryAndRecovery(t *testing.T) {
+func TestBackupLookupRequiresCompleteSizing(t *testing.T) {
 	ctx := t.Context()
 	client, err := daemon.Ensure(ctx, daemon.Options{
 		Socket: gcTestSocket(t), RepositoryID: t.Name(), DaemonPath: testGCDaemonPath(t),
+		DataDir: t.TempDir(), ObjectStore: "memory",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close(context.Background()) })
+	store := daemon.NewSchemaStore(client)
+	id, blobID := schema.ID(vaultic.NewRandomID()), schema.ID(vaultic.NewRandomID())
+	if err := store.PublishPack(ctx, daemon.PublishedPack{
+		PackID: id, Record: schema.PackRecord{Type: schema.PackData, BlobCount: 1, PayloadSize: 100, Lifecycle: schema.PackExportPending},
+		Blobs: map[schema.ID]schema.BlobRecord{blobID: {Locations: []schema.BlobLocation{{PackID: id, Type: schema.BlobData, Length: 100}}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkPackPublished(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	repo := TestRepository(t)
+	engine := enginepkg.NewDaemonEngine(client)
+	repo.SetEngine(engine)
+	err = repo.LoadBackupIndex(ctx, vaultic.NewNoopPrinter(), enginepkg.BackupLookupOptions{ScratchDirectory: t.TempDir(), CacheBytes: 192, Concurrency: 1})
+	if err == nil || err.Error() != "on-demand backup requires complete pack sizing metadata; use full index loading" {
+		t.Fatalf("unknown sizing accepted or misclassified: %v", err)
+	}
+	if _, sizeErr := repo.currentBlobSizes(ctx); sizeErr == nil {
+		t.Fatal("incomplete projection used for pack sizing")
+	}
+	if flushErr := engine.Flush(ctx, &internalRepository{repo}); !errors.Is(flushErr, err) {
+		t.Fatalf("failed startup allowed flush: %v", flushErr)
+	}
+}
+
+func TestAuthoritativePackInventoryAndRecovery(t *testing.T) {
+	ctx := t.Context()
+	socket := gcTestSocket(t)
+	client, err := daemon.Ensure(ctx, daemon.Options{
+		Socket: socket, RepositoryID: t.Name(), DaemonPath: testGCDaemonPath(t),
 		DataDir: t.TempDir(), ObjectStore: "memory",
 	})
 	if err != nil {
@@ -519,8 +557,49 @@ func TestAuthoritativePackInventoryAndRecovery(t *testing.T) {
 	if blobs, err := session.ReadPendingPack(ctx, schema.ID(vaultic.NewRandomID()), repo.LoadPackHeader); err == nil || len(blobs) != 0 {
 		t.Fatalf("absent pack accepted: %v, %v", blobs, err)
 	}
-	if err := engine.DaemonEngine.Flush(ctx, &internalRepository{repo}); err != nil {
+	backupCtx, cancelBackup := context.WithCancelCause(ctx)
+	defer cancelBackup(nil)
+	scratch := t.TempDir()
+	backupClient, err := daemon.Connect(ctx, daemon.Options{Socket: socket, RepositoryID: t.Name()})
+	if err != nil {
 		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = backupClient.Close(context.Background()) })
+	repo.SetEngine(enginepkg.NewDaemonEngine(backupClient))
+	priorEngine := repo.Engine()
+	if err := repo.LoadBackupIndex(backupCtx, vaultic.NewNoopPrinter(), enginepkg.BackupLookupOptions{ScratchDirectory: scratch, CacheBytes: 192 * 256, Concurrency: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if repo.Engine() != priorEngine {
+		t.Fatal("on-demand activation replaced the reconciler's engine")
+	}
+	if err := repo.LoadBackupIndex(backupCtx, vaultic.NewNoopPrinter(), enginepkg.BackupLookupOptions{ScratchDirectory: scratch, CacheBytes: 192 * 256, Concurrency: 2}); err == nil {
+		t.Fatal("on-demand activation allowed twice")
+	}
+	owned := repo.Engine().(*enginepkg.DaemonEngine)
+	t.Cleanup(func() { _ = owned.Close() })
+	for range owned.Values() {
+		t.Fatal("on-demand startup retained full catalog entries")
+	}
+	if actual, valid, err := owned.BlobSizes(ctx); err != nil || !valid || actual != expected {
+		t.Fatalf("on-demand pack summary=%v valid=%v err=%v", actual, valid, err)
+	}
+	payload := []byte("pending blob 0")
+	if data, err := repo.LoadBlob(ctx, vaultic.BlobHandle{Type: vaultic.DataBlob, ID: vaultic.Hash(payload)}, nil); err != nil || !bytes.Equal(data, payload) {
+		t.Fatalf("point-read recovered blob: %q %v", data, err)
+	}
+	newPayload := []byte("written after the owned session was pinned")
+	if err := repo.WithBlobUploader(ctx, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
+		_, _, _, err := uploader.SaveBlob(ctx, vaultic.DataBlob, newPayload, vaultic.ID{}, false)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for range owned.Values() {
+		t.Fatal("on-demand backup retained exported writes")
+	}
+	if data, err := repo.LoadBlob(ctx, vaultic.BlobHandle{Type: vaultic.DataBlob, ID: vaultic.Hash(newPayload)}, nil); err != nil || !bytes.Equal(data, newPayload) {
+		t.Fatalf("point-read spilled blob: %q %v", data, err)
 	}
 	fresh, err := daemon.NewSchemaStore(client).BeginReadSession(ctx)
 	if err != nil {
@@ -532,6 +611,34 @@ func TestAuthoritativePackInventoryAndRecovery(t *testing.T) {
 	}
 	if _, _, err := fresh.ScanPackInventory(ctx, func(context.Context, schema.ID, schema.PackRecord) error { return errors.New("export still pending") }); err != nil {
 		t.Fatal(err)
+	}
+	lost := errors.New("backup session lost")
+	cancelBackup(lost)
+	if _, err := repo.LoadBlob(ctx, vaultic.BlobHandle{Type: vaultic.DataBlob, ID: vaultic.Hash(newPayload)}, nil); !errors.Is(err, lost) || !errors.Is(err, vaultic.ErrMetadataLookup) {
+		t.Fatalf("failed session served cached data: %v", err)
+	}
+	if err := owned.Flush(ctx, &internalRepository{repo}); !errors.Is(err, lost) {
+		t.Fatalf("failed session allowed flush: %v", err)
+	}
+	if err := owned.PublishSnapshotScope(ctx, vaultic.NewRandomID(), nil); !errors.Is(err, lost) {
+		t.Fatalf("failed session allowed publication: %v", err)
+	}
+	if err := session.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := fresh.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := owned.Close(); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(scratch)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("owned spill cleanup: entries=%v err=%v", entries, err)
+	}
+	status, err := client.WriterStatus(ctx)
+	if err != nil || status.ActiveTransactions != 0 || status.ActiveWriteIntents != 0 {
+		t.Fatalf("owned session cleanup: transactions=%d intents=%d err=%v", status.ActiveTransactions, status.ActiveWriteIntents, err)
 	}
 }
 

@@ -1,5 +1,97 @@
 # Phase 33 Production Benchmark Evidence
 
+## Owned on-demand backup sessions and publication fencing (2026-09-25)
+
+Backup now has an explicit, experimental `--metadata-on-demand` mode requiring
+`--metadata-scratch`. Full-index loading remains the default. The mode owns a
+renewable pinned ReadSession, a64MiB accounted size cache with four lookup slots,
+and encrypted temporary spill for exported writes. It scans `p:` pack records,
+not the full `b:` blob catalog. Pending exports are recovered one authenticated
+header at a time, checked against pinned blob records, saved as compatibility
+indexes and acknowledged only after success. Unknown sizing aborts startup;
+an incomplete local projection is never treated as known zero usage.
+
+Activation preserves the existing engine instance and callbacks; repeated
+activation is rejected. Ordinary cache pruning is bypassed because it derives
+its keep-set from a complete in-memory index. Context-aware reads/admission use
+the pinned provider plus active/spilled writes. Known lookup/spill/session
+failures block flush and snapshot publication. Close joins lookup workers,
+removes spill state, rolls back the pinned session and closes the client.
+Repository format2 and authoritative metadata are required; deferred ingest and
+dry-run are rejected. Maintenance commands are not switched to this projection.
+
+Client-side validation alone was insufficient: generation decisions are outside
+the snapshot transaction. The protocol therefore adds an optional PublicationFence
+to Commit and advertises a `publication_fence` capability. Fenced commits require
+a separate live read transaction, matching generation and decision, healthy
+metadata, and synchronous durability. The daemon holds its generation/writer
+transition mutex from validation through commit, excluding concurrent local
+generation changes. Normal unfenced commits retain their existing path. The
+client validates the session after opening the publication transaction and before
+commit, connects session/cache cancellation to the request, and rejects old
+daemons before enabling the mode. A lost commit response still has the normal
+uncertain-outcome semantics; cancellation cannot undo an already committed write.
+
+Three race-enabled native repetitions cover server rejection of stale generation,
+stale decision, closed read transaction and missing capability, with rollback and
+zero remaining transactions/intents. Late client validation failure leaves both
+the snapshot absent and export checkpoint pending. Successful publication can
+reference a root written after the session was pinned. Encrypted-pack integration
+recovers515 locations from two pack records with no full projection, reads existing
+and post-pin spilled blobs, blocks reads/flush/publication after session loss,
+and verifies scratch/session cleanup. Incomplete sizing and repeated activation
+are also rejected in repeated race tests.
+
+The candidate CLI and daemon were built locally. Disposable HDD-NFS command
+artifacts are under
+`/volume2/NASDA2/rustic/db.test/backup-point-smoke-20260925-7NK6j7`;
+the daemon socket used a separate private `/run` directory. This fixture used
+random test data and no repository password or metadata encryption; the temporary
+write overlay remains encrypted. No production credentials or data were used.
+All backup commands explicitly used cwalk with four workers and a10-minute cap.
+
+The first nested absolute-source backup failed with "snapshot has no reconciled
+root". Preserving engine identity did not resolve it; the full-index control
+failed identically. The shared reconciler can return no synthetic root when no
+top-level child is represented. This pre-existing absolute-source case was not
+changed in this stage and remains a production-validation blocker.
+
+Using the source directory as `.` completed four on-demand snapshots:
+
+| Check | Observation |
+| --- | --- |
+| Relative-source backup | One8MiB file; snapshot `732ba67d` published |
+| Unchanged-parent backup | One unchanged file, zero new blobs; snapshot `1576cd63` |
+| New-data backup | One unchanged8MiB file plus one new1MiB file; two data blobs and one tree blob; snapshot `30fd24fc` |
+| Standard restore | Restored8MiB file matches source byte-for-byte |
+| Standard `check --read-data` | Three snapshots, six packs, no errors |
+| Cleanup-fixed backup | Two unchanged files, zero new blobs; snapshot `41b6c76f`; fresh scratch parent empty after exit |
+
+The command smoke tests also exposed a resource-ownership bug: the CLI repository
+helper returns an unlock closure, not a repository-close closure. Backup teardown
+now closes the repository after unlocking, which releases the owned engine/session
+and encrypted spill. An ordering/idempotency regression passes three race runs.
+The final command used a new `clean-scratch-XzT8er` parent and left it empty; no
+fixture daemon remained on its private runtime path. Earlier pre-fix scratch
+directories remain in the disposable artifact tree, not in production.
+
+The first successful relative run reused packs uploaded by the preceding failed
+attempts; it is not a clean initial-upload performance baseline. These are workflow
+and integrity checks, not a matched runtime comparison or a production speedup
+claim. Full archiver/backupcmd/engine/repository-index race suites and targeted
+native transaction/session/catalog/publication suites pass. Rust server compilation
+passes; the transaction-module unit-test filter matched zero tests, so server
+behavior was verified through the native Go tests instead.
+Editor diagnostics show only two pre-existing `fmt.Appendf` suggestions in
+untouched transaction-test lines; the edited production paths have no diagnostics.
+
+The running production daemon was not restarted, replaced or deployed. A matched
+production cwalk comparison requires explicit approval to deploy the new fence
+capability, complete sizing metadata, and resolution of the absolute-source
+reconciliation blocker. No claim of bounded total backup memory is made: pack
+inventory traversal, large individual rows/headers, active uploads, exporters and
+scratch disk usage remain relevant scaling costs.
+
 ## Incremental, batched pack-export acknowledgments (2026-09-25)
 
 Daemon-backed engines now acknowledge newly written packs after each successful

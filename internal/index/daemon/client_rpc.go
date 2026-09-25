@@ -838,6 +838,23 @@ func (t *Transaction) CommitWithIdempotency(ctx context.Context, idempotencyKey 
 }
 
 func (t *Transaction) commit(ctx context.Context, idempotencyKey string, deferDurability, requireToken bool) (DurabilityToken, error) {
+	return t.commitFenced(ctx, idempotencyKey, deferDurability, requireToken, nil)
+}
+
+func (t *Transaction) CommitForSession(ctx context.Context, session *ReadSession) error {
+	if !t.client.Limits().PublicationFence {
+		return fmt.Errorf("daemon does not support fenced snapshot publication")
+	}
+	if session == nil || session.client != t.client || session.transaction.ID() == t.id {
+		return fmt.Errorf("publication requires a separate read session on the same client")
+	}
+	_, err := t.commitFenced(ctx, "", false, false, &vaulticdbv1.PublicationFence{
+		Generation: session.Identity.Generation, Decision: session.decision, ReadSessionId: session.transaction.ID(),
+	})
+	return err
+}
+
+func (t *Transaction) commitFenced(ctx context.Context, idempotencyKey string, deferDurability, requireToken bool, fence *vaulticdbv1.PublicationFence) (DurabilityToken, error) {
 	state := t.state.Load()
 	if state == transactionCommitUncertain {
 		if idempotencyKey == "" || idempotencyKey != t.idempotencyKey {
@@ -852,9 +869,14 @@ func (t *Transaction) commit(ctx context.Context, idempotencyKey string, deferDu
 	response, err := t.client.rpc.Commit(ctx, &vaulticdbv1.TransactionRequest{
 		Context: requestContext(ctx), TransactionId: t.id, IdempotencyKey: idempotencyKey,
 		DeferDurability: deferDurability, RequireDurabilityToken: requireToken,
+		PublicationFence: fence,
 	})
 	if err != nil {
 		t.client.auditRPCError(ctx, "commit", err)
+		if fence != nil && (status.Code(err) == codes.FailedPrecondition || status.Code(err) == codes.NotFound || status.Code(err) == codes.InvalidArgument) {
+			t.state.Store(transactionOpen)
+			return DurabilityToken{}, err
+		}
 		if requireToken && status.Code(err) == codes.FailedPrecondition {
 			t.state.Store(transactionOpen)
 			return DurabilityToken{}, err

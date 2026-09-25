@@ -5,6 +5,7 @@ use std::time::Instant;
 use tonic::{Request, Response, Status};
 
 use crate::{
+    error::VaulticDbError,
     proto::{
         AwaitDurableThroughRequest, AwaitDurableThroughResponse, BeginResponse, CommitResponse,
         DurabilityToken, Empty, TransactionRequest, WriteBatchRequest, WriteBatchResponse,
@@ -199,9 +200,39 @@ impl Service {
         let mut timer = self.state.attribution.commit_request.timer();
         let result = async {
             check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
+            let fence = request.get_ref().publication_fence.as_ref();
+            let _transition = if fence.is_some() {
+                Some(self.state.writer_transition.lock().await)
+            } else {
+                None
+            };
             let _admission = self.mutation_admission().await?;
             let storage = self.storage().await?;
             self.ensure_writer_authority().await?;
+            if let Some(fence) = fence {
+                if fence.read_session_id.is_empty()
+                    || fence.read_session_id == request.get_ref().transaction_id
+                    || request.get_ref().defer_durability
+                {
+                    return Err(Status::invalid_argument("invalid publication fence"));
+                }
+                let generation = storage
+                    .generation_authority(&self.state.repository_id)
+                    .await
+                    .map_err(VaulticDbError::generation)
+                    .map_err(Status::from)?;
+                if generation.active_generation != fence.generation
+                    || generation.decision != fence.decision
+                    || generation.state != "healthy"
+                {
+                    return Err(Status::failed_precondition(
+                        "publication generation changed",
+                    ));
+                }
+                storage
+                    .validate_read_session(&fence.read_session_id)
+                    .await?;
+            }
             let authority = self.durability_authority(storage.as_ref()).await?;
             let result = storage
                 .commit(

@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -331,6 +332,64 @@ func TestSchemaStoreTwoPhasePackDeletion(t *testing.T) {
 	}
 }
 
+func TestTransactionPublicationFence(t *testing.T) {
+	store, ctx := historyTestStore(t, t.Name())
+	for ordinal, name := range []string{"valid", "generation", "decision", "closed", "unsupported"} {
+		t.Run(name, func(t *testing.T) {
+			session, err := store.BeginReadSession(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer session.Close(context.Background())
+			fence := &ReadSession{SchemaStore: store, transaction: session.transaction, Identity: session.Identity, decision: session.decision}
+			switch name {
+			case "generation":
+				fence.Identity.Generation++
+			case "decision":
+				fence.decision++
+			case "closed":
+				if err := session.Close(ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			transaction, err := store.client.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := schema.BlobKey(daemonTestID(byte(ordinal + 180)))
+			if err := transaction.WriteBatch(ctx, []Mutation{{Key: key, Value: []byte("fenced value")}}, nil); err != nil {
+				t.Fatal(err)
+			}
+			capability := store.client.limits.PublicationFence
+			if name == "unsupported" {
+				store.client.limits.PublicationFence = false
+			}
+			err = transaction.CommitForSession(ctx, fence)
+			store.client.limits.PublicationFence = capability
+			if name == "valid" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err == nil {
+					t.Fatal("invalid publication fence committed")
+				}
+				if err := transaction.Rollback(ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, found, err := store.Get(ctx, key)
+			if err != nil || found != (name == "valid") {
+				t.Fatalf("fenced write visible=%t err=%v", found, err)
+			}
+		})
+	}
+	status, err := store.client.WriterStatus(ctx)
+	if err != nil || status.ActiveTransactions != 0 || status.ActiveWriteIntents != 0 {
+		t.Fatalf("fence cleanup: transactions=%d intents=%d err=%v", status.ActiveTransactions, status.ActiveWriteIntents, err)
+	}
+}
+
 func TestSchemaStoreCompletesSnapshotExportAtomically(t *testing.T) {
 	client, err := Ensure(
 		context.Background(),
@@ -346,6 +405,11 @@ func TestSchemaStoreCompletesSnapshotExportAtomically(t *testing.T) {
 	}
 	defer client.Close(context.Background())
 	store := NewSchemaStore(client)
+	session, err := store.BeginReadSession(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close(context.Background())
 	revision, err := store.AllocateRevision(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -369,10 +433,32 @@ func TestSchemaStoreCompletesSnapshotExportAtomically(t *testing.T) {
 	if err := store.MarkExportPending(context.Background(), snapshotID, rootKey); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PublishSnapshotScope(context.Background(),
-		SnapshotScope{SnapshotID: snapshotID,
-			RootKey:      rootKey,
-			OriginalJSON: []byte(("{\"time\":\"2026-08-29T12:34:56Z\",\"tree\":\"test\"}"))}); err != nil {
+	scope := SnapshotScope{SnapshotID: snapshotID, RootKey: rootKey,
+		OriginalJSON: []byte("{\"time\":\"2026-08-29T12:34:56Z\",\"tree\":\"test\"}")}
+	failure := errors.New("read session lost before commit")
+	validations := 0
+	err = store.publishSnapshotScope(context.Background(), scope, func(ctx context.Context) error {
+		validations++
+		if validations == 2 {
+			return failure
+		}
+		return session.Validate(ctx)
+	}, session)
+	if !errors.Is(err, failure) || validations != 2 {
+		t.Fatalf("late publication validation: calls=%d err=%v", validations, err)
+	}
+	if _, found, err := store.Get(context.Background(), schema.SnapshotKey(snapshotID)); err != nil || found {
+		t.Fatalf("failed validation published snapshot: found=%t err=%v", found, err)
+	}
+	pendingValue, found, err := store.Get(context.Background(), schema.ExportCheckpointKey(snapshotID))
+	if err != nil || !found {
+		t.Fatalf("pending checkpoint: found=%t err=%v", found, err)
+	}
+	pending, err := schema.UnmarshalExportCheckpointRecord(pendingValue)
+	if err != nil || pending.State != schema.ExportPending || pending.CommitSequence != 0 {
+		t.Fatalf("failed validation completed checkpoint: %+v err=%v", pending, err)
+	}
+	if err := session.PublishSnapshotScope(context.Background(), scope); err != nil {
 		t.Fatal(err)
 	}
 	checkpointValue, found, err := store.Get(context.Background(), schema.ExportCheckpointKey(snapshotID))
@@ -400,6 +486,10 @@ func TestSchemaStoreCompletesSnapshotExportAtomically(t *testing.T) {
 	}
 	if !bytes.Equal(commit.RootKey, rootKey) || commit.SnapshotTimeUnixNano == 0 {
 		t.Fatalf("snapshot commit record = %#v", commit)
+	}
+	session.cancel(failure)
+	if err := session.PublishSnapshotScope(context.Background(), scope); !errors.Is(err, failure) {
+		t.Fatalf("failed session allowed publication replay: %v", err)
 	}
 }
 

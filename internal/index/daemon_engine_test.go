@@ -18,6 +18,9 @@ import (
 var testPublishTime = time.Unix(1_700_000_000, 0)
 
 func TestDaemonContextLookupsAndAdmission(t *testing.T) {
+	if _, err := NewBackupDaemonEngine(t.Context(), nil, BackupLookupOptions{}); err == nil {
+		t.Fatal("on-demand engine accepted an unavailable publication fence")
+	}
 	engine := NewDaemonEngine(nil)
 	handle := vaultic.NewRandomBlobHandle()
 	var admitted atomic.Uint64

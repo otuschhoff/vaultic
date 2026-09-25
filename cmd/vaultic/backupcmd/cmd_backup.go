@@ -108,6 +108,8 @@ type backupOptions struct {
 	UseCWalk                  bool
 	NoCWalk                   bool
 	CWalkConcurrency          int
+	MetadataOnDemand          bool
+	MetadataScratch           string
 	UsePathdiff               bool
 	PathdiffEndpoint          string
 	PathdiffRequireCoverage   bool
@@ -249,6 +251,8 @@ func (options *backupOptions) addTraversalFlags(f *pflag.FlagSet) {
 	f.BoolVar(&options.UseCWalk, "use-cwalk", true, "use parallel cwalk traversal for the backup scanner")
 	f.BoolVar(&options.NoCWalk, "no-cwalk", false, "use the legacy traversal instead of cwalk")
 	f.IntVar(&options.CWalkConcurrency, "cwalk-concurrency", 32, "run `n` concurrent cwalk workers")
+	f.BoolVar(&options.MetadataOnDemand, "metadata-on-demand", false, "use bounded point lookups for authoritative backup metadata")
+	f.StringVar(&options.MetadataScratch, "metadata-scratch", "", "encrypted on-demand metadata scratch `directory`")
 	f.BoolVar(&options.UsePathdiff, "use-pathdiff", false, "use verified pathdiff events to skip unchanged subtrees")
 	f.StringVar(&options.PathdiffEndpoint, "pathdiff-endpoint", "", "pathdiff control socket `path`")
 	f.BoolVar(
@@ -545,6 +549,17 @@ func (options backupOptions) validateDeferred() error {
 }
 
 func (options backupOptions) validateParent() error {
+	if options.MetadataOnDemand {
+		if options.MetadataScratch == "" {
+			return errors.Fatal("--metadata-on-demand requires --metadata-scratch")
+		}
+		if options.AllowDeferredCommit || options.DryRun {
+			return errors.Fatal("--metadata-on-demand cannot use deferred ingest or --dry-run")
+		}
+	}
+	if options.MetadataScratch != "" && !options.MetadataOnDemand {
+		return errors.Fatal("--metadata-scratch requires --metadata-on-demand")
+	}
 	if options.UseCWalk && options.CWalkConcurrency < 1 {
 		return errors.Fatal("--cwalk-concurrency must be at least 1")
 	}
