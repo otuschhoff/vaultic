@@ -1,5 +1,33 @@
 # Phase 33 Production Benchmark Evidence
 
+## Cwalk cancellation and archiver handoff, r4/r5 (2026-09-24)
+
+After catalog parallelism reached source traversal, cancellation required fixes
+at two boundaries. Cwalk's worker loops and startup waits did not observe Stop;
+that patch and its deterministic regression are now upstream in cwalk v1.0.1
+(a5cd220), adopted by Vaultic in aa4bf5c7b. The Vaultic wrapper checks cancellation
+before each root and after walker registration, stops callbacks on cancellation,
+and joins its cancellation monitor. The archiver also checks cancellation before
+snapshot preparation and after manifest preparation, rather than initializing
+upload work after a canceled manifest has been discarded.
+
+R4 still required the kill grace despite the cwalk worker fixes. R5 adds the
+archiver handoff checks and exits at 602.951 seconds with timeout status 124,
+about three seconds after TERM, instead of requiring SIGKILL at 645 seconds.
+Its final error is context cancellation, and no 610-second post-TERM stack is
+present because the process had already exited. Both runs explicitly use cwalk
+with 32 workers, the original 52 roots, and HDD-NFS manifest scratch; r3 had
+inherited the default temporary directory and is not a controlled scratch
+performance comparison. In-flight filesystem calls remain non-interruptible.
+
+R5 records 766.44 user and 93.46 system CPU seconds, peak RSS 32,555,540 KiB,
+and no completed backup. Artifacts, source patch and the then-local cwalk source
+are retained under `db.test/backup-cwalk-cancel-2026-09-24-r4` and `-r5`.
+Cancellation/temporary-state cleanup, traversal parity, and the regression that
+forbids uploader startup after cancellation pass under the race detector against
+upstream v1.0.1. The known root-only permission fallback test remains excluded.
+This is a shutdown improvement, not a completed-backup throughput result.
+
 ## Four catalog workers reach cwalk, r3 (2026-09-24)
 
 The third candidate uses four private compact builders, each scanning disjoint

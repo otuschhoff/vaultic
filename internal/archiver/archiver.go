@@ -966,6 +966,9 @@ func (arch *Archiver) stopWorkers() {
 
 // Snapshot saves several targets and returns a snapshot.
 func (arch *Archiver) Snapshot(ctx context.Context, targets []string, snapshotOptions SnapshotOptions) (*data.Snapshot, vaultic.ID, *Summary, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, vaultic.ID{}, nil, err
+	}
 	if snapshotOptions.DeferredUploader != nil && snapshotOptions.ParentSnapshot != nil {
 		return nil, vaultic.ID{}, nil, errors.New("deferred crawl cannot use a parent snapshot")
 	}
@@ -984,6 +987,9 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, snapshotOp
 	}
 	closeManifest := arch.prepareCWalkManifest(ctx, targets)
 	defer closeManifest()
+	if err := ctx.Err(); err != nil {
+		return nil, vaultic.ID{}, nil, err
+	}
 
 	rootTreeID, err := arch.saveSnapshotTree(ctx, atree, snapshotOptions)
 	if err != nil {

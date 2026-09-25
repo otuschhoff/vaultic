@@ -1,11 +1,49 @@
 package crawl
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
+	"sync/atomic"
 	"testing"
 )
+
+func TestBuildDirectoryManifestCancellationCleansTemporaryState(t *testing.T) {
+	for _, beforeStart := range []bool{true, false} {
+		t.Run(map[bool]string{true: "before-start", false: "during-first-root"}[beforeStart], func(t *testing.T) {
+			first, second, scratch := t.TempDir(), t.TempDir(), t.TempDir()
+			for _, root := range []string{first, second} {
+				if err := os.Mkdir(filepath.Join(root, "child"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("TMPDIR", scratch)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if beforeStart {
+				cancel()
+			}
+			var laterRoot atomic.Bool
+			manifest, err := BuildDirectoryManifest(ctx, []string{first, second}, 32, 1, func(item string, _ os.FileInfo) bool {
+				if strings.HasPrefix(item, second+string(filepath.Separator)) {
+					laterRoot.Store(true)
+				}
+				cancel()
+				return false
+			})
+			if manifest != nil || !errors.Is(err, context.Canceled) || laterRoot.Load() {
+				t.Fatalf("manifest=%v err=%v later root visited=%t", manifest, err, laterRoot.Load())
+			}
+			entries, err := os.ReadDir(scratch)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("canceled manifest retained temporary state: %v, %v", entries, err)
+			}
+		})
+	}
+}
 
 func TestBuildDirectoryManifest(t *testing.T) {
 	root := t.TempDir()

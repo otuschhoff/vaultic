@@ -3,6 +3,7 @@ package archiver
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -28,6 +29,30 @@ func prepareTempdirRepoSrc(t testing.TB, src TestDir) (string, *repository.Repos
 	TestCreateFiles(t, tempdir, src)
 
 	return tempdir, repo
+}
+
+func TestSnapshotCWalkCancellationDoesNotStartUploader(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "child"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	scratch := t.TempDir()
+	t.Setenv("TMPDIR", scratch)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	arch := New(nil, fs.NewLocal(), Options{CWalkConcurrency: 32})
+	arch.SelectByName = func(string) bool {
+		cancel()
+		return true
+	}
+	snapshot, _, summary, err := arch.Snapshot(ctx, []string{root}, SnapshotOptions{})
+	if !errors.Is(err, context.Canceled) || snapshot != nil || summary != nil {
+		t.Fatalf("canceled snapshot returned %v, %v, %v", snapshot, summary, err)
+	}
+	entries, err := os.ReadDir(scratch)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("manifest scratch after cancellation: %v, %v", entries, err)
+	}
 }
 
 func saveFile(t testing.TB, repo archiverRepo, filename string, filesystem fs.FS) (*data.Node, ItemStats) {

@@ -29,6 +29,9 @@ func BuildDirectoryManifest(
 	workers, queueCapacity int,
 	ignore func(string, os.FileInfo) bool,
 ) (*DirectoryManifest, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if workers < 1 || queueCapacity < 1 {
 		return nil, fmt.Errorf("cwalk workers and queue capacity must be positive")
 	}
@@ -58,7 +61,9 @@ func BuildDirectoryManifest(
 		}
 	}
 	monitorDone := make(chan struct{})
+	monitorExited := make(chan struct{})
 	go func() {
+		defer close(monitorExited)
 		select {
 		case <-walkCtx.Done():
 			stopWalkers()
@@ -68,6 +73,7 @@ func BuildDirectoryManifest(
 
 	walkErr := walkManifestRoots(walkCtx, cancel, roots, workers, ignore, records, &walkersMu, &walkers)
 	close(monitorDone)
+	<-monitorExited
 	close(records)
 	writeErr := <-writeDone
 	if walkErr != nil || writeErr != nil || ctx.Err() != nil {
@@ -124,6 +130,9 @@ func walkManifestRoots(
 	walkers *[]*cwalk.Walker,
 ) error {
 	for _, root := range roots {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		info, err := os.Lstat(root)
 		if err != nil {
 			return err
@@ -139,6 +148,10 @@ func walkManifestRoots(
 		walkersMu.Lock()
 		*walkers = append(*walkers, walker)
 		walkersMu.Unlock()
+		if err := ctx.Err(); err != nil {
+			walker.Stop()
+			return err
+		}
 		if err := walker.Run(); err != nil {
 			return err
 		}
@@ -157,6 +170,10 @@ func newManifestWalker(
 	var walker *cwalk.Walker
 	var resizeOnce sync.Once
 	callbacks := cwalk.Callbacks{OnReadDir: func(relative string, entries []os.DirEntry, err error) {
+		if ctx.Err() != nil {
+			walker.Stop()
+			return
+		}
 		if relative == "" {
 			resizeOnce.Do(func() {
 				if resizeErr := walker.ResizeWorkers(workers); resizeErr != nil {
