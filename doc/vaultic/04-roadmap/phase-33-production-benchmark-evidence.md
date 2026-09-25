@@ -1,5 +1,69 @@
 # Phase 33 Production Benchmark Evidence
 
+## Cache policy diagnosis and gated R26 probe (2026-09-25)
+
+Read-only inspection resolved R25's policy failure. The configured metadata
+root is a symlink; its persisted revision-0 cache policy contains the tier
+`bulk-memory`, enabled with a64GiB ceiling. R25 requested `r25`. Policy loading
+correctly rejects that identity mismatch rather than replacing shared policy.
+The existing local-cache restart test now uses a filesystem-backed policy store
+instead of InMemory and asserts healthy coordination. It passes on both local
+temporary storage and disposable HDD-NFS storage.
+
+The user approved a corrected, temporary trial using `bulk-memory`, its exact
+persisted policy values and a512MiB aggregate cap, with32MiB in-flight fills,
+8 background tasks and4MiB entries. The daemon binary stayed at12f686c29; the
+5951f82ad fallback was not deployed. Preflight required enabled tier/aggregate
+state and512MiB effective capacity. A new30s gate required increasing hits and
+accounted usage within the cap, terminating the backup if validation failed.
+The same52-root cwalk32 workload, CLI, two file readers and64MiB result cache
+were retained. No builds or tests overlapped the probe.
+
+**R26 failed the hit gate and stopped after30.906s**, not600s. At30s it had
+processed1,002 files /1,204,747,931 logical bytes. The CLI exited130 after the
+harness sent SIGTERM; its final assertion marked the probe unsuccessful. It
+emitted1,789 single-handle size RPCs and final lookup metrics, with zero CLI
+cache evictions/location RPCs. Metadata-object counters increased by10,370 GETs
+and24,325,750,892 body bytes. Scratch was empty and writer cleanup completed.
+This is not an end-to-end throughput result or a valid full-window comparison.
+
+The warm cache snapshot reported enabled state,512MiB effective capacity and
+zero used/reserved bytes, with0 hits,10,421 aggregate misses and16 coalesced
+origin reads avoided. Reconciliation lag was5. Effective capacity alone proved
+insufficient to establish healthy quota coordination. The persisted quota ledger
+has `aggregate_max_bytes: null`, while R26 requested512MiB. `read_quota_ledger`
+requires an exact match and rejects the conflicting limit before admission.
+The ledger also contains1,177 old `decrypted/bulk-memory` entries charged at
+65,361,707 bytes with an expired manager lease. No plaintext cache was enabled
+and those entries were not reinterpreted as ciphertext or manually removed.
+
+The approved override was removed and production restored at PID1229351,
+epoch62, read-write with zero active transactions/intents. All143 snapshot IDs
+and the original executable, unit and persisted-policy hashes match pre-trial
+values. No snapshot completed and no binary replacement occurred. Trial artifacts
+are in `/volume2/NASDA2/rustic/db.test/backup-bulk-cache-20260925-r26-N4ttaK`;
+policy evidence, restart checks, tests and the subsequent candidate are in
+`/volume2/NASDA2/rustic/db.test/cache-policy-probe-20260925-s2A8ZE`.
+
+Local follow-up now preserves existing cache hits during unhealthy quota
+coordination but returns origin responses directly on misses, avoiding response
+buffering, sidecar hashing and unsuccessful fill setup until coordination
+recovers. A regression verifies warm hits, cold range contents and counters.
+Another reproduces both persisted tier-identity and aggregate-limit mismatches,
+including policy preservation and the distinction between enabled policy and
+healthy quota coordination. All108 library and196 daemon tests pass serially;
+the68 cache tests also pass with HDD-NFS filesystem fixtures. Package formatting
+and three native Go race repetitions against the newly built candidate pass.
+
+The new fallback is **not deployed or production-benchmarked**. Both observed
+configuration failures remain fail-closed intentionally. Another cache trial
+must first reconcile the persisted tier policy and shared quota contract through
+an approved operator workflow, or provide a separately enforced process-local
+budget. Do not silently replace either document, enable the old plaintext tier,
+or raise the memory limit to match old settings. Preflight must include quota
+health/reconciliation state and a successful admission/hit probe, not merely
+requested environment values or enabled/effective-capacity fields.
+
 ## Inactive ciphertext-cache trial and fallback, R25 (2026-09-25)
 
 The existing read-cache manager can sit below metadata encryption and cache

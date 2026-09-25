@@ -3620,6 +3620,11 @@ impl ObjectStore for CacheManager {
             ));
         }
         self.metrics.misses.fetch_add(1, Ordering::AcqRel);
+        if !self.quota.healthy.load(Ordering::Acquire) {
+            self.metrics.bypasses.fetch_add(1, Ordering::AcqRel);
+            self.metrics.origin_reads.fetch_add(1, Ordering::AcqRel);
+            return self.origin.get_opts(location, options).await;
+        }
         let (flight, leader) = self.flight(&key);
         if !leader {
             if let Some(shared) = self.wait_for_flight(&flight).await {
@@ -5301,6 +5306,43 @@ mod tests {
         assert_eq!(status.metrics.admissions, 0);
     }
 
+    #[tokio::test]
+    async fn unhealthy_quota_preserves_hits_and_bypasses_miss_processing() {
+        let (origin, cache) = manager(4096).await;
+        let warm_path = ObjectPath::from("compacted/warm.sst");
+        let cold_path = ObjectPath::from("compacted/cold.sst");
+        origin
+            .put(&warm_path, Bytes::from_static(b"cached").into())
+            .await
+            .unwrap();
+        origin
+            .put(&cold_path, Bytes::from_static(b"abcdef").into())
+            .await
+            .unwrap();
+        let request = options(TableStoreKind::Main, SstType::Compacted, false);
+        assert_eq!(
+            cached_get(cache.as_ref(), &warm_path, request.clone()).await,
+            b"cached"[..]
+        );
+        wait_for_admissions(&cache, 1).await;
+        cache.quota.healthy.store(false, Ordering::Release);
+        assert_eq!(
+            cached_get(cache.as_ref(), &warm_path, request.clone()).await,
+            b"cached"[..]
+        );
+        let mut range_request = request;
+        range_request.range = Some(slatedb::object_store::GetRange::Bounded(1..4));
+        let result = cache.get_opts(&cold_path, range_request).await.unwrap();
+        assert_eq!(result.range, 1..4);
+        assert_eq!(result.bytes().await.unwrap(), b"bcd"[..]);
+        let status = cache.status();
+        assert_eq!(status.metrics.hits, 1);
+        assert_eq!(status.metrics.misses, 2);
+        assert_eq!(status.metrics.bypasses, 1);
+        assert_eq!(status.metrics.admissions, 1);
+        assert_eq!(origin.reads.load(Ordering::Acquire), 2);
+    }
+
     #[test]
     fn only_foreground_compacted_sst_reads_are_cacheable() {
         assert!(cacheable_read(&options(
@@ -5524,6 +5566,86 @@ mod tests {
         assert!(cache.tiers[0].store.get(&cache.policy_path).await.is_err());
         assert!(cache.tiers[1].store.get(&cache.policy_path).await.is_err());
         assert!(policy_store.get(&cache.policy_path).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn persisted_policy_and_quota_mismatches_fail_closed() {
+        let policy_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut config = CacheConfig {
+            tiers: vec![CacheTierConfig {
+                id: "existing".to_owned(),
+                store: ReplicaStoreConfig::Memory,
+                confidentiality: CacheConfidentiality::Encrypted,
+                policy: policy(4096),
+            }],
+            aggregate_max_bytes: Some(4096),
+            part_size_bytes: 4096,
+            max_inflight_bytes: 4096,
+            max_background_tasks: 1,
+        };
+        let first = CacheManager::new(
+            Arc::new(InMemory::new()),
+            policy_store.clone(),
+            config.clone(),
+            "repository",
+            "policy-tier-identity",
+        )
+        .await
+        .unwrap();
+        assert!(first.status().quota_coordination_healthy);
+        first.close().await.unwrap();
+        let persisted = policy_store
+            .get(&first.policy_path)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        config.tiers[0].id = "replacement".to_owned();
+        let reopened = CacheManager::new(
+            Arc::new(InMemory::new()),
+            policy_store.clone(),
+            config.clone(),
+            "repository",
+            "policy-tier-identity",
+        )
+        .await
+        .unwrap();
+        let status = reopened.status();
+        assert!(!status.tiers[0].policy.enabled);
+        assert!(status.policy_sync_error.contains("unknown read-cache tier"));
+        assert_eq!(
+            policy_store
+                .get(&first.policy_path)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            persisted
+        );
+        reopened.close().await.unwrap();
+        config.tiers[0].id = "existing".to_owned();
+        config.aggregate_max_bytes = Some(2048);
+        let mismatched_quota = CacheManager::new(
+            Arc::new(InMemory::new()),
+            policy_store,
+            config,
+            "repository",
+            "policy-tier-identity",
+        )
+        .await
+        .unwrap();
+        let status = mismatched_quota.status();
+        assert!(status.tiers[0].policy.enabled);
+        assert!(!status.quota_coordination_healthy);
+        assert_eq!(status.metrics.admissions, 0);
+        assert!(mismatched_quota
+            .read_quota_ledger()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("aggregate limit does not match shared ledger"));
     }
 
     #[tokio::test]
@@ -6858,7 +6980,14 @@ mod tests {
             "vaulticdb-read-cache-{}",
             sha256_hex(rand::random::<[u8; 32]>())
         ));
-        let policy_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let policy_store = replica_store(
+            &ReplicaStoreConfig::Local {
+                root: root.join("policy"),
+            },
+            "policy",
+            "policy",
+        )
+        .unwrap();
         let origin = Arc::new(CountingStore::new());
         let config = |confidentiality| CacheConfig {
             tiers: vec![CacheTierConfig {
@@ -6888,6 +7017,11 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(
+            first.status().quota_coordination_healthy,
+            "{}",
+            first.status().policy_sync_error
+        );
         assert_eq!(
             cached_get(&first, &path, request.clone()).await,
             b"local-cache-value"[..]
