@@ -1,5 +1,90 @@
 # Phase 33 Production Benchmark Evidence
 
+## Group-reservation cwalk comparison and repeat, R31/R32 (2026-09-25)
+
+The user approved the proposed production comparison and confirmation plan.
+R31 measured the tested8064db714 CLI with a temporary1GiB metadata cache;
+R32 repeated the identical candidate after the first result improved capped
+progress. Both used the unchanged12f686c29 daemon,52 roots, explicit cwalk32,
+two file readers, four lookup slots,64MiB CLI result cache, HDD-NFS authoritative
+storage and scratch, and600s cap/45s termination grace. No builds or tests
+overlapped either measurement. The daemon was restarted for each trial and the
+original128MiB metadata/512MiB block budgets restored after each run. No shared
+policy/quota or installed binary was changed.
+
+| Metric | R29: scalar allocation | R31: group reservation | R32: same candidate |
+| --- | --- | --- | --- |
+| Last files status at or below600s |105,769|114,180|119,023|
+| Logical bytes at that status |181,252,115,885|192,788,205,625|194,242,030,245|
+| Metadata-object body bytes |34,533,228,474|36,103,758,306|37,064,973,533|
+| Metadata GETs |230,500|248,457|255,028|
+| Single-handle size RPCs |235,954|253,478|259,514|
+| Mean size RPC |3.360ms|3.027ms|3.500ms|
+| Engine writes |66,264|46,107|71,543|
+| Commit attempts |41,152|34,174|40,114|
+| Successful commits |32,131|34,046|39,897|
+| Failed commit attempts |9,021|128|217|
+| Late successful commits per second |25.09|17.59|17.60|
+| CLI CPU seconds |1,054.70|1,116.97|1,128.81|
+| CLI peak RSS KiB |1,494,376|1,373,096|1,510,584|
+| Daemon CPU seconds |499.95|467.43|501.55|
+| Daemon sampled peak RSS GiB |1.616|1.567|1.601|
+| Wrapper exit /duration |124 /601.787s|124 /601.641s|124 /602.141s|
+
+R31 and R32 processed7.95% and12.53% more files than R29, respectively, and
+6.36% and7.17% more logical bytes. Their mean capped progress is10.24% higher
+by files and6.77% by logical bytes. Repeat spread relative to the two-run mean
+is4.15% for files and0.75% for logical bytes. Failed commit attempts fell98.58%
+and97.59%; their shares of attempts fell from21.92% to0.37% and0.54%.
+These repeated results support retaining bounded group reservation, but are
+not a controlled completed-backup speedup: source warmth, earlier committed
+metadata, existing-record reuse and reached-data differences remain confounders.
+No representative snapshot completed. The comparison also does not individually
+attribute the remaining failures, or prove all earlier failures were allocations.
+
+Late rates use the last writer samples at or below420s and590s. R31 completed
+2,994 successful commits and53 failures in170.170s; R32 completed2,995 successes
+and88 failures in170.170s. R29 had4,270 successes and2,424 failures in170.176s.
+Attempt/completion deltas can differ due to boundary in-flight requests. Fewer
+allocation commits are intentional, so raw successful commits per second are
+no longer a comparable proxy for published revisions. The much lower failure
+rate is consistent with R30's isolated counter-contention result. Engine-write
+counts and early no-write commit traffic also vary with reuse and reached state.
+
+Resource improvements are not uniformly reproduced: CLI CPU increased in both
+runs, and R31's lower CLI peak memory was not repeated in R32. Daemon CPU was
+lower in R31 and approximately unchanged in R32. Metadata bytes increased as
+the runs reached more data. Both runs emitted final lookup metrics with zero
+CLI cache evictions and no location RPCs; peak accounted cache usage was
+48,667,776 and49,826,688 bytes, respectively. There is still no evidence that
+enlarging the CLI result cache would help this workload.
+
+R31's550s profile shows one worker in `AllocateRevisionBlock` -> `Commit` and
+another waiting for that group's allocation mutex. R32's550s profile shows
+four workers in `PublishReconciledRevision` -> `Commit`, while the writer joins
+the group and archiver callbacks remain backpressured. Durable group allocation
+and revision publication are the next measured waits; do not infer that adding
+more workers or relaxing durability is warranted. Future work should quantify
+group occupancy and allocation/publication durable-wait costs before changing
+batching or concurrency. Completion/reopen/restore acceptance still requires a
+separately approved longer run.
+
+Both runs completed cancellation within grace, left empty scratch and zero
+active transactions/intents, and had no sampler errors. All143 snapshot IDs
+were unchanged before/after each run and through restoration. Final production
+is PID1281656/epoch72, read-write,128MiB metadata/512MiB block cache, zero active
+work. The temporary override is absent. Original daemon/unit/shared-policy/quota
+hashes match the archived baselines; executable SHA256 remains
+`3a825c277b2273627ca9349122e8c77b32f7ac91710a888411c4765fd6531ccd`.
+No installed CLI/daemon replacement or permanent cache-default change occurred.
+
+Artifacts, exact binaries, command lines, profiles, analyses and restoration:
+`/volume2/NASDA2/rustic/db.test/backup-group-revisions-20260925-r31-BU6cQJ` and
+`/volume2/NASDA2/rustic/db.test/backup-group-revisions-20260925-r32-AOZK9z`.
+Both used clean8064db714 and byte-identical candidate binaries. No runtime code
+changed during this validation; the race/lint/native test gates recorded in R30
+apply to this exact candidate. On-demand mode remains experimental.
+
 ## Group-scoped revision reservation, isolated R30 (2026-09-25)
 
 R29's aggregate commit failures do not distinguish allocation from publication.
@@ -26,8 +111,8 @@ The user was unavailable to explicitly approve another temporary production
 cache-setting change. Production was therefore neither restarted nor modified.
 R30 here is an isolated native allocation experiment, **not a cwalk backup run**.
 No backup was invoked. A matched ten-minute cwalk comparison with R29's temporary
-1GiB metadata budget remains pending explicit approval; the existing600s cap
-and restoration requirements still apply.
+1GiB metadata budget was pending explicit approval at this checkpoint; the
+subsequently approved R31/R32 results are recorded above.
 
 Three repetitions per mode used fresh disposable HDD-NFS databases, runtime
 sockets under `/run`, and the exact unchanged12f686c29 daemon from R29. Each
@@ -48,9 +133,9 @@ mode. Grouping reduced allocation attempts90% and successful allocation commits
 75%, with effectively unchanged allocation throughput versus concurrent scalar
 callers. These results isolate counter contention and avoided work, not an
 end-to-end speedup, CPU reduction, or proof that all9,021 R29 failures came from
-allocation. Shared-content publication can still conflict. Full backup, matched
-cwalk throughput, cancellation under the representative workload, and completed
-snapshot/reopen validation remain outstanding for this candidate.
+allocation. Shared-content publication can still conflict. Representative cwalk
+throughput and cancellation were subsequently checked in R31/R32; completed
+snapshot/reopen validation remains outstanding for this candidate.
 
 Regressions cover lazy reservation, partial groups, unused-number disposal,
 unique revisions, reservation failure/cancellation, and scalar fallback through
