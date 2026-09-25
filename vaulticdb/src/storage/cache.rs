@@ -3557,6 +3557,16 @@ impl ObjectStore for CacheManager {
             return self.origin.get_opts(location, options).await;
         }
         self.enforce_limits().await;
+        if !self
+            .tiers
+            .iter()
+            .zip(&operation_policy.policies)
+            .any(|(tier, policy)| tier.confidentiality == confidentiality && policy.enabled)
+        {
+            self.metrics.bypasses.fetch_add(1, Ordering::AcqRel);
+            self.metrics.origin_reads.fetch_add(1, Ordering::AcqRel);
+            return self.origin.get_opts(location, options).await;
+        }
         if let Some((result, source_index)) = self
             .get_cached(
                 confidentiality,
@@ -5259,6 +5269,36 @@ mod tests {
         })
         .await
         .expect("background cache tier admissions");
+    }
+
+    #[tokio::test]
+    async fn disabled_tiers_bypass_cache_processing() {
+        let (origin, cache) = manager(4096).await;
+        let path = ObjectPath::from("compacted/disabled.sst");
+        origin
+            .put(&path, Bytes::from_static(b"abcdef").into())
+            .await
+            .unwrap();
+        cache.disable_all_tiers(&anyhow::anyhow!("test policy synchronization failure"));
+        let mut request = options(TableStoreKind::Main, SstType::Compacted, false);
+        request.range = Some(slatedb::object_store::GetRange::Bounded(1..4));
+        let result = cache.get_opts(&path, request).await.unwrap();
+        assert_eq!(result.range, 1..4);
+        assert_eq!(result.bytes().await.unwrap(), Bytes::from_static(b"bcd"));
+        assert!(matches!(
+            cache
+                .get_opts(
+                    &ObjectPath::from("compacted/missing.sst"),
+                    options(TableStoreKind::Main, SstType::Compacted, false),
+                )
+                .await,
+            Err(slatedb::object_store::Error::NotFound { .. })
+        ));
+        let status = cache.status();
+        assert_eq!(status.metrics.bypasses, 2);
+        assert_eq!(status.metrics.origin_reads, 2);
+        assert_eq!(status.metrics.misses, 0);
+        assert_eq!(status.metrics.admissions, 0);
     }
 
     #[test]

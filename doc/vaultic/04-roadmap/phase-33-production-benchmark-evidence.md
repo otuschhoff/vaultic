@@ -1,5 +1,72 @@
 # Phase 33 Production Benchmark Evidence
 
+## Inactive ciphertext-cache trial and fallback, R25 (2026-09-25)
+
+The existing read-cache manager can sit below metadata encryption and cache
+immutable SST ciphertext. After all65 existing cache tests passed, the user
+approved a temporary memory tier:512MiB tier/aggregate budget,4MiB maximum
+entry size,32MiB in-flight fill budget and8 background tasks. Authoritative
+repository/database storage remained HDD-NFS. Only a runtime systemd drop-in
+changed; the daemon and CLI binaries were identical to R24. The writer was
+demoted before each restart. Trial PID1221564 ran at epoch59.
+
+**The intended cache did not become operational.** Before/after monitor records
+both report tier `r25` disabled, effective capacity0 and used bytes0. The
+post-run aggregate reports0 hits,217,537 misses and17 coalesced origin reads
+avoided. Policy synchronization lag increased from4 to36. Byte-traffic and
+fill telemetry are unavailable, not measured zero. Environment verification
+confirmed the requested settings but was insufficient: the effective-state
+precondition should have rejected this run before backup started. The exact
+policy initialization/synchronization failure remains unresolved; do not treat
+this as a comparison against a functioning512MiB ciphertext cache.
+
+R25 retained the52 roots, explicit cwalk32, two file readers, four lookup slots,
+64MiB CLI result cache and600s cap/45s grace. Artifacts and exact harness are in
+`/volume2/NASDA2/rustic/db.test/backup-cipher-cache-20260925-r25-yA3cH8`.
+Configuration, restart safety evidence and subsequent candidate validation are in
+`/volume2/NASDA2/rustic/db.test/cipher-cache-trial-20260925-cflRKL`.
+
+| Metric | R24 no read-cache wrapper | R25 inactive read-cache wrapper |
+| --- | --- | --- |
+| Files at600s |48,847|18,733|
+| Logical bytes at600s |93,604,158,848|24,383,534,534|
+| Size RPCs /mean latency |119,486 /19.879ms|39,059 /61.184ms|
+| Metadata-object body bytes |1,614,533,514,696|518,468,438,795|
+| Body bytes per size handle |13,512,324|13,273,981|
+| CLI peak RSS |1,300,616KiB|1,040,356KiB|
+| Daemon sampled peak RSS |1.014GiB|0.833GiB|
+| CLI /daemon CPU |695.24s /4614.22s|196.97s /4642.25s|
+| Wrapper exit /duration |124 /633.018s|124 /611.538s|
+
+File progress regressed about62%; lower total read volume primarily reflects
+less work. Each size RPC still carried one handle; the CLI cache peaked at
+39,055 entries (7,498,560 accounted bytes), with zero evictions/location RPCs.
+All143 snapshot IDs remained unchanged; no snapshot completed. There were2,908
+engine writes and12,836 commits. Cancellation completed within grace, final
+lookup metrics were emitted, scratch was empty and no sampler errors occurred.
+Repeated-run warmth, prior writes and reached-data differences remain confounders.
+
+The drop-in was removed as approved. Production is restored to its original
+configuration at PID1225182, epoch60, read-write with zero transactions/intents.
+Daemon SHA256 remains `3a825c277b2273627ca9349122e8c77b32f7ac91710a888411c4765fd6531ccd`;
+the unit hash and snapshot set also match their pre-trial values.
+
+Local follow-up found that `CacheManager::get_opts` continued buffering origin
+responses, hashing payloads and scheduling empty fill work when every tier in
+its confidentiality domain was disabled. It now returns the origin response
+directly in that state, after existing eviction handling. Range/error semantics,
+authentication and enabled-tier behavior remain unchanged. A focused regression
+verifies range contents, missing-object errors and bypass/origin/miss/admission
+counters. All108 library and194 daemon tests pass serially, as do three native
+Go race repetitions against the newly built release. Package-scoped formatting
+passes; workspace-wide formatting encounters unrelated missing examples and
+formatting differences in the vendored ctap-hid-fido2 package.
+
+This fallback fix is **not deployed or production-benchmarked**. R25 predates it
+and demonstrates no runtime improvement. Before another cache experiment,
+resolve the policy failure and require enabled state, nonzero effective capacity
+and a successful fill/hit probe. Keep the current production settings unchanged.
+
 ## Right-sized decrypted range buffers, R24 (2026-09-25)
 
 Tracing R23's daemon memory growth found a concrete retained-allocation problem:
