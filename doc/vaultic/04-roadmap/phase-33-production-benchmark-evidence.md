@@ -75,6 +75,11 @@ not a valid capped throughput comparison or grounds to retain10ms:
 | Daemon CPU seconds |501.55|699.37|
 | CLI CPU seconds /peak RSS KiB |1,128.81 /1,510,584|1,189.47 /1,537,656|
 
+R34 sampled daemon process RSS peaked at1.599GiB. Systemd's stop record instead
+reported `28.6G memory peak` for the service. These are different measurements
+and the discrepancy has not been reconciled; the sampled process figure must
+not be substituted for the service peak or used to claim bounded total memory.
+
 WAL attempt counts are instrumentation outcomes, not unique object counts or a
 classification of physical storage errors. Counter deltas subtract the recorded
 pre-run baseline. The CLI emitted283,468 single-handle size RPCs and no cache
