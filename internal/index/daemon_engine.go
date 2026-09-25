@@ -397,6 +397,28 @@ func (engine *DaemonEngine) LookupSize(handle vaultic.BlobHandle) (uint, bool) {
 	return engine.legacy.LookupSize(handle)
 }
 
+func (engine *DaemonEngine) LookupContext(ctx context.Context, handle vaultic.BlobHandle) ([]*pack.PackedBlob, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return engine.legacy.Lookup(handle), nil
+}
+
+func (engine *DaemonEngine) LookupSizeContext(ctx context.Context, handle vaultic.BlobHandle) (uint, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	size, found := engine.legacy.LookupSize(handle)
+	return size, found, nil
+}
+
+func (engine *DaemonEngine) AddPendingContext(ctx context.Context, handle vaultic.BlobHandle, size uint) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	return engine.legacy.AddPending(handle, size), nil
+}
+
 func (engine *DaemonEngine) Values() iter.Seq[*pack.PackedBlob] {
 	return engine.legacy.Values()
 }

@@ -25,6 +25,64 @@ type catalogLoadCounter struct {
 	cancel context.CancelFunc
 }
 
+type failingAdmissionEngine struct {
+	*enginepkg.LegacyEngine
+	err          error
+	legacyCalled bool
+}
+
+func (engine *failingAdmissionEngine) AddPendingContext(context.Context, vaultic.BlobHandle, uint) (bool, error) {
+	return false, engine.err
+}
+
+func (engine *failingAdmissionEngine) AddPending(vaultic.BlobHandle, uint) bool {
+	engine.legacyCalled = true
+	return false
+}
+
+func (engine *failingAdmissionEngine) LookupContext(context.Context, vaultic.BlobHandle) ([]*pack.PackedBlob, error) {
+	return nil, engine.err
+}
+
+func (engine *failingAdmissionEngine) LookupSizeContext(context.Context, vaultic.BlobHandle) (uint, bool, error) {
+	return 123, true, engine.err
+}
+
+func TestRepositoryContextLookupFailure(t *testing.T) {
+	repo := TestRepository(t)
+	failure := errors.New("metadata unavailable")
+	repo.SetEngine(&failingAdmissionEngine{LegacyEngine: enginepkg.NewLegacyEngine(), err: failure})
+	handle := vaultic.NewRandomBlobHandle()
+	if _, err := repo.LoadBlob(t.Context(), handle, nil); !errors.Is(err, failure) || !errors.Is(err, vaultic.ErrMetadataLookup) {
+		t.Fatalf("blob load lost metadata failure: %v", err)
+	}
+	reader := repo.AppendTransaction().(vaultic.ContextBlobSizeLookup)
+	size, found, err := reader.LookupBlobSizeContext(t.Context(), handle)
+	if size != 0 || found || !errors.Is(err, failure) || !errors.Is(err, vaultic.ErrMetadataLookup) {
+		t.Fatalf("size lookup: size=%d found=%v err=%v", size, found, err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := repo.LoadBlob(ctx, handle, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("blob load ignored cancellation: %v", err)
+	}
+}
+
+func TestSaveBlobAdmissionFailurePreventsUpload(t *testing.T) {
+	for _, duplicate := range []bool{false, true} {
+		t.Run(fmt.Sprint(duplicate), func(t *testing.T) {
+			repo := TestRepository(t)
+			failure := errors.New("metadata lookup unavailable")
+			engine := &failingAdmissionEngine{LegacyEngine: enginepkg.NewLegacyEngine(), err: failure}
+			repo.SetEngine(engine)
+			id, known, size, err := repo.saveBlob(t.Context(), vaultic.DataBlob, []byte("payload"), vaultic.ID{}, duplicate)
+			if !errors.Is(err, failure) || known || size != 0 || !id.IsNull() || engine.legacyCalled {
+				t.Fatalf("admission failure: id=%v known=%v size=%d err=%v legacy=%v", id, known, size, err, engine.legacyCalled)
+			}
+		})
+	}
+}
+
 func (counter *catalogLoadCounter) Add(amount uint64) {
 	if counter.count.Add(amount) >= 1000 && counter.cancel != nil {
 		counter.cancel()

@@ -325,6 +325,9 @@ func (r *Repository) saveBlob(
 	storeDuplicate bool,
 ) (newID vaultic.ID, known bool, size int, err error) {
 
+	if err := ctx.Err(); err != nil {
+		return vaultic.ID{}, false, 0, err
+	}
 	if int64(len(buf)) > math.MaxUint32 {
 		return vaultic.ID{}, false, 0, fmt.Errorf("blob is larger than 4GB")
 	}
@@ -348,7 +351,16 @@ func (r *Repository) saveBlob(
 	if err != nil {
 		return vaultic.ID{}, false, 0, err
 	}
-	known = !engine.AddPending(vaultic.BlobHandle{ID: newID, Type: t}, uint(len(buf)))
+	handle := vaultic.BlobHandle{ID: newID, Type: t}
+	if admission, ok := engine.(enginepkg.ContextWriteEngine); ok {
+		added, err := admission.AddPendingContext(ctx, handle, uint(len(buf)))
+		if err != nil {
+			return vaultic.ID{}, false, 0, fmt.Errorf("%w: admit blob %s: %w", vaultic.ErrMetadataLookup, newID.Str(), err)
+		}
+		known = !added
+	} else {
+		known = !engine.AddPending(handle, uint(len(buf)))
+	}
 
 	// only save when needed or explicitly told
 	if !known || storeDuplicate {

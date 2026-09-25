@@ -10,6 +10,12 @@ import (
 // ErrInvalidData is used to report that a file is corrupted
 var ErrInvalidData = errors.New("invalid data returned")
 
+var ErrMetadataLookup = errors.New("metadata lookup failed")
+
+type ContextBlobSizeLookup interface {
+	LookupBlobSizeContext(context.Context, BlobHandle) (uint, bool, error)
+}
+
 // Repository stores data in a backend. It provides high-level functions and
 // transparently encrypts/decrypts data.
 type Repository interface {

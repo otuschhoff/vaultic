@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,6 +16,46 @@ import (
 )
 
 var testPublishTime = time.Unix(1_700_000_000, 0)
+
+func TestDaemonContextLookupsAndAdmission(t *testing.T) {
+	engine := NewDaemonEngine(nil)
+	handle := vaultic.NewRandomBlobHandle()
+	var admitted atomic.Uint64
+	var workers sync.WaitGroup
+	for range 16 {
+		workers.Go(func() {
+			added, err := engine.AddPendingContext(t.Context(), handle, 123)
+			if err != nil {
+				t.Error(err)
+			}
+			if added {
+				admitted.Add(1)
+			}
+		})
+	}
+	workers.Wait()
+	if admitted.Load() != 1 {
+		t.Fatalf("admitted %d copies of one blob", admitted.Load())
+	}
+	if size, found, err := engine.LookupSizeContext(t.Context(), handle); size != 123 || !found || err != nil {
+		t.Fatalf("pending blob: size=%d found=%v err=%v", size, found, err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	absent := vaultic.NewRandomBlobHandle()
+	if added, err := engine.AddPendingContext(ctx, absent, 456); added || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled admission: added=%v err=%v", added, err)
+	}
+	if _, found := engine.LookupSize(absent); found {
+		t.Fatal("canceled admission mutated pending blobs")
+	}
+	if _, _, err := engine.LookupSizeContext(ctx, handle); !errors.Is(err, context.Canceled) {
+		t.Fatalf("size lookup ignored cancellation: %v", err)
+	}
+	if _, err := engine.LookupContext(ctx, handle); !errors.Is(err, context.Canceled) {
+		t.Fatalf("lookup ignored cancellation: %v", err)
+	}
+}
 
 // TestSchemaPackReportsAccumulatedPayloadSize guards against a regression
 // where the returned record's PayloadSize/Type were snapshotted before the

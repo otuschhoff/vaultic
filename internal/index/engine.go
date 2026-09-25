@@ -93,6 +93,15 @@ type BlobSizeEngine interface {
 	BlobSizes(context.Context) ([vaultic.NumBlobTypes]uint64, bool, error)
 }
 
+type ContextWriteEngine interface {
+	AddPendingContext(context.Context, vaultic.BlobHandle, uint) (bool, error)
+}
+
+type ContextReadEngine interface {
+	LookupContext(context.Context, vaultic.BlobHandle) ([]*pack.PackedBlob, error)
+	LookupSizeContext(context.Context, vaultic.BlobHandle) (uint, bool, error)
+}
+
 // ScanEngine exposes read-only iteration for diagnostics and pack inspection.
 type ScanEngine interface {
 	Engine

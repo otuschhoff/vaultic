@@ -173,6 +173,10 @@ func (tx *appendTransaction) LookupBlobSize(h vaultic.BlobHandle) (uint, bool) {
 	return tx.repo.LookupBlobSize(h)
 }
 
+func (tx *appendTransaction) LookupBlobSizeContext(ctx context.Context, h vaultic.BlobHandle) (uint, bool, error) {
+	return tx.repo.LookupBlobSizeContext(ctx, h)
+}
+
 func (tx *appendTransaction) WithBlobUploader(ctx context.Context, fn func(context.Context, vaultic.BlobSaverWithAsync) error) error {
 	return tx.repo.WithBlobUploader(ctx, fn)
 }
@@ -713,11 +717,10 @@ func (r *Repository) LoadBlob(ctx context.Context, bh vaultic.BlobHandle, buf []
 	debug.Log("load %v (buf len %v, cap %d)", bh, len(buf), cap(buf))
 
 	// lookup packs
-	engine, err := r.legacyIndexEngine()
+	blobs, err := r.lookupBlobContext(ctx, bh)
 	if err != nil {
 		return nil, err
 	}
-	blobs := engine.Lookup(bh)
 	if len(blobs) == 0 {
 		debug.Log("id %v not found in index", bh.ID)
 		return nil, errors.Errorf("id %v not found in repository", bh.ID)

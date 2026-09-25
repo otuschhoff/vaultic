@@ -2,6 +2,7 @@ package archiver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,7 +20,51 @@ import (
 	"github.com/otuschhoff/vaultic/internal/fs"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	rtest "github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
+
+type metadataFailureRepo struct {
+	*repository.Repository
+	failure  error
+	failTree bool
+}
+
+func (repo *metadataFailureRepo) LookupBlobSizeContext(context.Context, vaultic.BlobHandle) (uint, bool, error) {
+	return 0, false, repo.failure
+}
+
+func (repo *metadataFailureRepo) LoadBlob(ctx context.Context, handle vaultic.BlobHandle, buf []byte) ([]byte, error) {
+	if repo.failTree {
+		return nil, fmt.Errorf("%w: %w", vaultic.ErrMetadataLookup, repo.failure)
+	}
+	return repo.Repository.LoadBlob(ctx, handle, buf)
+}
+
+func TestArchiverMetadataLookupFailurePreventsPublication(t *testing.T) {
+	for _, failTree := range []bool{false, true} {
+		t.Run(fmt.Sprint(failTree), func(t *testing.T) {
+			root, repo := prepareTempdirRepoSrc(t, TestDir{"file": TestFile{Content: "unchanged data"}})
+			back := rtest.Chdir(t, root)
+			defer back()
+			parent, _, _, err := New(repo, fs.NewLocal(), Options{}).Snapshot(t.Context(), []string{"."}, SnapshotOptions{Time: time.Now()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			failure := errors.New("metadata service unavailable")
+			arch := New(&metadataFailureRepo{Repository: repo, failure: failure, failTree: failTree}, fs.NewLocal(), Options{CWalkConcurrency: 2, CWalkIncremental: true})
+			arch.Error = func(string, error) error { return nil }
+			published := false
+			arch.BeforeSnapshot = func() error { published = true; return nil }
+			snapshot, _, _, err := arch.Snapshot(t.Context(), []string{"."}, SnapshotOptions{Time: time.Now(), ParentSnapshot: parent})
+			if !errors.Is(err, failure) || snapshot != nil || published {
+				t.Fatalf("metadata failure did not stop publication: snapshot=%v err=%v hook=%v", snapshot, err, published)
+			}
+			if err := arch.error("file", fmt.Errorf("%w: %w", vaultic.ErrMetadataLookup, failure)); !errors.Is(err, failure) {
+				t.Fatalf("metadata failure suppressed by callback: %v", err)
+			}
+		})
+	}
+}
 
 func TestArchiverSelectiveSubtreeReuse(t *testing.T) {
 	ctx := t.Context()

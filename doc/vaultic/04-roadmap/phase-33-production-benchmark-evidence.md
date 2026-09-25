@@ -1,5 +1,40 @@
 # Phase 33 Production Benchmark Evidence
 
+## Error-aware backup lookup boundary (2026-09-25)
+
+After committing the R19 sizing improvement as `db519782c`, the next local
+change adds optional context-aware engine lookup, size-lookup and deduplication
+admission capabilities. Repository blob loads preserve provider failures instead
+of converting them to absence or falling back to the compatibility projection.
+Failed admission prevents encryption/upload even when duplicate storage is
+requested. Existing synchronous engines retain their prior fallback behavior.
+The daemon adapter implements the new contracts over its existing loaded index;
+no additional RPCs or on-demand mode are enabled by this checkpoint.
+
+Append transactions forward error-aware size lookups into the archiver. Parent
+tree loads and unchanged-file content checks propagate metadata-service errors,
+and the archiver does not allow ordinary source-file error callbacks to suppress
+them. Parent metadata failures are returned before uploader startup. Ordinary
+missing/unreadable parent handling remains compatible. Snapshot tests explicitly
+verify that parent-load and content-lookup failures prevent publication even
+when an error callback attempts to ignore them.
+
+Regression checks cover provider errors, append-wrapper forwarding, cancellation,
+forced-duplicate admission failure, snapshot publication gates, and concurrent
+admission of one blob by16 callers. Full archiver, backupcmd and engine race suites
+pass, as do targeted repository load/save, authoritative-catalog and engine
+resolution tests. Root initially bypassed the unreadable-file fixture permissions;
+running the full suites with child-process-only
+`setpriv --bounding-set=-dac_override,-dac_read_search` makes these permission
+fixtures effective and passes without skips. No production permissions changed.
+
+This is a correctness/API prerequisite, not a runtime benchmark or a claim that
+catalog memory is now bounded. The next step remains bounded batched point reads,
+a byte-bounded cache and in-flight/new-write overlay, session/fencing validation,
+and a backup startup path that no longer enumerates the full catalog. The RPC
+Get/MultiGet layer already returns errors; no wire-protocol change or daemon
+deployment was needed for this checkpoint.
+
 ## Catalog-size summaries remove the second blob walk, r19 (2026-09-25)
 
 The authoritative backup loader reads the full `b:` catalog from VaulticDB and

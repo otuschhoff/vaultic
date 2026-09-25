@@ -12,6 +12,7 @@ import (
 	enginepkg "github.com/otuschhoff/vaultic/internal/index"
 	"github.com/otuschhoff/vaultic/internal/repository/crypto"
 	"github.com/otuschhoff/vaultic/internal/repository/index"
+	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 
 	"golang.org/x/sync/errgroup"
@@ -198,6 +199,43 @@ func (r *Repository) LookupBlobSize(bh vaultic.BlobHandle) (uint, bool) {
 		return 0, false
 	}
 	return engine.LookupSize(bh)
+}
+
+func (r *Repository) lookupBlobContext(ctx context.Context, handle vaultic.BlobHandle) ([]*pack.PackedBlob, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if reader, ok := r.Engine().(enginepkg.ContextReadEngine); ok {
+		blobs, err := reader.LookupContext(ctx, handle)
+		if err != nil {
+			return nil, fmt.Errorf("%w: blob %s: %w", vaultic.ErrMetadataLookup, handle.ID.Str(), err)
+		}
+		return blobs, nil
+	}
+	engine, err := r.legacyIndexEngine()
+	if err != nil {
+		return nil, err
+	}
+	return engine.Lookup(handle), nil
+}
+
+func (r *Repository) LookupBlobSizeContext(ctx context.Context, handle vaultic.BlobHandle) (uint, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	if reader, ok := r.Engine().(enginepkg.ContextReadEngine); ok {
+		size, found, err := reader.LookupSizeContext(ctx, handle)
+		if err != nil {
+			return 0, false, fmt.Errorf("%w: size of blob %s: %w", vaultic.ErrMetadataLookup, handle.ID.Str(), err)
+		}
+		return size, found, nil
+	}
+	engine, err := r.legacyIndexEngine()
+	if err != nil {
+		return 0, false, err
+	}
+	size, found := engine.LookupSize(handle)
+	return size, found, nil
 }
 
 // ListBlobs runs fn on all blobs known to the index. When the context is cancelled,

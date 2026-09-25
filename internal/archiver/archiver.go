@@ -238,7 +238,7 @@ func (arch *Archiver) error(item string, err error) error {
 		return err
 	}
 
-	if errors.Is(err, context.Canceled) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, vaultic.ErrMetadataLookup) {
 		return err
 	}
 
@@ -335,14 +335,21 @@ func (arch *Archiver) loadSubtree(ctx context.Context, node *data.Node) (data.Tr
 	if err != nil {
 		debug.Log("unable to load tree %v: %v", node.Subtree.Str(), err)
 		// a tree in the repository is not readable -> warn the user
-		return nil, arch.wrapLoadTreeError(*node.Subtree, err)
+		return nil, arch.wrapLoadTreeError(ctx, *node.Subtree, err)
 	}
 
 	return tree, nil
 }
 
-func (arch *Archiver) wrapLoadTreeError(id vaultic.ID, err error) error {
-	if _, ok := arch.Repo.LookupBlobSize(vaultic.BlobHandle{Type: vaultic.TreeBlob, ID: id}); ok {
+func (arch *Archiver) wrapLoadTreeError(ctx context.Context, id vaultic.ID, err error) error {
+	if errors.Is(err, vaultic.ErrMetadataLookup) {
+		return err
+	}
+	_, found, lookupErr := arch.lookupBlobSize(ctx, vaultic.BlobHandle{Type: vaultic.TreeBlob, ID: id})
+	if lookupErr != nil {
+		return fmt.Errorf("tree %v: %w: %w", id, err, lookupErr)
+	}
+	if found {
 		err = errors.Errorf("tree %v could not be loaded; the repository could be damaged: %w", id, err)
 	} else {
 		err = errors.Errorf("tree %v is not known; the repository could be damaged, run `repair index` to try to repair it", id)
@@ -508,14 +515,30 @@ func (fn *futureNode) take(ctx context.Context) futureNodeResult {
 
 // allBlobsPresent checks if all blobs (contents) of the given node are
 // present in the index.
-func (arch *Archiver) allBlobsPresent(previous *data.Node) bool {
+func (arch *Archiver) lookupBlobSize(ctx context.Context, handle vaultic.BlobHandle) (uint, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	if reader, ok := arch.Repo.(vaultic.ContextBlobSizeLookup); ok {
+		size, found, err := reader.LookupBlobSizeContext(ctx, handle)
+		if err != nil {
+			return 0, false, fmt.Errorf("%w: %w", vaultic.ErrMetadataLookup, err)
+		}
+		return size, found, nil
+	}
+	size, found := arch.Repo.LookupBlobSize(handle)
+	return size, found, nil
+}
+
+func (arch *Archiver) allBlobsPresent(ctx context.Context, previous *data.Node) (bool, error) {
 	// check if all blobs are contained in index
 	for _, id := range previous.Content {
-		if _, ok := arch.Repo.LookupBlobSize(vaultic.BlobHandle{Type: vaultic.DataBlob, ID: id}); !ok {
-			return false
+		_, found, err := arch.lookupBlobSize(ctx, vaultic.BlobHandle{Type: vaultic.DataBlob, ID: id})
+		if err != nil || !found {
+			return false, err
 		}
 	}
-	return true
+	return true, nil
 }
 
 // save saves a target (file or directory) to the repo. If the item is
@@ -654,7 +677,11 @@ func (arch *Archiver) saveRegularFile(
 	debug.Log("  %v regular file", target)
 	if previous != nil && arch.ReuseNode(snPath, target, fileInfo, previous) &&
 		!fileChanged(fileInfo, previous, arch.ChangeIgnoreFlags) {
-		if arch.allBlobsPresent(previous) {
+		present, err := arch.allBlobsPresent(ctx, previous)
+		if err != nil {
+			return futureNode{}, false, err
+		}
+		if present {
 			debug.Log("%v hasn't changed, using old list of blobs", target)
 			arch.trackItem(snPath, previous, previous, ItemStats{}, time.Since(start))
 			arch.CompleteBlob(previous.Size)
@@ -932,24 +959,28 @@ type SnapshotOptions struct {
 }
 
 // loadParentTree loads a tree referenced by snapshot id. If id is null, nil is returned.
-func (arch *Archiver) loadParentTree(ctx context.Context, sn *data.Snapshot) data.TreeNodeIterator {
+func (arch *Archiver) loadParentTree(ctx context.Context, sn *data.Snapshot) (data.TreeNodeIterator, error) {
 	if sn == nil {
-		return nil
+		return nil, nil
 	}
 
 	if sn.Tree == nil {
 		debug.Log("snapshot %v has empty tree %v", *sn.ID())
-		return nil
+		return nil, nil
 	}
 
 	debug.Log("load parent tree %v", *sn.Tree)
 	tree, err := data.LoadTree(ctx, arch.Repo, *sn.Tree)
 	if err != nil {
 		debug.Log("unable to load tree %v: %v", *sn.Tree, err)
-		_ = arch.error("/", arch.wrapLoadTreeError(*sn.Tree, err)) // The callback itself records the snapshot failure.
-		return nil
+		err = arch.wrapLoadTreeError(ctx, *sn.Tree, err)
+		if errors.Is(err, vaultic.ErrMetadataLookup) || ctx.Err() != nil {
+			return nil, err
+		}
+		_ = arch.error("/", err)
+		return nil, nil
 	}
-	return tree
+	return tree, nil
 }
 
 // runWorkers starts the worker pools, which are stopped when the context is cancelled.
@@ -1076,19 +1107,23 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, snapshotOp
 }
 
 func (arch *Archiver) saveSnapshotTree(ctx context.Context, tree *tree, snapshotOptions SnapshotOptions) (vaultic.ID, error) {
+	parent, err := arch.loadParentTree(ctx, snapshotOptions.ParentSnapshot)
+	if err != nil {
+		return vaultic.ID{}, err
+	}
 	var rootTreeID vaultic.ID
 	withUploader := arch.Repo.WithBlobUploader
 	if snapshotOptions.DeferredUploader != nil {
 		withUploader = snapshotOptions.DeferredUploader
 	}
-	err := withUploader(ctx, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
+	err = withUploader(ctx, func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
 		workers, workerContext := errgroup.WithContext(ctx)
 		started := time.Now()
 		workers.Go(func() error {
 			arch.runWorkers(workerContext, workers, uploader)
 			debug.Log("starting snapshot")
 			futureNode, nodeCount, err := arch.saveTree(
-				workerContext, "/", tree, arch.loadParentTree(workerContext, snapshotOptions.ParentSnapshot),
+				workerContext, "/", tree, parent,
 				func(_ *data.Node, stats ItemStats) {
 					arch.trackItem("/", nil, nil, stats, time.Since(started))
 				},
