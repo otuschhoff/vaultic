@@ -1,14 +1,110 @@
 # Phase 33 Production Benchmark Evidence
 
+## R34 isolated recovery investigation (2026-09-26)
+
+**Production remains stopped and unavailable. Recovery succeeded on a separate
+working copy, not on live metadata.** The user approved preservation and isolated
+investigation after the incident report below. That approval does not authorize
+live WAL quarantine, writer-claim changes, database replacement or deployment.
+
+The complete stopped metadata tree, including both WAL locations and coordination
+files, was copied to `evidence/` under:
+`/volume2/NASDA2/rustic/db.test/recovery-r34-20260925-mWTsrl`.
+The copy contains19,713 regular files totaling40,962,375,075 bytes. A checksum
+dry run (`rsync -aHnc --numeric-ids --itemize-changes`) found no differences;
+source path/type/size/mtime inventories before and after copying were identical.
+A second independent copy to `working/` passed the same checksum check. No
+hard links connect either copy to live metadata or to the other copy. NFS
+initially inherited0777 despite the creation umask; explicitly setting the
+recovery parent to0700 succeeded. Stored database objects remain encrypted.
+After the experiments, a fresh live-to-evidence checksum dry run again found
+no differences and the live source inventory still matched the pre-copy
+inventory. Production remained MainPID0/inactive/dead.
+
+The incident-specific `r34_inspect.rs` probe uses existing required-encryption,
+manifest, WAL-reader and SlateDB APIs from the pinned dependency. It rejects
+roots other than these two copies and allows replay/writer flush only on
+`working/`; refusal checks passed for live metadata and evidence. Explicit
+object stores point inside the selected copy, so the persisted absolute local
+WAL handoff path is never followed. It emits counts, sequence bounds and digests,
+not raw metadata keys/values or credentials. No ordering check was bypassed.
+
+The preserved manifest454 has writer epoch41, `last_l0_seq=272534`,
+`replay_after_wal_id=80292`, and `next_wal_sst_id=80297`. These are SlateDB fields,
+not the daemon's separately tracked ownership epoch73. WAL83950 ends at279193,
+while WAL83951 starts at245877. All6,621 files in the higher tail were decoded:
+
+| Old-tail WAL range | Files | Preserved modification date |
+| --- | --- | --- |
+|83951..83957|7|2026-09-16|
+|87199..87204|6|2026-09-16|
+|88364..94971|6,608|2026-09-16|
+
+Every row in that tail has sequence245877..256897, below the manifest's flushed
+watermark272534. WAL71167..83950 is contiguous and dated September25. SlateDB's
+tail discovery uses exponential probing/binary search with an explicit
+contiguous-ID assumption. The older ranges above gaps violate that assumption.
+This supports stale sparse WAL namespace reuse as the mechanism to investigate;
+it does not establish how the old files survived or exclude every other writer.
+The10ms interval is not established as the root cause and remains rejected.
+
+The reversible experiment changed only the working copy:
+
+1. Normal `DbReader` FollowLatest open with WAL replay enabled reproduced the
+  exact83951/245877/279193 ordering failure.
+2. The6,621 inspected tail files were moved to `quarantine-wal/`, not deleted.
+  Before moving any file, the script checked its membership, sequence bounds,
+  source type, destination absence and SHA256 against evidence. Hashes were
+  checked again after moving.
+3. Normal replay succeeded and returned143 snapshot records.
+4. Restoring all quarantined files reproduced the original error. Quarantining
+  them again restored successful replay with the same snapshot-record digest.
+5. Stronger checks verified exact equality with all143 pre-trial snapshot IDs
+  and visibility of WAL83950's last durable value, byte-for-byte at sequence279193.
+6. A normal SlateDB writer open, memtable flush and graceful close succeeded
+  without application-data writes. A fresh reader then passed the same checks.
+  The copied manifest advanced to459/writer epoch42, flushed sequence279193,
+  replay cutoff83951 and next WAL83952. The snapshot digest remained
+  `6d7b9c7d5a16c2fa917591d61a638d5ea731969f5315fb8057194556788b9d43`.
+
+SlateDB normally filters rows at or below `last_l0_seq`; its cross-file ordering
+check rejects this tail before that filter can discard those rows. Quarantining
+only the lower-sequence tail therefore leaves the newer replay range available.
+This is evidence for a recovery candidate, not a complete no-data-loss proof:
+full index invariants, historical value coverage, application writer ownership,
+production daemon/RPC reopening, crash recovery and payload restore are not
+validated by these checks. No production daemon was started in this investigation.
+The persisted absolute WAL binding also remains unchanged in the working copy;
+do not launch it with inherited production settings.
+
+The original `evidence/` remains the recovery baseline. The working copy has now
+advanced its manifest through writer replay/flush; do not blindly restore old
+WALs onto that advanced state. The quarantine script rejects occupied targets.
+Any further experiment requiring the original state must use a fresh evidence
+copy. Live recovery still requires a separately approved plan, including writer
+coordination, path confinement, retention of original state, read/integrity gates
+and a rollback strategy. Do not restart the benchmark loop.
+
+Artifacts include preservation/working-copy checksum logs, source inventories,
+`boundary-inspection.jsonl`, `tail-inspection.jsonl`, before/quarantined/restored/
+repeat replay logs, `replay-validated.jsonl`, `writer-flush.jsonl`,
+`replay-after-flush.jsonl`, `quarantine-manifest.json`, reversible
+`quarantine.cjs`, and the archived probe source/binary with hashes. The temporary
+Rust example was removed from the source tree after validation; no runtime
+implementation, dependency, production executable or default was changed.
+
 ## R34 rejected: fencing failure and blocked WAL replay (2026-09-25)
 
 **Incident state: the metadata service is stopped, not restored to availability.**
 The temporary settings were removed and the original unit validated/reloaded,
 but normal restart cannot open the database. Do not restart the optimization
-loop or treat this as an accepted performance result. Recovery needs preserved
-database/WAL state and investigation on an isolated copy before any live repair.
+loop or treat this as an accepted performance result. The subsequently approved
+preservation and isolated investigation are recorded above; no live repair has
+been authorized or performed.
 No WAL files were deleted, fencing/replay checks bypassed, writer claim manually
-changed, or replacement daemon deployed.
+changed, or replacement daemon deployed. Subsequent unit inspection found that
+the existing systemd `ExecStop` invokes writer demotion with `--force`; therefore
+the systemd lifecycle operations must not be described as entirely non-forced.
 
 The user explicitly approved the ten-minute cwalk trial using10ms WAL flush
 and1GiB metadata cache, followed by restoration. R34 reused byte-identical R32
@@ -32,9 +128,11 @@ idle counters alone are therefore not sufficient post-run health checks. Final
 lookup statistics were emitted and scratch was empty; those cleanup results
 do not establish metadata integrity or successful snapshot publication.
 
-Normal non-forced demotion failed when it tried to flush the closed writer.
+The explicitly requested non-forced demotion failed when it tried to flush the closed writer.
 The override was removed, original configuration reloaded, and a normal systemd
-restart attempted without forced writer takeover. Startup first reported
+restart attempted. Its existing `ExecStop` hook attempts forced demotion (not
+forced takeover); the journal records failure while flushing the closed writer.
+The later stop used the same unit. Startup first reported
 `writer_claim_already_active` and opened a non-fencing reader, then failed with:
 
 ```text
