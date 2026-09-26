@@ -1,12 +1,203 @@
 package fs
 
 import (
+	"bytes"
 	"context"
-	client "github.com/willscott/go-nfs-client/nfs"
+	"encoding/binary"
+	"fmt"
+	"io"
+	"net"
 	"os"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	client "github.com/willscott/go-nfs-client/nfs"
+	"github.com/willscott/go-nfs-client/nfs/rpc"
+	"github.com/willscott/go-nfs-client/nfs/xdr"
 )
+
+func nfsMetadataTarget(t *testing.T, respond func(uint32, []byte) []any) *client.Target {
+	t.Helper()
+	local, remote := net.Pipe()
+	connection := rpc.NewClient(t.Context(), local)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			var marker uint32
+			if err := binary.Read(remote, binary.BigEndian, &marker); err != nil {
+				return
+			}
+			request := make([]byte, marker&0x7fffffff)
+			if _, err := io.ReadFull(remote, request); err != nil || len(request) < 40 {
+				return
+			}
+			handle, err := xdr.ReadOpaque(bytes.NewReader(request[40:]))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			values := []any{binary.BigEndian.Uint32(request), uint32(1), uint32(rpc.MsgAccepted), rpc.AuthNull, uint32(rpc.Success)}
+			values = append(values, respond(binary.BigEndian.Uint32(request[20:]), handle)...)
+			var response bytes.Buffer
+			for _, value := range values {
+				if err := xdr.Write(&response, value); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+			if err := binary.Write(remote, binary.BigEndian, uint32(response.Len())|0x80000000); err != nil {
+				return
+			}
+			if _, err := remote.Write(response.Bytes()); err != nil {
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() { connection.Close(); _ = remote.Close(); <-done })
+	return &client.Target{Client: connection}
+}
+
+func TestNFSStaleMetadata(t *testing.T) {
+	for _, status := range []uint32{client.NFS3ErrStale, client.NFS3ErrBadHandle, client.NFS3ErrNotDir, client.NFS3ErrNoEnt} {
+		for _, retained := range []bool{false, true} {
+			for _, failRetry := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%d/retained=%t/fail=%t", status, retained, failRetry), func(t *testing.T) {
+					root := "nfs://server:/export"
+					filesystem, err := NewNFS(t.Context(), []string{root}, NFSOptions{Auth: &rpc.AuthNull, AllowMissingMetadata: true, Connections: 1})
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer filesystem.Close()
+					endpoint, _, _, err := filesystem.route(root)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var calls atomic.Uint64
+					attributes := client.Fattr{Type: client.NF3Reg, UID: 12, Fileid: 99}
+					target := nfsMetadataTarget(t, func(_ uint32, handle []byte) []any {
+						calls.Add(1)
+						if string(handle) == "stale" || failRetry {
+							return []any{status}
+						}
+						return []any{uint32(0), []byte("fresh"), client.PostOpAttr{IsSet: true, Attr: attributes}, client.PostOpAttr{}}
+					})
+					endpoint.initialized, endpoint.root, endpoint.targets = true, "/export", []*client.Target{target}
+					endpoint.pool = newNFSPool(endpoint.targets, endpoint.server)
+					filesystem.cacheDirectory(endpoint, "/export", []byte("stale"))
+					var metadata File
+					if retained {
+						directory := &nfsFile{filesystem: filesystem, endpoint: endpoint, name: root}
+						entry, entryErr := directory.cacheEntry(&client.EntryPlus{FileName: "file", Handle: client.PostOpFH3{IsSet: true, FH: []byte("stale")}})
+						if entryErr != nil {
+							t.Fatal(entryErr)
+						}
+						metadata, err = entry.OpenMetadata()
+					} else {
+						metadata, err = filesystem.OpenFile(filesystem.Join(root, "file"), O_NOFOLLOW, true)
+					}
+					if (err != nil) != failRetry || calls.Load() != 2 {
+						t.Fatalf("fallback calls=%d err=%v", calls.Load(), err)
+					}
+					if !failRetry {
+						info, err := metadata.Stat()
+						_ = metadata.Close()
+						if err != nil || info.Inode != 99 || info.UID != 12 {
+							t.Fatalf("fresh metadata=%+v err=%v", info, err)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestNFSMissingDirectoryAttributes(t *testing.T) {
+	for _, withHandle := range []bool{false, true} {
+		t.Run(fmt.Sprint(withHandle), func(t *testing.T) {
+			root := "nfs://server:/export"
+			filesystem, err := NewNFS(t.Context(), []string{root}, NFSOptions{Auth: &rpc.AuthNull, AllowMissingMetadata: true, Connections: 4})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer filesystem.Close()
+			endpoint, _, _, err := filesystem.route(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			started, release := make(chan struct{}, 4), make(chan struct{})
+			defer close(release)
+			for index := 0; index < 4; index++ {
+				endpoint.targets = append(endpoint.targets, nfsMetadataTarget(t, func(procedure uint32, _ []byte) []any {
+					if (procedure == client.NFSProc3GetAttr) != withHandle {
+						t.Errorf("unexpected fallback procedure %d, handle=%t", procedure, withHandle)
+					}
+					started <- struct{}{}
+					<-release
+					attributes := client.Fattr{Type: client.NF3Reg, UID: 12}
+					if procedure == client.NFSProc3GetAttr {
+						return []any{uint32(0), attributes}
+					}
+					return []any{uint32(0), []byte("file"), client.PostOpAttr{IsSet: true, Attr: attributes}, client.PostOpAttr{}}
+				}))
+			}
+			endpoint.pool = newNFSPool(endpoint.targets, endpoint.server)
+			directory := &nfsFile{filesystem: filesystem, endpoint: endpoint, name: root, readable: true, eof: true, info: &ExtendedFileInfo{Mode: os.ModeDir}}
+			for index := 0; index < 4; index++ {
+				entry, err := directory.cacheEntry(&client.EntryPlus{FileName: fmt.Sprint(index),
+					Handle: client.PostOpFH3{IsSet: withHandle, FH: []byte("file")}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				directory.directoryEntries = append(directory.directoryEntries, entry)
+			}
+			result := make(chan error, 1)
+			go func() {
+				entries, err := directory.ReaddirEntries(-1)
+				if err == nil && (len(entries) != 4 || entries[0].Info.UID != 12) {
+					err = fmt.Errorf("incorrect missing-attribute resolution")
+				}
+				result <- err
+			}()
+			deadline := time.NewTimer(2 * time.Second)
+			defer deadline.Stop()
+			for index := 0; index < 4; index++ {
+				select {
+				case <-started:
+				case <-deadline.C:
+					t.Fatal("metadata prefetch did not fill the connection pool")
+				}
+			}
+			for index := 0; index < 4; index++ {
+				release <- struct{}{}
+			}
+			if err := <-result; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestNFSParentCacheBounds(t *testing.T) {
+	filesystem, err := NewNFS(t.Context(), nil, NFSOptions{Auth: &rpc.AuthNull, AllowMissingMetadata: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer filesystem.Close()
+	endpoint := &nfsEndpoint{}
+	filesystem.cacheDirectory(endpoint, strings.Repeat("x", 1025), []byte("file"))
+	if filesystem.directories.Len() != 0 {
+		t.Fatal("admitted an oversized parent path")
+	}
+	for index := 0; index < 5000; index++ {
+		filesystem.cacheDirectory(endpoint, fmt.Sprint(index), []byte("file"))
+	}
+	if filesystem.directories.Len() != 4096 {
+		t.Fatal("parent cache exceeded its entry limit")
+	}
+}
 
 func TestNFSRestoreInputs(t *testing.T) {
 	for _, name := range []string{"", "..", "../escape", "/absolute", "a/../b", "nul\x00"} {

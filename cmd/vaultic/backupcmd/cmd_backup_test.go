@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strconv"
@@ -137,6 +138,42 @@ func TestBackupReportsReconciliationStats(t *testing.T) {
 	run.reportReconciliationStats(stats)
 	if len(term.Output) != 1 {
 		t.Fatal("quiet mode emitted reconciliation stats")
+	}
+}
+
+func TestBackupCloseReportsNFSStatsAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	term := &ui.MockTerminal{}
+	run := &backupRun{ctx: ctx, cancel: cancel, term: term, globalOptions: global.Options{JSON: true}}
+	stats := fs.NFSStats{Lookups: 1, Getattrs: 2, ReadDirPlus: 3, Reads: 4, ReadBytes: 5, CacheHits: 6,
+		ParentHits: 7, RetainedOpens: 8,
+		Operations: map[string]fs.NFSOperationStats{"read": {
+			Attempts: 4, Calls: 3, Errors: 1, Cancellations: 1, MaxActive: 2, QueueNanoseconds: 10, ServiceNanoseconds: 20}}}
+	run.closeSource = func() {
+		if ctx.Err() == nil {
+			t.Fatal("source stats emitted before cancellation")
+		}
+		run.reportNFSStats(stats)
+	}
+	run.close()
+	if len(term.Output) != 1 {
+		t.Fatalf("output=%v", term.Output)
+	}
+	var record struct {
+		MessageType string `json:"message_type"`
+		fs.NFSStats
+	}
+	if err := json.Unmarshal([]byte(term.Output[0]), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.MessageType != "nfs_source_stats" || !reflect.DeepEqual(record.NFSStats, stats) {
+		t.Fatalf("invalid NFS stats: %+v", record)
+	}
+	run.globalOptions = global.Options{Quiet: true}
+	run.reportNFSStats(stats)
+	if len(term.Output) != 1 {
+		t.Fatal("quiet mode emitted NFS stats")
 	}
 }
 

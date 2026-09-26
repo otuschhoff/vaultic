@@ -27,6 +27,7 @@ import (
 	sourcefs "github.com/otuschhoff/vaultic/internal/fs"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	"github.com/otuschhoff/vaultic/internal/snapshotfs"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
@@ -54,6 +55,17 @@ func TestDirectNFSSourceReadDirPlus(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer source.Close()
+	if _, err := source.Lstat(source.Join(root, "directory")); err != nil {
+		t.Fatal(err)
+	}
+	parentBefore := source.Stats()
+	if _, err := source.Lstat(source.Join(root, "a-file")); err != nil {
+		t.Fatal(err)
+	}
+	parentAfter := source.Stats()
+	if parentAfter.Lookups-parentBefore.Lookups != 1 || parentAfter.Getattrs != parentBefore.Getattrs || parentAfter.ParentHits <= parentBefore.ParentHits {
+		t.Fatalf("parent handle was not reused: before=%+v after=%+v", parentBefore, parentAfter)
+	}
 	directory, err := source.OpenFile(root, sourcefs.O_DIRECTORY, false)
 	if err != nil {
 		t.Fatal(err)
@@ -96,10 +108,22 @@ func TestDirectNFSSourceReadDirPlus(t *testing.T) {
 		t.Fatal(err)
 	}
 	walkNames, found, walkErr := stream.Names(root)
-	_ = stream.Close()
+	defer stream.Close()
 	sort.Strings(walkNames)
 	if walkErr != nil || !found || !reflect.DeepEqual(walkNames, names) {
 		t.Fatalf("direct NFS cwalk: %v %t %v", walkNames, found, walkErr)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	before = source.Stats()
+	retained, found, err := stream.OpenMetadata(source.Join(root, "a-file"))
+	if err != nil || !found {
+		t.Fatalf("retained metadata: %t %v", found, err)
+	}
+	info, err := retained.Stat()
+	_ = retained.Close()
+	after = source.Stats()
+	if err != nil || info.UID != 12 || after.Lookups != before.Lookups || after.Getattrs != before.Getattrs+1 {
+		t.Fatalf("expired attributes did not reuse retained handle: info=%+v before=%+v after=%+v err=%v", info, before, after, err)
 	}
 	link, err := source.OpenFile(source.Join(root, "z-link"), sourcefs.O_NOFOLLOW, true)
 	if err != nil {
@@ -114,8 +138,13 @@ func TestDirectNFSSourceReadDirPlus(t *testing.T) {
 		t.Fatal("read a special file")
 	}
 	destination := repository.TestRepository(t)
-	archive := archiver.New(destination, source, archiver.Options{CWalkConcurrency: 4, CWalkIncremental: true})
-	snapshot, _, _, err := archive.Snapshot(ctx, []string{source.Join(root, "a-file"), source.Join(root, "z-link")}, archiver.SnapshotOptions{})
+	accounting := telemetry.NewProductionAccounting(true)
+	archive := archiver.New(destination, telemetry.WrapProductionFS(ctx, source, accounting), archiver.Options{CWalkConcurrency: 4, CWalkIncremental: true})
+	before = source.Stats()
+	archive.SelectByName = func(name string) bool {
+		return name == root || name == source.Join(root, "a-file") || name == source.Join(root, "z-link")
+	}
+	snapshot, _, _, err := archive.Snapshot(ctx, []string{root}, archiver.SnapshotOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,6 +182,16 @@ func TestDirectNFSSourceReadDirPlus(t *testing.T) {
 	}
 	if !bytes.Equal(restored, payload) || nodes[0].UID != 12 || nodes[0].GID != 34 {
 		t.Fatal("NFS archive content or ownership mismatch")
+	}
+	after = source.Stats()
+	if after.RetainedOpens <= before.RetainedOpens {
+		t.Fatal("archive bypassed retained metadata")
+	}
+	for _, operation := range []string{"lookup", "getattr", "readdirplus", "read", "readlink"} {
+		stats := after.Operations[operation]
+		if stats.Calls == 0 || stats.Active != 0 || stats.MaxActive == 0 || stats.Errors != 0 || stats.QueueNanoseconds == 0 || stats.ServiceNanoseconds == 0 {
+			t.Errorf("invalid %s telemetry: %+v", operation, stats)
+		}
 	}
 	cancel()
 	if _, err := source.Lstat(root); !errors.Is(err, context.Canceled) {

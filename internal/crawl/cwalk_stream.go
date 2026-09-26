@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/otuschhoff/cwalk"
 	"github.com/otuschhoff/vaultic/internal/fs"
 )
@@ -19,15 +20,17 @@ type directoryResult struct {
 }
 
 type DirectoryStream struct {
-	filesystem fs.FS
-	ctx        context.Context
-	cancel     context.CancelFunc
-	jobs       chan string
-	slots      chan struct{}
-	group      sync.WaitGroup
-	mutex      sync.Mutex
-	pending    map[string]*directoryResult
-	capacity   int
+	filesystem    fs.FS
+	ctx           context.Context
+	cancel        context.CancelFunc
+	jobs          chan string
+	slots         chan struct{}
+	group         sync.WaitGroup
+	mutex         sync.Mutex
+	pending       map[string]*directoryResult
+	capacity      int
+	metadata      *lru.Cache[string, fs.ReadDirEntry]
+	metadataBytes int
 }
 
 func NewDirectoryStream(ctx context.Context, workers, capacity int) (*DirectoryStream, error) {
@@ -41,9 +44,13 @@ func NewDirectoryStreamWithFS(ctx context.Context, workers, capacity int, filesy
 	if workers < 1 || capacity < 1 {
 		return nil, fmt.Errorf("cwalk workers and lookahead capacity must be positive")
 	}
+	metadata, err := lru.New[string, fs.ReadDirEntry](min(capacity, 64) * 128)
+	if err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	stream := &DirectoryStream{filesystem: filesystem, ctx: ctx, cancel: cancel, jobs: make(chan string, capacity),
-		slots: make(chan struct{}, workers), pending: make(map[string]*directoryResult), capacity: capacity}
+		slots: make(chan struct{}, workers), pending: make(map[string]*directoryResult), capacity: capacity, metadata: metadata}
 	for worker := 0; worker < workers; worker++ {
 		stream.group.Go(func() {
 			for {
@@ -91,6 +98,17 @@ func (stream *DirectoryStream) read(path string) ([]string, []string, error) {
 		names = make([]string, len(entries))
 		for index, entry := range entries {
 			names[index] = entry.Name()
+			if !fs.IsNFS(stream.filesystem) {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				readErr = err
+				return
+			}
+			if retained, ok := info.(walkFileInfo); ok && retained.entry != nil {
+				stream.rememberMetadata(stream.filesystem.Join(path, entry.Name()), *retained.entry)
+			}
 		}
 	}}
 	var walker *cwalk.Walker
@@ -197,10 +215,68 @@ func (stream *DirectoryStream) Names(path string) ([]string, bool, error) {
 	return names, true, nil
 }
 
+func retainedEntryBytes(name string, entry fs.ReadDirEntry) int {
+	return 2*len(name) + len(entry.Name) + 1024
+}
+
+func (stream *DirectoryStream) rememberMetadata(name string, entry fs.ReadDirEntry) {
+	size := retainedEntryBytes(name, entry)
+	if size > 1<<20 {
+		return
+	}
+	stream.mutex.Lock()
+	defer stream.mutex.Unlock()
+	if stream.ctx.Err() != nil {
+		return
+	}
+	if previous, found := stream.metadata.Peek(name); found {
+		stream.metadataBytes -= retainedEntryBytes(name, previous)
+		stream.metadata.Remove(name)
+	}
+	for stream.metadata.Len() >= min(stream.capacity, 64)*128 || stream.metadataBytes+size > 8<<20 {
+		oldName, previous, found := stream.metadata.RemoveOldest()
+		if !found {
+			break
+		}
+		stream.metadataBytes -= retainedEntryBytes(oldName, previous)
+	}
+	stream.metadata.Add(name, entry)
+	stream.metadataBytes += size
+}
+
+func (stream *DirectoryStream) OpenMetadata(name string) (fs.File, bool, error) {
+	name, err := stream.filesystem.Abs(name)
+	if err != nil {
+		return nil, false, err
+	}
+	stream.mutex.Lock()
+	if err := stream.ctx.Err(); err != nil {
+		stream.mutex.Unlock()
+		return nil, false, err
+	}
+	entry, found := stream.metadata.Get(name)
+	if found {
+		stream.metadata.Remove(name)
+		stream.metadataBytes -= retainedEntryBytes(name, entry)
+		stream.group.Add(1)
+	}
+	stream.mutex.Unlock()
+	if !found {
+		return nil, false, nil
+	}
+	defer stream.group.Done()
+	file, err := entry.OpenMetadata()
+	return file, true, err
+}
+
 func (stream *DirectoryStream) Close() error {
 	stream.mutex.Lock()
 	stream.cancel()
 	stream.mutex.Unlock()
 	stream.group.Wait()
+	stream.mutex.Lock()
+	stream.metadata.Purge()
+	stream.metadataBytes = 0
+	stream.mutex.Unlock()
 	return nil
 }

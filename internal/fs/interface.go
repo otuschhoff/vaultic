@@ -6,6 +6,12 @@ import (
 	"github.com/otuschhoff/vaultic/internal/data"
 )
 
+type ReadDirEntry struct {
+	Name         string
+	Info         *ExtendedFileInfo
+	OpenMetadata func() (File, error)
+}
+
 // FS bundles all methods needed for a file system.
 type FS interface {
 	// OpenFile opens a file or directory for reading.

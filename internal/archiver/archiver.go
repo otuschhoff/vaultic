@@ -432,6 +432,17 @@ func (arch *Archiver) saveDir(
 	return fn, nil
 }
 
+func (arch *Archiver) openMetadata(target string) (fs.File, error) {
+	if provider, ok := arch.cwalkManifest.(interface {
+		OpenMetadata(string) (fs.File, bool, error)
+	}); ok {
+		if file, found, err := provider.OpenMetadata(target); found || err != nil {
+			return file, err
+		}
+	}
+	return arch.FS.OpenFile(target, fs.O_NOFOLLOW, true)
+}
+
 func (arch *Archiver) dirToNodeAndEntries(snPath, dir string, meta fs.File) (node *data.Node, names []string, err error) {
 	node, err = arch.nodeFromFileInfo(snPath, dir, meta, false)
 	if err != nil {
@@ -608,7 +619,7 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 		return futureNode{}, true, nil
 	}
 
-	meta, err := arch.FS.OpenFile(target, fs.O_NOFOLLOW, true)
+	meta, err := arch.openMetadata(target)
 	if err != nil {
 		debug.Log("open metadata for %v returned error: %v", target, err)
 		// ignore if file disappeared since it was returned by readdir

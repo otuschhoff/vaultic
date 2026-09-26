@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -22,6 +23,7 @@ import (
 	client "github.com/willscott/go-nfs-client/nfs"
 	"github.com/willscott/go-nfs-client/nfs/rpc"
 	"github.com/willscott/go-nfs-client/nfs/xdr"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/otuschhoff/vaultic/internal/data"
 )
@@ -61,17 +63,52 @@ type NFS struct {
 	roots                                                       []NFSSource
 	mutex                                                       sync.Mutex
 	endpoints                                                   map[string]*nfsEndpoint
+	servers                                                     map[string]*nfsServer
+	operations                                                  [5]nfsOperationCounters
 	entries                                                     *lru.Cache[string, nfsCachedEntry]
+	directories                                                 *lru.Cache[nfsDirectoryKey, nfsDirectoryHandle]
+	parentHits, retainedOpens                                   atomic.Uint64
 	lookups, getattrs, readDirPlus, reads, readBytes, cacheHits atomic.Uint64
 }
 
 type NFSStats struct {
-	Lookups, Getattrs, ReadDirPlus, Reads, ReadBytes, CacheHits uint64
+	Lookups       uint64                       `json:"lookup_calls"`
+	Getattrs      uint64                       `json:"getattr_calls"`
+	ReadDirPlus   uint64                       `json:"readdirplus_calls"`
+	Reads         uint64                       `json:"read_calls"`
+	ReadBytes     uint64                       `json:"read_bytes"`
+	CacheHits     uint64                       `json:"metadata_cache_hits"`
+	ParentHits    uint64                       `json:"parent_handle_hits"`
+	RetainedOpens uint64                       `json:"retained_metadata_opens"`
+	Operations    map[string]NFSOperationStats `json:"rpc_operations"`
 }
 
 func (filesystem *NFS) Stats() NFSStats {
+	operations := make(map[string]NFSOperationStats, len(nfsOperationNames))
+	for index, name := range nfsOperationNames {
+		operations[name] = filesystem.operations[index].stats()
+	}
 	return NFSStats{Lookups: filesystem.lookups.Load(), Getattrs: filesystem.getattrs.Load(), ReadDirPlus: filesystem.readDirPlus.Load(),
-		Reads: filesystem.reads.Load(), ReadBytes: filesystem.readBytes.Load(), CacheHits: filesystem.cacheHits.Load()}
+		Reads: filesystem.reads.Load(), ReadBytes: filesystem.readBytes.Load(), CacheHits: filesystem.cacheHits.Load(),
+		ParentHits: filesystem.parentHits.Load(), RetainedOpens: filesystem.retainedOpens.Load(), Operations: operations}
+}
+
+type nfsDirectoryKey struct {
+	endpoint *nfsEndpoint
+	path     string
+}
+
+type nfsDirectoryHandle struct {
+	handle  []byte
+	expires time.Time
+}
+
+func (filesystem *NFS) cacheDirectory(endpoint *nfsEndpoint, name string, handle []byte) {
+	if len(name) > 1024 || len(handle) > 64 {
+		return
+	}
+	filesystem.directories.Add(nfsDirectoryKey{endpoint: endpoint, path: strings.Clone(name)},
+		nfsDirectoryHandle{handle: append([]byte(nil), handle...), expires: time.Now().Add(time.Second)})
 }
 
 type nfsCachedEntry struct {
@@ -90,7 +127,8 @@ type nfsEndpoint struct {
 	err         error
 	root        string
 	targets     []*client.Target
-	next        atomic.Uint64
+	pool        *nfsPool
+	server      *nfsServer
 }
 
 func NewNFS(ctx context.Context, sources []string, options NFSOptions) (*NFS, error) {
@@ -111,8 +149,13 @@ func NewNFS(ctx context.Context, sources []string, options NFSOptions) (*NFS, er
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	filesystem := &NFS{ctx: ctx, cancel: cancel, options: options, auth: auth, endpoints: make(map[string]*nfsEndpoint)}
+	filesystem := &NFS{ctx: ctx, cancel: cancel, options: options, auth: auth, endpoints: make(map[string]*nfsEndpoint), servers: make(map[string]*nfsServer)}
 	filesystem.entries, err = lru.New[string, nfsCachedEntry](4096)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	filesystem.directories, err = lru.New[nfsDirectoryKey, nfsDirectoryHandle](4096)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -183,6 +226,7 @@ func (filesystem *NFS) Close() error {
 		endpoint.mutex.Unlock()
 	}
 	filesystem.entries.Purge()
+	filesystem.directories.Purge()
 	return nil
 }
 
@@ -202,7 +246,13 @@ func (filesystem *NFS) route(name string) (*nfsEndpoint, string, bool, error) {
 	defer filesystem.mutex.Unlock()
 	endpoint := filesystem.endpoints[key]
 	if endpoint == nil {
-		endpoint = &nfsEndpoint{source: root, device: device}
+		serverKey := strings.ToLower(root.Server)
+		server := filesystem.servers[serverKey]
+		if server == nil {
+			server = newNFSServer(filesystem.options.Connections)
+			filesystem.servers[serverKey] = server
+		}
+		endpoint = &nfsEndpoint{source: root, device: device, server: server}
 		filesystem.endpoints[key] = endpoint
 	}
 	return endpoint, source.Path, true, nil
@@ -316,8 +366,10 @@ func (filesystem *NFS) connectEndpoint(endpoint *nfsEndpoint) error {
 				return err
 			}
 			endpoint.rootFSID = attributes.FSID
+			filesystem.cacheDirectory(endpoint, root, target.RootHandle())
 		}
 	}
+	endpoint.pool = newNFSPool(endpoint.targets, endpoint.server)
 	return nil
 }
 
@@ -335,35 +387,76 @@ func (filesystem *NFS) lookup(name string) (*nfsFile, bool, error) {
 	}
 	if cached, found := filesystem.entries.Get(key); found && cached.endpoint == endpoint && time.Now().Before(cached.expires) {
 		filesystem.cacheHits.Add(1)
-		target := endpoint.targets[endpoint.next.Add(1)%uint64(len(endpoint.targets))]
-		return &nfsFile{filesystem: filesystem, name: name, target: target, handle: cached.handle, info: cached.info, endpoint: endpoint}, true, nil
+		return &nfsFile{filesystem: filesystem, name: name, handle: cached.handle, info: cached.info, endpoint: endpoint}, true, nil
 	}
 	if err := filesystem.initialize(endpoint); err != nil {
 		return nil, true, err
 	}
-	target := endpoint.targets[endpoint.next.Add(1)%uint64(len(endpoint.targets))]
-	handle := target.RootHandle()
-	filesystem.getattrs.Add(1)
-	attributes, err := target.GetAttr(handle)
+	attributes, handle, err := filesystem.lookupHandle(endpoint, remote, true)
 	if err != nil {
 		return nil, true, err
-	}
-	relative := strings.TrimPrefix(strings.TrimPrefix(remote, endpoint.root), "/")
-	for _, component := range strings.Split(relative, "/") {
-		if component == "" {
-			continue
-		}
-		filesystem.lookups.Add(1)
-		attributes, handle, err = target.LookupAt(handle, component)
-		if err != nil {
-			return nil, true, err
-		}
 	}
 	info, err := nfsFileInfo(filesystem.Base(name), endpoint, attributes)
 	if err != nil {
 		return nil, true, err
 	}
-	return &nfsFile{filesystem: filesystem, name: name, target: target, handle: handle, info: info, endpoint: endpoint}, true, nil
+	return &nfsFile{filesystem: filesystem, name: name, handle: handle, info: info, endpoint: endpoint}, true, nil
+}
+
+func invalidNFSHandle(err error) bool {
+	var failure *client.Error
+	return errors.Is(err, os.ErrNotExist) || (errors.As(err, &failure) &&
+		(failure.ErrorNum == client.NFS3ErrStale || failure.ErrorNum == client.NFS3ErrBadHandle || failure.ErrorNum == client.NFS3ErrNotDir))
+}
+
+func (filesystem *NFS) lookupHandle(endpoint *nfsEndpoint, remote string, allowCached bool) (*client.Fattr, []byte, error) {
+	handle := endpoint.targets[0].RootHandle()
+	relative := strings.TrimPrefix(strings.TrimPrefix(remote, endpoint.root), "/")
+	parent := nfsDirectoryKey{endpoint: endpoint, path: path.Dir(remote)}
+	cachedParent := false
+	current := endpoint.root
+	if allowCached && relative != "" {
+		if cached, found := filesystem.directories.Get(parent); found && time.Now().Before(cached.expires) {
+			filesystem.parentHits.Add(1)
+			handle, relative, current, cachedParent = cached.handle, path.Base(remote), parent.path, true
+		}
+	}
+	var attributes *client.Fattr
+	var err error
+	if relative == "" {
+		filesystem.getattrs.Add(1)
+		err = filesystem.call(endpoint, nfsGetattr, func(target *client.Target) error {
+			var callErr error
+			attributes, callErr = target.GetAttr(handle)
+			return callErr
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	for _, component := range strings.Split(relative, "/") {
+		if component == "" {
+			continue
+		}
+		filesystem.lookups.Add(1)
+		err = filesystem.call(endpoint, nfsLookup, func(target *client.Target) error {
+			var callErr error
+			attributes, handle, callErr = target.LookupAt(handle, component)
+			return callErr
+		})
+		if err != nil {
+			if cachedParent && invalidNFSHandle(err) {
+				filesystem.directories.Remove(parent)
+				return filesystem.lookupHandle(endpoint, remote, false)
+			}
+			return nil, nil, err
+		}
+		current = path.Join(current, component)
+		if attributes.Type == client.NF3Dir {
+			filesystem.cacheDirectory(endpoint, current, handle)
+		}
+	}
+	return attributes, handle, nil
 }
 
 func (filesystem *NFS) Lstat(name string) (*ExtendedFileInfo, error) {
@@ -387,7 +480,7 @@ func (filesystem *NFS) OpenFile(name string, flag int, metadataOnly bool) (File,
 			return filesystem.local.OpenFile(name, flag, metadataOnly)
 		}
 		if file.info.Mode&os.ModeSymlink != 0 && flag&O_NOFOLLOW == 0 {
-			link, err := file.target.OpenHandle(file.handle).Readlink()
+			link, err := file.readlink()
 			if err != nil {
 				return nil, err
 			}
@@ -444,14 +537,13 @@ func nfsTime(value client.NFS3Time) time.Time {
 type nfsFile struct {
 	filesystem            *NFS
 	name                  string
-	target                *client.Target
 	endpoint              *nfsEndpoint
 	handle                []byte
 	info                  *ExtendedFileInfo
-	reader                *client.ReadOnlyFile
+	offset                int64
 	readable, closed, eof bool
 	cookie, verifier      uint64
-	names                 []string
+	directoryEntries      []ReadDirEntry
 }
 
 func (file *nfsFile) Stat() (*ExtendedFileInfo, error) {
@@ -468,11 +560,16 @@ func (file *nfsFile) MakeReadable() error {
 	if file.readable {
 		return fmt.Errorf("NFS file is already readable")
 	}
-	if file.target == nil {
+	if file.endpoint == nil {
 		return fmt.Errorf("cannot enumerate a virtual NFS ancestor")
 	}
 	file.filesystem.getattrs.Add(1)
-	attributes, err := file.target.GetAttr(file.handle)
+	var attributes *client.Fattr
+	err := file.filesystem.call(file.endpoint, nfsGetattr, func(target *client.Target) error {
+		var callErr error
+		attributes, callErr = target.GetAttr(file.handle)
+		return callErr
+	})
 	if err != nil {
 		return err
 	}
@@ -484,7 +581,6 @@ func (file *nfsFile) MakeReadable() error {
 		return fmt.Errorf("refusing to read non-regular NFS source %s", file.name)
 	}
 	file.readable = true
-	file.reader = file.target.OpenHandle(file.handle)
 	return nil
 }
 
@@ -496,45 +592,91 @@ func (file *nfsFile) Read(buffer []byte) (int, error) {
 		return 0, os.ErrPermission
 	}
 	file.filesystem.reads.Add(1)
-	count, err := file.reader.Read(buffer)
+	var count int
+	err := file.filesystem.call(file.endpoint, nfsRead, func(target *client.Target) error {
+		reader := target.OpenHandle(file.handle)
+		defer reader.Close()
+		var callErr error
+		count, callErr = reader.ReadAt(buffer, file.offset)
+		return callErr
+	})
+	file.offset += int64(count)
 	file.filesystem.readBytes.Add(uint64(count))
 	return count, err
 }
 
 func (file *nfsFile) Readdirnames(count int) ([]string, error) {
+	entries, err := file.ReaddirEntries(count)
+	names := make([]string, len(entries))
+	for index, entry := range entries {
+		names[index] = entry.Name
+	}
+	return names, err
+}
+
+func (file *nfsFile) ReaddirEntries(count int) ([]ReadDirEntry, error) {
 	if file.closed {
 		return nil, os.ErrClosed
 	}
 	if !file.readable || !file.info.Mode.IsDir() {
 		return nil, syscall.ENOTDIR
 	}
-	var names []string
-	for count <= 0 || len(names) < count {
-		if len(file.names) != 0 {
-			take := len(file.names)
+	var entries []ReadDirEntry
+	for count <= 0 || len(entries) < count {
+		if len(file.directoryEntries) != 0 {
+			take := len(file.directoryEntries)
 			if count > 0 {
-				take = min(take, count-len(names))
+				take = min(take, count-len(entries))
 			}
-			names = append(names, file.names[:take]...)
-			file.names = file.names[take:]
+			entries = append(entries, file.directoryEntries[:take]...)
+			file.directoryEntries = file.directoryEntries[take:]
 			continue
 		}
 		if file.eof {
 			break
 		}
 		if err := file.readDirectoryPage(); err != nil {
-			return names, err
+			return entries, err
 		}
 	}
-	if count > 0 && len(names) == 0 && file.eof {
+	group, ctx := errgroup.WithContext(file.filesystem.ctx)
+	group.SetLimit(file.filesystem.options.Connections)
+	for index := range entries {
+		if entries[index].Info != nil {
+			continue
+		}
+		group.Go(func() error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			metadata, err := entries[index].OpenMetadata()
+			if err != nil {
+				return err
+			}
+			defer metadata.Close()
+			entries[index].Info, err = metadata.Stat()
+			return err
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+	if count > 0 && len(entries) == 0 && file.eof {
 		return nil, io.EOF
 	}
-	return names, nil
+	return entries, nil
 }
 
 func (file *nfsFile) readDirectoryPage() error {
 	file.filesystem.readDirPlus.Add(1)
-	entries, verifier, eof, err := file.target.ReadDirPlusPage(file.handle, file.cookie, file.verifier)
+	var entries []*client.EntryPlus
+	var verifier uint64
+	var eof bool
+	err := file.filesystem.call(file.endpoint, nfsReadDirPlus, func(target *client.Target) error {
+		var callErr error
+		entries, verifier, eof, callErr = target.ReadDirPlusPage(file.handle, file.cookie, file.verifier)
+		return callErr
+	})
 	if err != nil {
 		return err
 	}
@@ -547,32 +689,80 @@ func (file *nfsFile) readDirectoryPage() error {
 		if entry.FileName == "" || strings.ContainsAny(entry.FileName, "/\x00") {
 			return fmt.Errorf("invalid NFS directory entry")
 		}
-		if err := file.cacheEntry(entry); err != nil {
+		retained, err := file.cacheEntry(entry)
+		if err != nil {
 			return err
 		}
-		file.names = append(file.names, entry.FileName)
+		file.directoryEntries = append(file.directoryEntries, retained)
 	}
 	return nil
 }
 
-func (file *nfsFile) cacheEntry(entry *client.EntryPlus) error {
-	if !entry.Attr.IsSet || !entry.Handle.IsSet {
-		return nil
+func (file *nfsFile) cacheEntry(entry *client.EntryPlus) (ReadDirEntry, error) {
+	if entry.Handle.IsSet && (len(entry.Handle.FH) == 0 || len(entry.Handle.FH) > 64) {
+		return ReadDirEntry{}, fmt.Errorf("invalid NFS directory entry handle")
 	}
-	if len(entry.Handle.FH) == 0 || len(entry.Handle.FH) > 64 {
-		return fmt.Errorf("invalid NFS directory entry handle")
-	}
-	info, err := nfsFileInfo(entry.FileName, file.endpoint, &entry.Attr.Attr)
-	if err != nil {
-		return err
+	var info *ExtendedFileInfo
+	var err error
+	if entry.Attr.IsSet {
+		info, err = nfsFileInfo(entry.FileName, file.endpoint, &entry.Attr.Attr)
+		if err != nil {
+			return ReadDirEntry{}, err
+		}
 	}
 	key, err := file.filesystem.Abs(file.filesystem.Join(file.name, entry.FileName))
 	if err != nil {
-		return err
+		return ReadDirEntry{}, err
 	}
-	file.filesystem.entries.Add(key, nfsCachedEntry{endpoint: file.endpoint,
-		handle: append([]byte(nil), entry.Handle.FH...), info: info, expires: time.Now().Add(time.Second)})
-	return nil
+	var handle []byte
+	if entry.Handle.IsSet {
+		handle = append([]byte(nil), entry.Handle.FH...)
+	}
+	expires := time.Now().Add(time.Second)
+	if entry.Handle.IsSet && info != nil {
+		file.filesystem.entries.Add(key, nfsCachedEntry{endpoint: file.endpoint, handle: handle, info: info, expires: expires})
+	}
+	filesystem, endpoint, parent := file.filesystem, file.endpoint, file.handle
+	name := entry.FileName
+	return ReadDirEntry{Name: name, Info: info, OpenMetadata: func() (File, error) {
+		if err := filesystem.ctx.Err(); err != nil {
+			return nil, err
+		}
+		filesystem.retainedOpens.Add(1)
+		currentInfo, currentHandle := info, handle
+		var attributes *client.Fattr
+		var err error
+		if len(currentHandle) == 0 {
+			filesystem.lookups.Add(1)
+			err = filesystem.call(endpoint, nfsLookup, func(target *client.Target) error {
+				var callErr error
+				attributes, currentHandle, callErr = target.LookupAt(parent, name)
+				return callErr
+			})
+		} else if currentInfo == nil || !time.Now().Before(expires) {
+			filesystem.getattrs.Add(1)
+			err = filesystem.call(endpoint, nfsGetattr, func(target *client.Target) error {
+				var callErr error
+				attributes, callErr = target.GetAttr(currentHandle)
+				return callErr
+			})
+		}
+		if err != nil {
+			if invalidNFSHandle(err) {
+				filesystem.entries.Remove(key)
+				filesystem.directories.Purge()
+				return filesystem.OpenFile(key, O_NOFOLLOW, true)
+			}
+			return nil, err
+		}
+		if attributes != nil {
+			currentInfo, err = nfsFileInfo(name, endpoint, attributes)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return &nfsFile{filesystem: filesystem, endpoint: endpoint, name: key, handle: currentHandle, info: currentInfo}, nil
+	}}, nil
 }
 
 func (file *nfsFile) ToNode(_ bool, _ func(string, ...any)) (*data.Node, error) {
@@ -584,7 +774,7 @@ func (file *nfsFile) ToNode(_ bool, _ func(string, ...any)) (*data.Node, error) 
 	node.AccessTime, node.ChangeTime, node.Links, node.Device = file.info.AccessTime, file.info.ChangeTime, file.info.Links, file.info.Device
 	if node.Type == data.NodeTypeSymlink {
 		var err error
-		node.LinkTarget, err = file.target.OpenHandle(file.handle).Readlink()
+		node.LinkTarget, err = file.readlink()
 		if err != nil {
 			return nil, err
 		}
@@ -592,12 +782,20 @@ func (file *nfsFile) ToNode(_ bool, _ func(string, ...any)) (*data.Node, error) 
 	return node, nil
 }
 
+func (file *nfsFile) readlink() (string, error) {
+	var link string
+	err := file.filesystem.call(file.endpoint, nfsReadlink, func(target *client.Target) error {
+		reader := target.OpenHandle(file.handle)
+		defer reader.Close()
+		var callErr error
+		link, callErr = reader.Readlink()
+		return callErr
+	})
+	return link, err
+}
+
 func (file *nfsFile) Close() error {
 	file.closed = true
-	if file.reader != nil {
-		_ = file.reader.Close()
-	}
-	file.reader = nil
-	file.names = nil
+	file.directoryEntries = nil
 	return nil
 }

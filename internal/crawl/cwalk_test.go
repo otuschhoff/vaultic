@@ -6,11 +6,64 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/otuschhoff/vaultic/internal/fs"
 )
+
+func TestDirectoryStreamRetainedMetadataCancellation(t *testing.T) {
+	stream, err := NewDirectoryStream(t.Context(), 1, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	name := filepath.Join(t.TempDir(), "entry")
+	started := make(chan struct{})
+	stream.rememberMetadata(name, fs.ReadDirEntry{Name: "entry", OpenMetadata: func() (fs.File, error) {
+		close(started)
+		<-stream.ctx.Done()
+		return nil, stream.ctx.Err()
+	}})
+	result := make(chan error, 1)
+	go func() {
+		_, _, err := stream.OpenMetadata(name)
+		result <- err
+	}()
+	<-started
+	if err := stream.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("retained open cancellation: %v", err)
+	}
+}
+
+func TestDirectoryStreamRetainedMetadataBounds(t *testing.T) {
+	stream, err := NewDirectoryStream(t.Context(), 1, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	var last string
+	for index := 0; index < 300; index++ {
+		last = filepath.Join(root, strings.Repeat("x", 40000)+strconv.Itoa(index))
+		stream.rememberMetadata(last, fs.ReadDirEntry{Name: "entry", OpenMetadata: func() (fs.File, error) { return nil, nil }})
+	}
+	if stream.metadataBytes > 8<<20 || stream.metadata.Len() >= 300 {
+		t.Fatalf("unbounded retained metadata: bytes=%d entries=%d", stream.metadataBytes, stream.metadata.Len())
+	}
+	if _, found, err := stream.OpenMetadata(last); err != nil || !found {
+		t.Fatalf("retained entry unavailable: %t %v", found, err)
+	}
+	stream.Close()
+	if stream.metadataBytes != 0 || stream.metadata.Len() != 0 {
+		t.Fatal("close retained metadata")
+	}
+}
 
 func TestDirectoryStreamDemandAndCancellation(t *testing.T) {
 	root := t.TempDir()

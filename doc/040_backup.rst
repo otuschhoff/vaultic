@@ -120,26 +120,53 @@ connection. Export permissions and root squashing continue to apply. NFS traffic
 is not encrypted and this mode cannot substitute for Kerberos security.
 
 Directory traversal uses paged READDIRPLUS and reuses its attributes and handles
-in a 4096-entry, one-second metadata cache. File reads refresh handle attributes
-before reading and use negotiated read sizes, capped at 1 MiB. The default is
-four connections per export; ``--nfs-connections`` accepts 1 through 16. These are
-component limits, not a total memory or connection limit across all exports.
+in a 4096-entry, one-second metadata cache. Parent directory handles have a
+separate 4096-entry, one-second cache, admitting paths up to 1024 bytes. A stale,
+missing or no-longer-directory cached handle permits one fallback from the
+mounted root; failures propagate without an unbounded retry loop. File reads
+refresh handle attributes before reading and use negotiated read sizes, capped
+at 1 MiB.
+
+The default is four connections per export; ``--nfs-connections`` accepts 1
+through 16. Each source RPC leases an available connection. With more than one
+connection, one is reserved for metadata; metadata can also use any other idle
+connection. Missing READDIRPLUS attributes are resolved in bounded parallel
+requests. Active source RPCs across exports sharing the same server hostname
+are limited to ``--nfs-connections``, with at most one fewer concurrent reads
+(or one read for a single-connection pool). Different host aliases are separate
+server keys. Connection acquisition has a five-second deadline, separate from
+the client's five-second RPC deadline. Setup RPCs are outside this scheduler.
+These are component limits, not a total memory or socket limit across exports.
 The archiver still materializes the names of a directory when it requests them
 all. Live NFS access is not a point-in-time snapshot.
 
 The pinned upstream cwalk revision ``0fb5717e371d`` supports pluggable
 filesystems and READDIRPLUS metadata. ``--use-cwalk`` uses bounded parallel
-directory lookahead through Vaultic's NFS adapter, sharing its connection pool
-and metadata cache. URLs are translated through a relative walker root rather
-than normalized as local paths. The redundant size-estimation scan is skipped.
+directory lookahead through Vaultic's NFS adapter, sharing its connection pool.
+Directory entries retain handles until archiver consumption, subject to an
+8192-entry maximum and an 8 MiB accounted retention budget; smaller lookahead
+capacities reduce the entry bound. Accounting estimates retained object sizes,
+not total heap usage. Expired attributes are refreshed using the retained handle.
+Eviction falls back to ordinary path lookup. URLs use a relative walker root
+instead of local path normalization. The redundant size-estimation scan is skipped.
 ``--no-cwalk`` selects the generic NFS filesystem traversal. Filesystem
 snapshots, pathdiff, FSEvents and stdin modes cannot be combined with direct NFS.
 RPC timeouts/cancellation and source errors propagate without falling back to
 mounted reads for a selected direct NFS source. Source-file close issues no
 write or COMMIT RPC. Verbose output reports NFS read/traversal counters.
+JSON output includes ``nfs_source_stats`` after source close, including parent
+handle hits, retained metadata opens, and ``rpc_operations`` for LOOKUP,
+GETATTR, READDIRPLUS, READ and READLINK. Each operation reports attempts, calls
+admitted to a connection, errors, cancellations/deadlines, queue and service
+nanoseconds, and active/maximum concurrent calls. EOF is not an error. Service
+time includes the client call and response decoding, excludes acquisition wait,
+and omits setup RPCs. These timings do not measure server-side execution alone.
 
 Validation includes native protocol tests, READDIRPLUS reuse without per-entry
-LOOKUP/GETATTR calls, and a full archive-content/ownership/symlink check. No
+LOOKUP/GETATTR calls, delayed handle consumption with refreshed attributes,
+parallel missing-attribute resolution, bounded stale-handle fallback,
+1/4/8/16-connection scheduling and cancellation, and a telemetry-wrapped
+archive-content/ownership/symlink check. No
 production deployment or completed production backup is implied. Performance
 against a Linux NFS mount remains unmeasured; bypassing the kernel is not by itself
 evidence of a speedup.

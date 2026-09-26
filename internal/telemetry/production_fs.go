@@ -93,6 +93,35 @@ func (file *productionFile) MakeReadable() error {
 	return err
 }
 
+func (file *productionFile) ReaddirEntries(count int) ([]fs.ReadDirEntry, error) {
+	provider, ok := file.File.(interface {
+		ReaddirEntries(int) ([]fs.ReadDirEntry, error)
+	})
+	if !ok {
+		return nil, errors.ErrUnsupported
+	}
+	done := file.accounting.StartBlocking(file.ctx, "source", "source_io")
+	defer done.Done()
+	dependency := file.accounting.StartDependency(file.ctx, "source")
+	entries, err := provider.ReaddirEntries(count)
+	dependency.Finish(err)
+	for index := range entries {
+		open := entries[index].OpenMetadata
+		entries[index].OpenMetadata = func() (fs.File, error) {
+			done := file.accounting.StartBlocking(file.ctx, "source", "source_io")
+			defer done.Done()
+			dependency := file.accounting.StartDependency(file.ctx, "source")
+			metadata, err := open()
+			dependency.Finish(err)
+			if err != nil {
+				return nil, err
+			}
+			return &productionFile{File: metadata, ctx: file.ctx, accounting: file.accounting}, nil
+		}
+	}
+	return entries, err
+}
+
 func (file *productionFile) ToNode(ignoreXattrListError bool, warnf func(string, ...any)) (*data.Node, error) {
 	done := file.accounting.StartBlocking(file.ctx, "source", "source_io")
 	defer done.Done()

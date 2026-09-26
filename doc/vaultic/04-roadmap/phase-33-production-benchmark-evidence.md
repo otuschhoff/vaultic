@@ -1,5 +1,173 @@
 # Phase 33 Production Benchmark Evidence
 
+## Direct NFSv3 backup observation, R39 (2026-09-26)
+
+**The direct-NFS backup ran and stopped cleanly at the approved time limit. No
+snapshot completed, and this is not a matched speedup comparison.** The trial
+used the existing52 mounted source roots with `--use-cwalk --nfs-direct`,32 cwalk
+workers,4 direct NFS connections per export,2 file readers and64MiB client lookup
+capacity. The recovered production daemon stayed PID1440079/epoch74 with its
+original100ms flush interval,128MiB metadata cache and512MiB block cache.
+No daemon/service deployment, restart or setting change occurred during the run.
+
+Artifacts are under
+`/volume2/NASDA2/rustic/db.test/backup-direct-nfs-20260926-r39-HVh8lZ`:
+the exact CLI, source revision/patch, sources/command, bounded `run.cjs`, samples,
+CPU profile, goroutine captures, final statistics and reproducible `analyze.cjs`.
+The CLI includes only an additional JSON `nfs_source_stats` event over the
+direct-NFS implementation at `d2ca03497`; text-only verbose output previously
+hid these counters in JSON mode. Close/cancellation regression tests, complete
+fs/nfs/backupcmd race suites, scoped lint and build passed before measurement.
+No builds or tests overlapped the backup.
+
+| Measurement | Result |
+| --- | ---: |
+| Timeout wrapper exit / duration |124 /600.266s|
+| Whole harness including final health checks |601.064s|
+| Last progress sample |599s|
+| Files processed / logical bytes |33,874 /51,536,858,278|
+| Logical data rate at last sample |82.05MiB/s|
+| CLI CPU / peak RSS |787.10 CPU-s /822,904KiB|
+| Daemon CPU / sampled peak RSS |3,134.96 CPU-s /1,073,786,880 bytes|
+| Metadata GET attempts / delivered body bytes |433,242 /1,036,704,944,269|
+| Size lookups / mean latency |76,723 single-handle RPCs /20.097ms|
+| Client lookup cache peak / evictions |76,720 of349,525 entries /0|
+| Snapshot IDs before / after |143 /143, unchanged|
+
+Direct-source counters were10,489 READDIRPLUS calls,707,931 LOOKUP calls,
+155,871 GETATTR calls,871,770 read calls,51,538,825,256 bytes read and119,285
+metadata-cache hits. Mean read payload was59,120 bytes per adapter call. These
+are adapter-operation counters, not every setup/wire RPC or a total cache-hit
+ratio. Kernel source-mount counters separately showed617,689 GETATTRs,7,847 READs
+and26 READDIRPLUS calls; they exclude userspace RPCs and include other users of
+those mounts, so they cannot establish per-process fallback or source I/O cost.
+
+The primary observed wait is blob-admission metadata lookup. Captures at60,180,
+360 and550s show `CachedBlobLookup` waiting on `LookupBlobSizesContext`/MultiGet;
+the360s sample includes15 admission waiters and4 fetches. All32 cwalk workers are
+idle in each capture. Metadata bodies average2.39MB per GET, consistent with
+expensive repeated metadata reads at the128MiB daemon cache budget. The client
+lookup cache used only14,730,240 accounted bytes and had no evictions. Increasing
+cwalk concurrency or that client cache is therefore not justified by this run.
+The earlier R32 comparison used1GiB daemon metadata cache and a different prior
+state; its throughput is not a controlled mounted-versus-direct comparison.
+
+The CLI CPU profile has769.45 sampled CPU-seconds over600.09s: SHA256 accounts
+for23.71% flat samples; chunker split-point work9.28% flat/12.82% cumulative;
+NFS RPC CallContext28.36% cumulative and NFS readAt24.37% cumulative. Cumulative
+figures overlap and are not additive. The source client thus has measurable CPU
+cost, but average CLI utilization was1.31 cores versus5.22 daemon cores. No daemon
+CPU profile was captured; metadata cache pressure is a supported candidate, not a
+proven attribution of every daemon cycle.
+
+No per-file source errors or sampler failures were reported. Reconciliation ended
+with44,201 scanned,30,765 reused,0 changed/published and3,110 failed paths; close
+cancels work before joining, and individual final failures were not classified.
+There were30,765 successful commit requests and0 commit failures, with no inode
+revision allocation/publication calls. These counts are not completed new-data
+publications. The final CLI error was context cancellation at the time limit.
+Scratch was empty, all prior snapshot IDs remained, and the same daemon was
+read-write with0 transactions/intents afterward. Retained recovery evidence and
+WAL quarantine were not touched. Next comparisons must hold cache budget/source
+state constant; changing the daemon cache remains a separately approved action.
+
+## R34 writer recovery and full integrity validation (2026-09-26)
+
+**Recovery is now writable and the full index check passed.** The user explicitly
+authorized conditional takeover of epoch73 and confirmed that no other host was
+writing. A fresh status check verified the unchanged claim and zero active
+transactions/intents. The supported promotion used `--force-takeover` with
+`--expected-active-epoch=73`, acquired epoch74, and returned read-write. This was
+an explicitly authorized conditional ownership transition, not an unchecked claim
+edit or a replay-validation bypass.
+
+The post-takeover full checker reported complete coverage,379,934,385 locations
+on each side,143 legacy and143 SlateDB snapshots, zero mismatches, zero unresolved
+references/snapshots, zero pending crawl debt and zero warnings.419,530 imported
+packs remain informational; unknown tier/retention/usage counts are unchanged.
+The checker and timeout processes exited, encrypted scratch was empty, and the
+daemon remained PID1440079/epoch74/read-write with zero transactions/intents.
+The invoking tool was cancelled while its bounded child continued; no duplicate
+check was launched. Final JSON and telemetry are available, but the original
+wrapper's exit/time record was lost. This is metadata/index validation, not full
+payload restore or crash-recovery acceptance.
+
+Progress reached finalization at about352s. The expensive stages were legacy
+scan97s, SlateDB scan104s, and partitioned location comparison84s; encryption
+audit14s, spool finalization10s, catalog join26s, cleanup7s and final validation10s
+account for the remainder. The scan consumed376,766,240 records/35,623,707,642
+logical bytes across257 ranges. Peak accounted scratch was39,883,431,208 bytes.
+Configured scan/RPC concurrency was32, but `compareLocationPartitions` caps
+comparison tasks at4. A5.022s late comparison/cleanup sample used0.448 checker
+cores, with the busiest thread in `rpc_wait_bit_killable`; the daemon was nearly
+idle then. Whole-check daemon telemetry measured1,055.78 CPU-seconds over352.294s,
+about3cores on average. These observations do not support a wholly single-threaded
+checker: bounded merge parallelism and mounted-NFS scratch I/O are relevant.
+No CPU profile was captured, so the exact CPU hot functions remain unmeasured.
+
+The temporary recovery service drop-in was removed without restarting the daemon;
+the original lifecycle settings and installed binary/unit remain unchanged.
+Retain the complete evidence and live WAL quarantine. Do not restore the old tail
+onto this writer-advanced state. Artifacts include `live-takeover-*.json`,
+`live-check-writer.json`, `live-check-writer-monitor.jsonl`, the progress log and
+`live-writer-validated.json` in the existing recovery directory. The read-only
+blocker described below is historical and has been resolved.
+
+## Authorized R34 live recovery: readable, writer blocked (2026-09-26)
+
+**Read access is restored, but writable recovery and backup retries remain
+blocked.** The user authorized recovery after requesting a direct-NFS backup
+retry. This supersedes the historical stopped/unrepaired status below, but does
+not constitute a full integrity or no-data-loss claim.
+
+Before changing live storage, `rsync -aHnc` found no differences from the
+preserved encrypted `evidence/` tree under
+`/volume2/NASDA2/rustic/db.test/recovery-r34-20260925-mWTsrl`.
+The service was inactive with MainPID0 and no local `vaulticdb` process.
+The incident-specific `recover-live.cjs` passed read-only preflight, then moved
+exactly6,621 previously inspected stale WALs (495,526,630 bytes) into
+`/ncl1-1-vs-50/fme_dump/amakura/db.r34-quarantine-20260926`.
+Each file matched both evidence and the prior quarantine manifest by SHA256;
+membership, sequence bounds below the flushed watermark, regular-file type,
+single link, canonical paths and same filesystem were checked before moving.
+Every quarantined file was rehashed afterward. No WAL was deleted, ordering
+validation bypassed, or preserved evidence modified.
+
+The original production daemon started normally as PID1440079, with the original
+100ms flush interval,128MiB metadata cache and512MiB block cache. Application
+reads using the authoritative feature and required metadata encryption returned
+all143 snapshot IDs, exactly matching the pre-incident set. The initial scratch
+CLI attempt omitted `VAULTIC_FEATURES=slatedb-authoritative=true`; its unavailable
+engine error was a runtime configuration error, not another WAL replay failure.
+
+The daemon opened read-only because writer epoch73 remains claimed. Normal
+promotion, without `--force-takeover`, was refused and rolled back. Final observed
+epoch remains73, current writer epoch0, and active transactions/write intents0.
+The full index checker was attempted with the established96GiB memory/scratch,
+32-worker settings and600s+45s limit, but exited1 after0.684s because it could not
+begin its fenced read session on the read-only daemon. It produced no integrity
+coverage; the snapshot-ID check must not be represented as a full index check.
+
+Conditional takeover with `--expected-active-epoch=73` requires explicit approval
+to override the earlier no-forced-takeover restriction and confirmation that no
+other host is writing. That confirmation was unavailable, so no takeover,
+manual claim edit, backup, or new throughput measurement was performed.
+
+The temporary recovery drop-in
+`/run/systemd/system/vaulticdb-rustic.service.d/90-recovery.conf` remains active:
+automatic restart is disabled and the stop hook uses normal demotion without
+`--force`. The installed daemon and original unit hashes remain unchanged.
+The service is active/read-only, not fully recovered. Keep both the complete
+evidence tree and the live quarantine (including its manifest). Do not overlay
+old WALs onto a running or subsequently advanced database; rollback requires
+stopping the service and reviewing the complete preserved state.
+
+Artifacts in the recovery directory include `recover-live.cjs`,
+`live-quarantine.jsonl`, `live-snapshots.json`, `live-writer-ready.json`,
+`live-writer-after-promotion.json` and `live-check-*` outputs. Resume with explicit
+writer-ownership authorization, then complete integrity validation before the
+bounded direct-NFS backup experiment.
+
 ## Bounded atomic publication groups, isolated R38 (2026-09-26)
 
 **Keep the group prototype default-off; reject general rollout.** Combining up to

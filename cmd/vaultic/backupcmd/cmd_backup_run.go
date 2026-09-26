@@ -222,6 +222,18 @@ func (run *backupRun) reportMetadataLookupStats(stats enginepkg.BlobLookupStats)
 	}
 }
 
+func (run *backupRun) reportNFSStats(stats fs.NFSStats) {
+	if run.globalOptions.JSON {
+		run.term.Print(ui.ToJSONString(struct {
+			MessageType string `json:"message_type"`
+			fs.NFSStats
+		}{MessageType: "nfs_source_stats", NFSStats: stats}))
+	} else if !run.globalOptions.Quiet {
+		run.printer.V("direct NFS: %d READDIRPLUS, %d LOOKUP, %d GETATTR, %d READ calls, %d bytes, %d metadata cache hits\n",
+			stats.ReadDirPlus, stats.Lookups, stats.Getattrs, stats.Reads, stats.ReadBytes, stats.CacheHits)
+	}
+}
+
 func (run *backupRun) reportReconciliationStats(stats reconcile.Metrics) {
 	if run.globalOptions.JSON {
 		run.term.Print(ui.ToJSONString(struct {
@@ -426,9 +438,7 @@ func openBackupFilesystem(run *backupRun) (resultErr error) {
 		run.targetFS = direct
 		run.closeSource = func() {
 			_ = direct.Close()
-			stats := direct.Stats()
-			run.printer.V("direct NFS: %d READDIRPLUS, %d LOOKUP, %d GETATTR, %d READ calls, %d bytes, %d metadata cache hits\n",
-				stats.ReadDirPlus, stats.Lookups, stats.Getattrs, stats.Reads, stats.ReadBytes, stats.CacheHits)
+			run.reportNFSStats(direct.Stats())
 		}
 		for _, target := range run.targets {
 			if _, err := direct.Lstat(target); err != nil {

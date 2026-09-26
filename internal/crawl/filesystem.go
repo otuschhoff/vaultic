@@ -17,7 +17,8 @@ type walkFilesystem struct {
 }
 
 type walkFileInfo struct {
-	info *fs.ExtendedFileInfo
+	info  *fs.ExtendedFileInfo
+	entry *fs.ReadDirEntry
 }
 
 func (info walkFileInfo) Name() string       { return info.info.Name }
@@ -51,6 +52,26 @@ func (adapter walkFilesystem) ReadDirPlus(name string) ([]cwalk.DirEntryInfo, er
 	}
 	defer directory.Close()
 	var entries []cwalk.DirEntryInfo
+	if provider, ok := directory.(interface {
+		ReaddirEntries(int) ([]fs.ReadDirEntry, error)
+	}); ok {
+		for {
+			page, readErr := provider.ReaddirEntries(128)
+			if errors.Is(readErr, errors.ErrUnsupported) && len(entries) == 0 {
+				break
+			}
+			for _, entry := range page {
+				info := walkFileInfo{info: entry.Info, entry: &entry}
+				entries = append(entries, cwalk.DirEntryInfo{Entry: iofs.FileInfoToDirEntry(info), Info: info})
+			}
+			if errors.Is(readErr, io.EOF) {
+				return entries, nil
+			}
+			if readErr != nil {
+				return nil, readErr
+			}
+		}
+	}
 	for {
 		names, readErr := directory.Readdirnames(128)
 		for _, child := range names {
