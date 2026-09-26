@@ -203,6 +203,51 @@ places the token in either process's arguments or environment. Storage calls
 are rejected after drain. Commits and writes requesting durability return only
 after SlateDB's durability handle completes.
 
+## WAL recovery diagnosis
+
+On a SlateDB WAL sequence-ordering startup failure, the daemon emits a versioned
+`wal_recovery_plan` JSON event to stderr and exits with status **78** after normal
+cleanup. Ordinary failures continue to exit with status1. This classification
+recognizes the ordering error of the pinned SlateDB dependency; fencing alone
+does not trigger this recovery classification.
+
+Diagnosis uses the already-configured metadata/WAL stores and encryption layer.
+It does not open another writer, change manifests, move/delete WALs, replace a
+generation or force ownership. The existing failed-open cleanup still runs.
+The report contains manifest watermarks, inspected counts, gaps, the first
+ordering violation and ordered operator steps, not database keys or values.
+Keep stderr in persistent service logs; no recovery plan is written to the
+suspect metadata store.
+
+Inspection is limited to30 seconds,20,000 listed objects,256MiB of listed WAL
+bytes after the replay cutoff,16MiB per object and2,000,000 decoded rows.
+Timeouts, limits, read/decryption failures and changes to inspected WAL object
+metadata or the manifest produce an incomplete report. Object-size limits are
+encoded storage limits, not a strict process-memory ceiling. Manifest stability
+and object metadata checks are not proof of exclusive ownership or an atomic
+storage snapshot. A complete report is not a no-data-loss guarantee.
+
+`operator_approval_required` is always true; `automatic_repair_allowed` and
+`exclusive_ownership_verified` are always false. Lower-sequence tail files are
+diagnostic leads, never permission to remove data. Preserve all namespaces and
+coordination state, validate an isolated copy, and obtain explicit approval
+before live repair. Persisted absolute WAL bindings must be relocated or
+explicitly confined when operating on copies. This does not automatically run
+the separate `index heal` generation-rebuild workflow.
+
+For a systemd-managed daemon, retain failure logging and configure:
+
+```ini
+[Service]
+Restart=on-failure
+RestartPreventExitStatus=78
+```
+
+Without this supervisor policy, an external service manager can still restart
+the daemon repeatedly. Installing this policy on an existing service is an
+operator action; adding diagnosis does not alter installed units or repair the
+R34 production database.
+
 ## Daemon environment
 
 All daemon-specific environment variables are parsed once by `Config::from_env`.

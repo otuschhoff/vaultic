@@ -1,5 +1,38 @@
 # Phase 33 Production Benchmark Evidence
 
+## Automatic WAL diagnosis implementation (2026-09-26)
+
+After the isolated recovery investigation, the user approved implementing
+automatic diagnosis and advisory recovery-plan generation, with repair still
+operator-approved. The daemon now inspects configured metadata/WAL stores on
+the pinned SlateDB's sequence-ordering startup error, emits a versioned
+`wal_recovery_plan` JSON event to stderr, completes normal cleanup and exits78.
+Other failures retain exit1. Both writer startup and non-fencing reader startup
+are covered; a fencing message alone does not trigger this classification.
+
+Read-only inspection has time/file/encoded-byte/row limits, checks the manifest
+before/after and inspected WAL object metadata before/after each read, and
+reports incomplete results rather than guessing when inspection cannot finish.
+The plan always requires operator approval, never authorizes automatic repair,
+and does not claim exclusive ownership. It provides preservation, copy-path
+confinement, validation and approval steps without moving or deleting objects.
+The complete contract and limits are documented in `vaulticdb/README.md`.
+
+Validation passed:108 Rust library tests and204 daemon tests, including encrypted
+inspection, limits, stalled-store timeout, non-mutation and error classification.
+Native race tests exercise actual WAL corruption on disposable local databases,
+verify writer/reader reports and exit78, preserve suspect WALs and the reader's
+existing writer claim, and verify runtime artifact cleanup. Ordinary storage
+restart, loader panic, teardown failures and TCP shutdown gates also pass.
+New Go-code lint reports zero issues; editor diagnostics and diff checks pass.
+
+No production deployment, service restart, live metadata repair or benchmark was
+performed. The installed binary/unit hashes are unchanged and production remains
+MainPID0/inactive/dead. Suppressing supervisor retries requires configuring
+`RestartPreventExitStatus=78` in the managed daemon unit; this is documented but
+has not been applied to the installed service. This implementation does not
+activate the recovered copy or prove full integrity of the R34 database.
+
 ## R34 isolated recovery investigation (2026-09-26)
 
 **Production remains stopped and unavailable. Recovery succeeded on a separate

@@ -20,7 +20,25 @@ fn injected_transport_failure(name: &str) -> Option<anyhow::Error> {
 }
 
 #[tokio::main(flavor = "multi_thread")]
-async fn main() -> Result<()> {
+async fn main() -> std::process::ExitCode {
+    match run_daemon().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {error:#}");
+            std::process::ExitCode::from(failure_exit_status(&error))
+        }
+    }
+}
+
+fn failure_exit_status(error: &anyhow::Error) -> u8 {
+    if storage::recovery::is_ordering_failure(error) {
+        78
+    } else {
+        1
+    }
+}
+
+async fn run_daemon() -> Result<()> {
     disable_core_dumps();
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     if arguments.as_slice() == ["--version"] {
@@ -778,6 +796,17 @@ mod runtime_directory_tests {
             assert!(!endpoint.with_extension("cap").exists());
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn recovery_failure_exit_survives_combined_cleanup_errors() {
+        let error = combine_results(vec![
+            ("serve gRPC", Err(anyhow::anyhow!("transport failure"))),
+            ("close storage", Err(anyhow::anyhow!("WAL replay saw out-of-order seqs across WAL files. [wal_id=3, min_seq=1, last_seq=2]"))),
+        ]).unwrap_err();
+        assert_eq!(failure_exit_status(&error), 78);
+        assert_eq!(failure_exit_status(&anyhow::anyhow!("storage timeout")), 1);
+        assert_eq!(failure_exit_status(&anyhow::anyhow!("detected newer DB client")), 1);
     }
 
     #[test]

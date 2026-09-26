@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -888,6 +890,142 @@ func TestEnsureRejectsMalformedMetadataForLiveDaemon(t *testing.T) {
 	_, err = Ensure(ctx, options)
 	if !errors.Is(err, ErrUnsafeEndpoint) {
 		t.Fatalf("live malformed metadata = %v, want ErrUnsafeEndpoint", err)
+	}
+}
+
+func TestWALOrderingFailureProducesAdvisoryPlanAndPermanentExit(t *testing.T) {
+	for _, reader := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reader=%t", reader), func(t *testing.T) {
+			checkWALOrderingFailure(t, reader)
+		})
+	}
+}
+
+func checkWALOrderingFailure(t *testing.T, reader bool) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	options := (Options{
+		Socket: testSocket(t), RepositoryID: "wal-recovery-plan", DaemonPath: daemonBinary(t),
+		DataDir: t.TempDir(), ObjectStore: "local",
+	}).withDefaults()
+	client, err := Ensure(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close(context.Background()) })
+	if _, err := client.WriteBatch(ctx, []Mutation{{Key: []byte("private-recovery-key"), Value: []byte("private-recovery-value")}}, nil, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	files, err := filepath.Glob(filepath.Join(options.DataDir, "*", "db", "wal", "*.sst"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("WAL fixture files: %v (%v)", files, err)
+	}
+	source, err := os.ReadFile(files[len(files)-1])
+	if err != nil || len(source) == 0 {
+		t.Fatalf("read latest WAL: %v (bytes=%d)", err, len(source))
+	}
+	claims, err := filepath.Glob(filepath.Join(options.DataDir, "*", "_vaultic", "active-writer"))
+	if err != nil || len(claims) != 1 {
+		t.Fatalf("writer claim fixture: %v (%v)", claims, err)
+	}
+	claim, err := os.ReadFile(claims[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if reader {
+		if err := os.WriteFile(claims[0], claim, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files, err = filepath.Glob(filepath.Join(options.DataDir, "*", "db", "wal", "*.sst"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("closed WAL fixture files: %v (%v)", files, err)
+	}
+	last := files[len(files)-1]
+	lastID, err := strconv.ParseUint(strings.TrimSuffix(filepath.Base(last), ".sst"), 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var suspectFiles []string
+	for offset := uint64(1); offset <= 2; offset++ {
+		path := filepath.Join(filepath.Dir(last), fmt.Sprintf("%020d.sst", lastID+offset))
+		if err := os.WriteFile(path, source, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		suspectFiles = append(suspectFiles, path)
+	}
+	command, authRead, authWrite, err := prepareDaemonCommand(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authRead != nil {
+		defer authRead.Close()
+	}
+	if authWrite != nil {
+		defer authWrite.Close()
+	}
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	finished := make(chan error, 1)
+	go func() { finished <- command.Wait() }()
+	select {
+	case err = <-finished:
+	case <-ctx.Done():
+		_ = command.Process.Kill()
+		<-finished
+		t.Fatal("recovery diagnosis did not exit within test deadline")
+	}
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 78 {
+		t.Fatalf("exit = %v, want 78; stderr: %s", err, stderr.String())
+	}
+	var plan struct {
+		Event     string `json:"event"`
+		Complete  bool   `json:"complete"`
+		Reason    string `json:"reason"`
+		Approval  bool   `json:"operator_approval_required"`
+		Automatic bool   `json:"automatic_repair_allowed"`
+	}
+	for _, line := range strings.Split(stderr.String(), "\n") {
+		if strings.Contains(line, `"event":"wal_recovery_plan"`) {
+			if err := json.Unmarshal([]byte(line), &plan); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if plan.Event != "wal_recovery_plan" || !plan.Complete || plan.Reason != "ordering_violation_confirmed" || !plan.Approval || plan.Automatic {
+		t.Fatalf("invalid advisory plan: %+v; stderr: %s", plan, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "private-recovery-key") || strings.Contains(stderr.String(), "private-recovery-value") {
+		t.Fatal("diagnostic disclosed database contents")
+	}
+	if reader {
+		if !strings.Contains(stderr.String(), `"reason":"writer_claim_already_active"`) {
+			t.Fatal("non-fencing reader path was not exercised")
+		}
+		actual, err := os.ReadFile(claims[0])
+		if err != nil || !bytes.Equal(actual, claim) {
+			t.Fatalf("reader diagnosis changed writer claim: %v", err)
+		}
+	}
+	for _, path := range suspectFiles {
+		actual, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(actual, source) {
+			t.Fatalf("diagnosis changed WAL %s: %v", path, err)
+		}
+	}
+	base := strings.TrimSuffix(options.Socket, filepath.Ext(options.Socket))
+	for _, artifact := range []string{options.Socket, base + ".pid", base + ".cap"} {
+		if _, err := os.Lstat(artifact); !os.IsNotExist(err) {
+			t.Fatalf("runtime artifact remains: %s (%v)", artifact, err)
+		}
 	}
 }
 
