@@ -18,6 +18,31 @@ import (
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
+func TestRestoreNFSOptions(t *testing.T) {
+	command := newRestoreCommand(&global.Options{})
+	if allow, err := command.Flags().GetBool("nfs-allow-missing-metadata"); err != nil || !allow {
+		t.Fatalf("NFS metadata default = %t, %v", allow, err)
+	}
+	options := restoreOptions{Target: "nfs://nas:/restore", NFSAllowMissingMetadata: true, NFSConnections: 4}
+	if err := validateRestoreOptions(options, []string{"latest"}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range []func(*restoreOptions){
+		func(options *restoreOptions) { options.NFSAllowMissingMetadata = false },
+		func(options *restoreOptions) { options.NFSConnections = 17 },
+		func(options *restoreOptions) { options.Target = "nfs://nas:2049/restore" },
+		func(options *restoreOptions) { options.Delete = true },
+		func(options *restoreOptions) { options.Sparse = true },
+		func(options *restoreOptions) { options.OwnershipByName = true },
+	} {
+		invalid := options
+		change(&invalid)
+		if err := validateRestoreOptions(invalid, []string{"latest"}, false, false); err == nil {
+			t.Fatalf("accepted invalid NFS restore options %+v", invalid)
+		}
+	}
+}
+
 func testRunRestore(t testing.TB, globalOptions global.Options, dir string, snapshotID string) {
 	testRunRestoreExcludes(t, globalOptions, dir, snapshotID, nil)
 }

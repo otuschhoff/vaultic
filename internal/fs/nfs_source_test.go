@@ -5,7 +5,27 @@ import (
 	client "github.com/willscott/go-nfs-client/nfs"
 	"os"
 	"testing"
+	"time"
 )
+
+func TestNFSRestoreInputs(t *testing.T) {
+	for _, name := range []string{"", "..", "../escape", "/absolute", "a/../b", "nul\x00"} {
+		if err := validateNFSRelative(name); err == nil {
+			t.Fatalf("accepted restore path %q", name)
+		}
+	}
+	for _, name := range []string{".", "directory/file", "with spaces/#%"} {
+		if err := validateNFSRelative(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := nfsRestoreTime(time.Unix(-1, 0)); err == nil {
+		t.Fatal("accepted an unrepresentable NFS timestamp")
+	}
+	if _, err := NewNFSRestore(context.Background(), "/local", NFSOptions{AllowMissingMetadata: true}); err == nil {
+		t.Fatal("NFS restore silently accepted a local target")
+	}
+}
 
 func TestNFSMetadataAndPaths(t *testing.T) {
 	endpoint := &nfsEndpoint{source: NFSSource{Server: "nas", Path: "/export"}, device: 42, rootFSID: 7}

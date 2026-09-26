@@ -259,6 +259,16 @@ func TestBackupCrawlFlags(t *testing.T) {
 }
 
 func TestDirectNFSSourceValidation(t *testing.T) {
+	command := NewCommand(&global.Options{})
+	if value, err := command.Flags().GetBool("nfs-allow-missing-metadata"); err != nil || !value {
+		t.Fatalf("missing metadata default = %t, %v; want true", value, err)
+	}
+	if err := command.Flags().Set("nfs-allow-missing-metadata", "false"); err != nil {
+		t.Fatal(err)
+	}
+	if value, err := command.Flags().GetBool("nfs-allow-missing-metadata"); err != nil || value {
+		t.Fatalf("strict metadata option = %t, %v; want false", value, err)
+	}
 	targets := []string{"nfs://nas:/export/source"}
 	if err := validateNFSSources(backupOptions{}, targets); err == nil {
 		t.Fatal("direct NFS silently accepted missing ACL/xattr metadata")

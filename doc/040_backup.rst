@@ -74,8 +74,7 @@ Experimental direct NFS sources use the pure-Go client maintained at
 
 .. code-block:: console
 
-    $ vaultic -r /srv/vaultic-repo backup --use-cwalk \
-        --nfs-allow-missing-metadata 'nfs://nas:/export/source'
+    $ vaultic -r /srv/vaultic-repo backup --use-cwalk 'nfs://nas:/export/source'
 
 Both ``nfs://nas:/export/source`` and ``nfs://nas/export/source`` are accepted.
 Use brackets for IPv6 addresses and percent-encode reserved path characters.
@@ -89,8 +88,7 @@ logical paths, exclusions and snapshot paths:
 
 .. code-block:: console
 
-    $ vaultic -r /srv/vaultic-repo backup --use-cwalk --nfs-direct \
-        --nfs-allow-missing-metadata /mnt/nas/source
+    $ vaultic -r /srv/vaultic-repo backup --use-cwalk --nfs-direct /mnt/nas/source
 
 Detection reads the process's mount namespace, uses the most specific mount,
 translates bind-mount roots, and respects nested mount boundaries. Non-NFS and
@@ -105,10 +103,11 @@ backup.
 
 .. warning::
 
-    Direct mode does not preserve ACLs or extended attributes. It requires
-    ``--nfs-allow-missing-metadata`` to explicitly acknowledge that limitation.
-    Do not enable it where those attributes are needed for a faithful restore.
-    This initial client does not implement the separate NFSv3 ACL protocol.
+    Direct mode does not preserve ACLs or extended attributes.
+    ``--nfs-allow-missing-metadata`` now defaults to true. Set it to false to
+    reject direct NFS when those attributes are required. Local filesystem
+    metadata behavior is unchanged. The separate NFSv3 ACL protocol is not
+    implemented.
 
 Regular-file contents, file types, permission/special bits, numeric UID/GID,
 timestamps, inode/link information, device numbers and symlink targets are
@@ -128,10 +127,12 @@ component limits, not a total memory or connection limit across all exports.
 The archiver still materializes the names of a directory when it requests them
 all. Live NFS access is not a point-in-time snapshot.
 
-``--use-cwalk`` remains valid, but the OS-only cwalk implementation is not invoked
-for a direct source filesystem. The regular filesystem walker consumes NFS
-directory pages instead. With this flag, the redundant size-estimation scan is
-skipped; direct mode does not promise parallel cwalk discovery. Filesystem
+The pinned upstream cwalk revision ``0fb5717e371d`` supports pluggable
+filesystems and READDIRPLUS metadata. ``--use-cwalk`` uses bounded parallel
+directory lookahead through Vaultic's NFS adapter, sharing its connection pool
+and metadata cache. URLs are translated through a relative walker root rather
+than normalized as local paths. The redundant size-estimation scan is skipped.
+``--no-cwalk`` selects the generic NFS filesystem traversal. Filesystem
 snapshots, pathdiff, FSEvents and stdin modes cannot be combined with direct NFS.
 RPC timeouts/cancellation and source errors propagate without falling back to
 mounted reads for a selected direct NFS source. Source-file close issues no
@@ -215,9 +216,9 @@ well as the backup process.
 Parallel and selective crawling
 *******************************
 
-For local filesystem trees, traversal uses the upstream parallel cwalk engine
+For local filesystem trees and direct NFS, traversal uses the upstream parallel cwalk engine
 by default. ``--cwalk-concurrency N`` controls its worker count and defaults to
-32. Use ``--no-cwalk`` to restore the legacy traversal. Non-local filesystem
+32. Use ``--no-cwalk`` to restore the legacy traversal. Other non-local filesystem
 implementations use the standard scanner automatically.
 
 Directory listings are consumed incrementally instead of building a complete

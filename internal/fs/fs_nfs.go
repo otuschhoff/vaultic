@@ -34,6 +34,23 @@ type NFSOptions struct {
 	MountPort, NFSPort   int
 }
 
+func IsNFS(filesystem FS) bool {
+	switch filesystem := filesystem.(type) {
+	case *NFS:
+		return true
+	case interface{ UnwrapFS() FS }:
+		return IsNFS(filesystem.UnwrapFS())
+	case Track:
+		return IsNFS(filesystem.FS)
+	case *Track:
+		return IsNFS(filesystem.FS)
+	case *PrefixMap:
+		return IsNFS(filesystem.FS)
+	default:
+		return false
+	}
+}
+
 type NFS struct {
 	local
 	ctx                                                         context.Context

@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/otuschhoff/cwalk"
+	"github.com/otuschhoff/vaultic/internal/fs"
 )
 
 type directoryResult struct {
@@ -18,17 +19,22 @@ type directoryResult struct {
 }
 
 type DirectoryStream struct {
-	ctx      context.Context
-	cancel   context.CancelFunc
-	jobs     chan string
-	slots    chan struct{}
-	group    sync.WaitGroup
-	mutex    sync.Mutex
-	pending  map[string]*directoryResult
-	capacity int
+	filesystem fs.FS
+	ctx        context.Context
+	cancel     context.CancelFunc
+	jobs       chan string
+	slots      chan struct{}
+	group      sync.WaitGroup
+	mutex      sync.Mutex
+	pending    map[string]*directoryResult
+	capacity   int
 }
 
 func NewDirectoryStream(ctx context.Context, workers, capacity int) (*DirectoryStream, error) {
+	return NewDirectoryStreamWithFS(ctx, workers, capacity, fs.NewLocal())
+}
+
+func NewDirectoryStreamWithFS(ctx context.Context, workers, capacity int, filesystem fs.FS) (*DirectoryStream, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -36,7 +42,7 @@ func NewDirectoryStream(ctx context.Context, workers, capacity int) (*DirectoryS
 		return nil, fmt.Errorf("cwalk workers and lookahead capacity must be positive")
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	stream := &DirectoryStream{ctx: ctx, cancel: cancel, jobs: make(chan string, capacity),
+	stream := &DirectoryStream{filesystem: filesystem, ctx: ctx, cancel: cancel, jobs: make(chan string, capacity),
 		slots: make(chan struct{}, workers), pending: make(map[string]*directoryResult), capacity: capacity}
 	for worker := 0; worker < workers; worker++ {
 		stream.group.Go(func() {
@@ -77,7 +83,7 @@ func (stream *DirectoryStream) read(path string) ([]string, []string, error) {
 	}
 	var names, directories []string
 	var readErr error
-	walker := cwalk.NewWalker(path, 1, cwalk.Callbacks{OnReadDir: func(_ string, entries []os.DirEntry, err error) {
+	callbacks := cwalk.Callbacks{OnReadDir: func(_ string, entries []os.DirEntry, err error) {
 		readErr = err
 		if err != nil {
 			return
@@ -86,11 +92,17 @@ func (stream *DirectoryStream) read(path string) ([]string, []string, error) {
 		for index, entry := range entries {
 			names[index] = entry.Name()
 		}
-	}})
+	}}
+	var walker *cwalk.Walker
+	if fs.IsLocal(stream.filesystem) {
+		walker = cwalk.NewWalker(path, 1, callbacks)
+	} else {
+		walker = cwalk.NewWalkerWithFS(".", 1, callbacks, walkFilesystem{filesystem: stream.filesystem, root: path})
+	}
 	walker.SetLogger(discardLogger{})
 	walker.SetIgnoreFunc(func(_ string, relative string, info os.FileInfo) bool {
 		if info.IsDir() && len(directories) < stream.capacity {
-			directories = append(directories, filepath.Join(path, filepath.FromSlash(relative)))
+			directories = append(directories, stream.filesystem.Join(path, filepath.FromSlash(relative)))
 		}
 		return true
 	})
@@ -127,7 +139,7 @@ func (stream *DirectoryStream) Names(path string) ([]string, bool, error) {
 	stream.group.Add(1)
 	stream.mutex.Unlock()
 	defer stream.group.Done()
-	path, err := filepath.Abs(path)
+	path, err := stream.filesystem.Abs(path)
 	if err != nil {
 		return nil, false, err
 	}

@@ -22,6 +22,7 @@ import (
 	"github.com/willscott/go-nfs-client/nfs/xdr"
 
 	"github.com/otuschhoff/vaultic/internal/archiver"
+	"github.com/otuschhoff/vaultic/internal/crawl"
 	"github.com/otuschhoff/vaultic/internal/data"
 	sourcefs "github.com/otuschhoff/vaultic/internal/fs"
 	"github.com/otuschhoff/vaultic/internal/repository"
@@ -90,6 +91,16 @@ func TestDirectNFSSourceReadDirPlus(t *testing.T) {
 		t.Fatalf("repeated EOF=%d %v", count, err)
 	}
 	_ = file.Close()
+	stream, err := crawl.NewDirectoryStreamWithFS(ctx, 2, 4, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	walkNames, found, walkErr := stream.Names(root)
+	_ = stream.Close()
+	sort.Strings(walkNames)
+	if walkErr != nil || !found || !reflect.DeepEqual(walkNames, names) {
+		t.Fatalf("direct NFS cwalk: %v %t %v", walkNames, found, walkErr)
+	}
 	link, err := source.OpenFile(source.Join(root, "z-link"), sourcefs.O_NOFOLLOW, true)
 	if err != nil {
 		t.Fatal(err)

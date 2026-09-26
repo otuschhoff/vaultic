@@ -10,6 +10,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/debug"
 	"github.com/otuschhoff/vaultic/internal/errors"
 	"github.com/otuschhoff/vaultic/internal/filter"
+	"github.com/otuschhoff/vaultic/internal/fs"
 	"github.com/otuschhoff/vaultic/internal/global"
 	"github.com/otuschhoff/vaultic/internal/restorer"
 	"github.com/otuschhoff/vaultic/internal/telemetry"
@@ -38,7 +39,8 @@ To only restore a specific subfolder, you can use the "snapshotID:subfolder"
 syntax, where "subfolder" is a path within the snapshot tree as shown by
 "vaultic ls".
 
-POSIX ACLs are always restored by their numeric value, while file ownership can optionally be restored by name instead of numeric value.
+Local restores preserve POSIX ACLs by numeric value, while ownership can optionally be restored by name.
+Direct NFSv3 restores use numeric ownership and omit ACLs and extended attributes by default.
 
 EXIT STATUS
 ===========
@@ -70,18 +72,25 @@ type restoreOptions struct {
 	filter.IncludePatternOptions
 	Target string
 	data.SnapshotFilter
-	DryRun              bool
-	Sparse              bool
-	Verify              bool
-	Overwrite           restorer.OverwriteBehavior
-	Delete              bool
-	ExcludeXattrPattern []string
-	IncludeXattrPattern []string
-	OwnershipByName     bool
+	DryRun                  bool
+	Sparse                  bool
+	Verify                  bool
+	Overwrite               restorer.OverwriteBehavior
+	Delete                  bool
+	ExcludeXattrPattern     []string
+	IncludeXattrPattern     []string
+	OwnershipByName         bool
+	NFSDirect               bool
+	NFSAllowMissingMetadata bool
+	NFSConnections          int
 }
 
 func (options *restoreOptions) AddFlags(f *pflag.FlagSet) {
-	f.StringVarP(&options.Target, "target", "t", "", "directory to extract data to")
+	f.StringVarP(&options.Target, "target", "t", "", "directory or nfs://server:/path to extract data to")
+	f.BoolVar(&options.NFSDirect, "nfs-direct", false, "restore directly to a detected Linux NFSv3 target mount")
+	f.BoolVar(&options.NFSAllowMissingMetadata, "nfs-allow-missing-metadata", true,
+		"allow direct NFS without ACLs or extended attributes; set false to require them")
+	f.IntVar(&options.NFSConnections, "nfs-connections", 4, "use `n` direct NFS connections per export (1-16)")
 
 	options.ExcludePatternOptions.Add(f)
 	options.IncludePatternOptions.Add(f)
@@ -134,6 +143,16 @@ func runRestore(ctx context.Context, options restoreOptions, globalOptions globa
 	}
 
 	snapshotIDString := args[0]
+	var nfsDestination *fs.NFSRestore
+	if usesDirectNFSRestore(options) {
+		nfsDestination, err = fs.NewNFSRestore(ctx, options.Target, fs.NFSOptions{
+			UpgradeMounts: options.NFSDirect, AllowMissingMetadata: options.NFSAllowMissingMetadata, Connections: options.NFSConnections,
+		})
+		if err != nil {
+			return err
+		}
+		defer nfsDestination.Close()
+	}
 
 	debug.Log("restore %v to %v", snapshotIDString, options.Target)
 
@@ -194,7 +213,15 @@ func runRestore(ctx context.Context, options restoreOptions, globalOptions globa
 		printer.P("restoring %s to %s\n", res.Snapshot(), options.Target)
 	}
 
-	countRestoredFiles, err := res.RestoreTo(ctx, options.Target)
+	var countRestoredFiles uint64
+	if nfsDestination != nil {
+		if !globalOptions.JSON {
+			printer.P("direct NFS restore omits ACLs and extended attributes\n")
+		}
+		countRestoredFiles, err = res.RestoreToNFS(ctx, nfsDestination, options.Verify)
+	} else {
+		countRestoredFiles, err = res.RestoreTo(ctx, options.Target)
+	}
 	if err != nil {
 		return err
 	}
@@ -205,7 +232,7 @@ func runRestore(ctx context.Context, options restoreOptions, globalOptions globa
 		return errors.Fatalf("There were %d errors", totalErrors)
 	}
 
-	if options.Verify {
+	if options.Verify && nfsDestination == nil {
 		return verifyRestoredFiles(ctx, res, printer, options.Target, countRestoredFiles, totalErrors, globalOptions.JSON)
 	}
 
@@ -227,8 +254,33 @@ func validateRestoreOptions(options restoreOptions, args []string, hasExcludes, 
 	case options.Delete && filepath.Clean(options.Target) == "/" && !hasExcludes && !hasIncludes:
 		return errors.Fatal("'--target / --delete' must be combined with an include or exclude filter")
 	default:
+		return validateNFSRestoreOptions(options)
+	}
+}
+
+func usesDirectNFSRestore(options restoreOptions) bool {
+	return options.NFSDirect || fs.IsNFSSource(options.Target)
+}
+
+func validateNFSRestoreOptions(options restoreOptions) error {
+	if !usesDirectNFSRestore(options) {
 		return nil
 	}
+	if fs.IsNFSSource(options.Target) {
+		if _, err := fs.ParseNFSSource(options.Target); err != nil {
+			return err
+		}
+	}
+	if !options.NFSAllowMissingMetadata {
+		return errors.Fatal("direct NFS cannot preserve ACLs or xattrs; --nfs-allow-missing-metadata must be enabled")
+	}
+	if options.NFSConnections < 1 || options.NFSConnections > 16 {
+		return errors.Fatal("--nfs-connections must be between 1 and 16")
+	}
+	if options.Delete || options.Sparse || options.OwnershipByName {
+		return errors.Fatal("direct NFS restore does not support --delete, --sparse or --ownership-by-name")
+	}
+	return nil
 }
 
 func verifyRestoredFiles(

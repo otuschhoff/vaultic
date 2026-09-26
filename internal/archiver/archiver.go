@@ -1184,11 +1184,11 @@ func (arch *Archiver) saveSnapshotTree(ctx context.Context, tree *tree, snapshot
 }
 
 func (arch *Archiver) prepareCWalkManifest(ctx context.Context, targets []string) func() {
-	if arch.Options.CWalkConcurrency <= 0 || !fs.IsLocal(arch.FS) {
+	if arch.Options.CWalkConcurrency <= 0 || (!fs.IsLocal(arch.FS) && !fs.IsNFS(arch.FS)) {
 		return func() {}
 	}
-	if arch.Options.CWalkIncremental {
-		stream, err := crawl.NewDirectoryStream(ctx, arch.Options.CWalkConcurrency, min(64, arch.Options.CWalkConcurrency*2))
+	if arch.Options.CWalkIncremental || !fs.IsLocal(arch.FS) {
+		stream, err := crawl.NewDirectoryStreamWithFS(ctx, arch.Options.CWalkConcurrency, min(64, arch.Options.CWalkConcurrency*2), arch.FS)
 		if err != nil {
 			return func() {}
 		}

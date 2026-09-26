@@ -36,7 +36,7 @@ require (
 	github.com/minio/minio-go/v7 v7.3.0
 	github.com/moby/sys/mountinfo v0.7.2
 	github.com/ncw/swift/v2 v2.0.5
-	github.com/otuschhoff/cwalk v1.0.1
+	github.com/otuschhoff/cwalk v1.0.2-0.20260925221540-0fb5717e371d
 	github.com/otuschhoff/pathdiff v0.0.0-20260906012451-6c092b832e20
 	github.com/otuschhoff/rados-go v0.1.1-0.20260917080311-c8bb148a1379
 	github.com/peterbourgon/unixtransport v0.0.7
@@ -99,6 +99,7 @@ require (
 	github.com/cockroachdb/redact v1.1.8 // indirect
 	github.com/cockroachdb/tokenbucket v0.0.0-20250429170803-42689b6311bb // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.7 // indirect
+	github.com/cyphar/filepath-securejoin v0.2.5 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.39.0 // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.3.3 // indirect
 	github.com/felixge/fgprof v0.9.5 // indirect
@@ -159,4 +160,4 @@ require (
 
 replace github.com/willscott/go-nfs => github.com/otuschhoff/go-nfs v0.0.0-20260914094923-10c2fcac207a
 
-replace github.com/willscott/go-nfs-client => github.com/otuschhoff/go-nfs-client v0.0.0-20260926094517-532b38a76eda
+replace github.com/willscott/go-nfs-client => github.com/otuschhoff/go-nfs-client v0.0.0-20260926105642-647f2757219b

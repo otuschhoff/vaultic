@@ -133,6 +133,8 @@ github.com/cpuguy83/go-md2man/v2 v2.0.6/go.mod h1:oOW0eioCTA6cOiMLiUPZOpcVxMig6N
 github.com/cpuguy83/go-md2man/v2 v2.0.7 h1:zbFlGlXEAKlwXpmvle3d8Oe3YnkKIK4xSRTd3sHPnBo=
 github.com/cpuguy83/go-md2man/v2 v2.0.7/go.mod h1:oOW0eioCTA6cOiMLiUPZOpcVxMig6NIQQ7OS05n1F4g=
 github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=
+github.com/cyphar/filepath-securejoin v0.2.5 h1:6iR5tXJ/e6tJZzzdMc1km3Sa7RRIVBKAK32O2s7AYfo=
+github.com/cyphar/filepath-securejoin v0.2.5/go.mod h1:aPGpWjXOXUn2NCNjFvBE6aRxGGx79pTxQpKOJNYHHl4=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
@@ -257,12 +259,16 @@ github.com/otuschhoff/cwalk v0.0.0-20260815164352-9b009e22a463 h1:L2hm93v5hyuSmD
 github.com/otuschhoff/cwalk v0.0.0-20260815164352-9b009e22a463/go.mod h1:PdS6aqI3PoJ5DZmAQN41X0xHVbHUyK8WJMxF/95UvLU=
 github.com/otuschhoff/cwalk v1.0.1 h1:7j2lntlE0hPuLM3YndFXP069n3hVpjlifEdQbWwXc88=
 github.com/otuschhoff/cwalk v1.0.1/go.mod h1:PdS6aqI3PoJ5DZmAQN41X0xHVbHUyK8WJMxF/95UvLU=
+github.com/otuschhoff/cwalk v1.0.2-0.20260925221540-0fb5717e371d h1:Q0e3YGJQ2jOhE7MGDXsbFZ1yIOTLFu7U6yRzkkWzN+8=
+github.com/otuschhoff/cwalk v1.0.2-0.20260925221540-0fb5717e371d/go.mod h1:PdS6aqI3PoJ5DZmAQN41X0xHVbHUyK8WJMxF/95UvLU=
 github.com/otuschhoff/go-nfs v0.0.0-20260914094923-10c2fcac207a h1:K/ZI8oGHWhjN4n1s3FFw2vxh7Vkt9gAxBM3B0Bja5rs=
 github.com/otuschhoff/go-nfs v0.0.0-20260914094923-10c2fcac207a/go.mod h1:VhNccO67Oug787VNXcyx9JDI3ZoSpqoKMT/lWMhUIDg=
 github.com/otuschhoff/go-nfs-client v0.0.0-20260914094943-59cc678e915f h1:uM9C8q0fBrOA1zNoScf5cIp5DEjvbrdthajAq5nasU0=
 github.com/otuschhoff/go-nfs-client v0.0.0-20260914094943-59cc678e915f/go.mod h1:Tq++Lr/FgiS3X48q5FETemXiSLGuYMQT2sPjYNPJSwA=
 github.com/otuschhoff/go-nfs-client v0.0.0-20260926094517-532b38a76eda h1:kafXz1HEe0V6UVkTVHf1P1xHMdwaW2tzpSdiPHoifqw=
 github.com/otuschhoff/go-nfs-client v0.0.0-20260926094517-532b38a76eda/go.mod h1:EYS0tJsDD1SquKubQLIiNu2INlkdoG5hrUL6SnpXOes=
+github.com/otuschhoff/go-nfs-client v0.0.0-20260926105642-647f2757219b h1:w2OV20fcSeo5jTioiyB/IGCQ7ULRDT1is/JdgEwDjoA=
+github.com/otuschhoff/go-nfs-client v0.0.0-20260926105642-647f2757219b/go.mod h1:EYS0tJsDD1SquKubQLIiNu2INlkdoG5hrUL6SnpXOes=
 github.com/otuschhoff/gokrb5/v8 v8.5.3 h1:L3L81YmukI8Fjv2mXeF0pFXTvoBdVDsty9FQG6uC3nA=
 github.com/otuschhoff/gokrb5/v8 v8.5.3/go.mod h1:A4JXdxHouADmlVRW/WQoz68Woq/7Z6DI3TUzWZG+QPU=
 github.com/otuschhoff/pathdiff v0.0.0-20260906012451-6c092b832e20 h1:VGZBUVtZJmNiIKio1cG9opwpeWsSmoxX4OZOvWuKp4A=

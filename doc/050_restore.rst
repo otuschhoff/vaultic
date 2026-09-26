@@ -14,6 +14,58 @@
 Restoring from backup
 #####################
 
+Direct NFSv3 destinations
+========================
+
+Experimental direct restore uses the pure-Go NFSv3 client without a kernel mount:
+
+.. code-block:: console
+
+    $ vaultic -r /srv/vaultic-repo restore latest --target 'nfs://nas:/export/restore' --verify
+
+To use a detected Linux NFSv3 ``sec=sys`` target mount directly:
+
+.. code-block:: console
+
+    $ vaultic -r /srv/vaultic-repo restore latest --nfs-direct --target /mnt/nas/restore
+
+Explicit URLs use the same syntax, portmapper discovery, AUTH_SYS identity and
+trusted-network requirements as direct NFS backup. ``--nfs-direct`` requires the
+target to resolve to an NFSv3 mount; it never silently writes to local storage.
+Kerberos mounts are not downgraded. Export permissions and root squashing apply.
+
+Directories, regular files, symlinks, hardlinks, numeric UID/GID, permission bits
+and representable access/modification timestamps are restored. ACLs and xattrs
+are omitted by default; ``--nfs-allow-missing-metadata=false`` rejects direct NFS.
+Ownership and other supported metadata errors are not silently ignored. NFSv3
+cannot represent timestamps before 1970 or beyond its unsigned 32-bit seconds
+range. Device nodes and FIFOs are currently rejected; sockets are skipped as in
+local restore. ``--delete``, ``--sparse`` and ``--ownership-by-name`` are rejected.
+
+Include/exclude filters, snapshot subfolder selection, ``--dry-run`` and the
+normal overwrite policies are supported. Dry runs perform no destination writes.
+``--verify`` compares restored contents against repository blobs before publishing
+each file; with ``--overwrite=if-changed`` it also checks content skipped on matching
+size and mtime. Files skipped by ``never`` or ``if-newer`` are not verified.
+
+File contents are streamed one file at a time into guarded temporary siblings.
+Writes respect the negotiated WTMax, are capped at 1 MiB, and require FILE_SYNC
+acknowledgements. Files are published by rename after content and metadata succeed;
+``--overwrite=never`` uses LINK for atomic no-replace publication. Parent components
+are checked as directories and symlinks are not followed. Use canonical target paths
+and keep the destination exclusively owned for the duration of the restore.
+This is not an atomic whole-snapshot restore: an error can leave already restored
+files and directories. A lost RPC acknowledgement has an uncertain outcome and is
+never automatically retried. Cancellation or connection loss can leave unpublished
+``.vaultic-restore-*`` siblings; cleanup failures are reported.
+
+``--nfs-connections`` accepts 1 through 16 (default 4), but this first restore
+implementation uses one connection for ordered writes. It does not claim a
+throughput advantage over mounted NFS. Validation uses an isolated writable NFS
+fixture for content, metadata, verification, filtering, overwrite and symlink-parent
+checks, plus protocol-level durable-write and LINK tests. Live-server performance
+and full hardlink round trips are not established by these tests.
+
 Restoring from a snapshot
 =========================
 
