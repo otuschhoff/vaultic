@@ -66,6 +66,83 @@ are the files currently being read by vaultic.
 Be aware that the live status shows the processed files and not the transferred
 data. Transferred volume might be lower (due to deduplication) or higher.
 
+Direct NFSv3 sources
+********************
+
+Experimental direct NFS sources use the pure-Go client maintained at
+``github.com/otuschhoff/go-nfs-client``. No local NFS mount is needed for a URL:
+
+.. code-block:: console
+
+    $ vaultic -r /srv/vaultic-repo backup --use-cwalk \
+        --nfs-allow-missing-metadata 'nfs://nas:/export/source'
+
+Both ``nfs://nas:/export/source`` and ``nfs://nas/export/source`` are accepted.
+Use brackets for IPv6 addresses and percent-encode reserved path characters.
+Credentials, explicit ports, query strings, fragments and parent traversal are
+rejected. MOUNTv3 and NFSv3 TCP ports are discovered through the server's
+portmapper. URLs can also be supplied through verbatim/raw source lists; remote
+wildcard expansion is not provided.
+
+To upgrade detected Linux NFSv3 source mounts while retaining their existing
+logical paths, exclusions and snapshot paths:
+
+.. code-block:: console
+
+    $ vaultic -r /srv/vaultic-repo backup --use-cwalk --nfs-direct \
+        --nfs-allow-missing-metadata /mnt/nas/source
+
+Detection reads the process's mount namespace, uses the most specific mount,
+translates bind-mount roots, and respects nested mount boundaries. Non-NFS and
+NFSv4 mounts remain local. Only NFSv3 ``sec=sys`` mounts can be upgraded;
+Kerberos security is never silently downgraded. Use canonical source paths:
+intermediate symlink components are not resolved by direct handle traversal.
+Explicit URL sources are stored under a virtual ``nfs@server`` snapshot directory
+(with the server name escaped where necessary), followed by the remote path.
+Unexported ancestors of selected URL roots are synthetic directories, not server
+metadata. Symlink targets themselves are preserved without following them during
+backup.
+
+.. warning::
+
+    Direct mode does not preserve ACLs or extended attributes. It requires
+    ``--nfs-allow-missing-metadata`` to explicitly acknowledge that limitation.
+    Do not enable it where those attributes are needed for a faithful restore.
+    This initial client does not implement the separate NFSv3 ACL protocol.
+
+Regular-file contents, file types, permission/special bits, numeric UID/GID,
+timestamps, inode/link information, device numbers and symlink targets are
+captured. Linux mounted-root device IDs are retained, and different server-side
+filesystem IDs remain distinct for ``--one-file-system``. The process's effective
+UNIX UID/GID and supplementary groups are sent using AUTH_SYS. More than 16
+supplementary groups is rejected rather than truncated. Root uses a reserved
+source port where required; non-root users still need the server to allow their
+connection. Export permissions and root squashing continue to apply. NFS traffic
+is not encrypted and this mode cannot substitute for Kerberos security.
+
+Directory traversal uses paged READDIRPLUS and reuses its attributes and handles
+in a 4096-entry, one-second metadata cache. File reads refresh handle attributes
+before reading and use negotiated read sizes, capped at 1 MiB. The default is
+four connections per export; ``--nfs-connections`` accepts 1 through 16. These are
+component limits, not a total memory or connection limit across all exports.
+The archiver still materializes the names of a directory when it requests them
+all. Live NFS access is not a point-in-time snapshot.
+
+``--use-cwalk`` remains valid, but the OS-only cwalk implementation is not invoked
+for a direct source filesystem. The regular filesystem walker consumes NFS
+directory pages instead. With this flag, the redundant size-estimation scan is
+skipped; direct mode does not promise parallel cwalk discovery. Filesystem
+snapshots, pathdiff, FSEvents and stdin modes cannot be combined with direct NFS.
+RPC timeouts/cancellation and source errors propagate without falling back to
+mounted reads for a selected direct NFS source. Source-file close issues no
+write or COMMIT RPC. Verbose output reports NFS read/traversal counters.
+
+Validation includes native protocol tests, READDIRPLUS reuse without per-entry
+LOOKUP/GETATTR calls, and a full archive-content/ownership/symlink check. No
+production deployment or completed production backup is implied. Performance
+against a Linux NFS mount remains unmeasured; bypassing the kernel is not by itself
+evidence of a speedup.
+
 On-demand authoritative metadata
 ********************************
 

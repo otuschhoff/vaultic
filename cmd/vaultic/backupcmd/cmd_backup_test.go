@@ -258,6 +258,34 @@ func TestBackupCrawlFlags(t *testing.T) {
 	}
 }
 
+func TestDirectNFSSourceValidation(t *testing.T) {
+	targets := []string{"nfs://nas:/export/source"}
+	if err := validateNFSSources(backupOptions{}, targets); err == nil {
+		t.Fatal("direct NFS silently accepted missing ACL/xattr metadata")
+	}
+	options := backupOptions{NFSAllowMissingMetadata: true, NFSConnections: 4}
+	if err := validateNFSSources(options, targets); err != nil {
+		t.Fatal(err)
+	}
+	if filtered, err := filterExisting(targets, func(string, ...any) {}); err != nil || len(filtered) != 1 || filtered[0] != targets[0] {
+		t.Fatalf("URL was treated as a local path: %v %v", filtered, err)
+	}
+	options.UseFsSnapshot = true
+	if err := validateNFSSources(options, targets); err == nil {
+		t.Fatal("accepted local snapshot with direct NFS")
+	}
+	options.UseFsSnapshot = false
+	options.NFSConnections = 17
+	if err := validateNFSSources(options, targets); err == nil {
+		t.Fatal("accepted unbounded NFS connections")
+	}
+	options.NFSConnections = 4
+	options.NFSDirect = true
+	if err := validateNFSSources(options, []string{"/mnt/nfs/source"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestNoCWalkRestoresLegacyTraversal(t *testing.T) {
 	command := NewCommand(&global.Options{})
 	if err := command.Flags().Set("no-cwalk", "true"); err != nil {

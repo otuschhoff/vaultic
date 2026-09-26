@@ -9,6 +9,8 @@ import (
 	"net"
 	"os"
 	"reflect"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,11 +21,133 @@ import (
 	"github.com/willscott/go-nfs-client/nfs/rpc"
 	"github.com/willscott/go-nfs-client/nfs/xdr"
 
+	"github.com/otuschhoff/vaultic/internal/archiver"
 	"github.com/otuschhoff/vaultic/internal/data"
+	sourcefs "github.com/otuschhoff/vaultic/internal/fs"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	"github.com/otuschhoff/vaultic/internal/snapshotfs"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
+
+func TestDirectNFSSourceReadDirPlus(t *testing.T) {
+	filesystem, payload := testFilesystem(t, 4)
+	server, err := New(filesystem.fs, Config{EphemeralPorts: true, MaxReadSize: 64, DrainTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx) }()
+	defer func() { cancel(); <-done }()
+	addresses := waitReady(t, server)
+	host, mountPortText, _ := net.SplitHostPort(addresses.Mount)
+	_, nfsPortText, _ := net.SplitHostPort(addresses.NFS)
+	mountPort, _ := strconv.Atoi(mountPortText)
+	nfsPort, _ := strconv.Atoi(nfsPortText)
+	root := "nfs://" + host + ":/snapshot"
+	auth := rpc.NewAuthUnix("vaultic-source-test", 12, 34).Auth()
+	source, err := sourcefs.NewNFS(ctx, []string{root}, sourcefs.NFSOptions{
+		Auth: &auth, AllowMissingMetadata: true, Connections: 2, MountPort: mountPort, NFSPort: nfsPort,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	directory, err := source.OpenFile(root, sourcefs.O_DIRECTORY, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, err := directory.Readdirnames(-1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = directory.Close()
+	sort.Strings(names)
+	if !reflect.DeepEqual(names, []string{"a-file", "directory", "large-file", "pipe", "root-file", "z-link"}) {
+		t.Fatal(names)
+	}
+	before := source.Stats()
+	for _, name := range names {
+		if _, err := source.Lstat(source.Join(root, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after := source.Stats()
+	if before.ReadDirPlus == 0 || after.Lookups != before.Lookups || after.Getattrs != before.Getattrs ||
+		after.CacheHits-before.CacheHits != uint64(len(names)) {
+		t.Fatalf("READDIRPLUS metadata was not reused: before=%+v after=%+v", before, after)
+	}
+	file, err := source.OpenFile(source.Join(root, "a-file"), sourcefs.O_NOFOLLOW, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := io.ReadAll(file)
+	if err != nil || !bytes.Equal(content, payload) {
+		t.Fatalf("content=%q err=%v", content, err)
+	}
+	buffer := make([]byte, 1)
+	if count, err := file.Read(buffer); count != 0 || !errors.Is(err, io.EOF) {
+		t.Fatalf("repeated EOF=%d %v", count, err)
+	}
+	_ = file.Close()
+	link, err := source.OpenFile(source.Join(root, "z-link"), sourcefs.O_NOFOLLOW, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := link.ToNode(false, func(string, ...any) {})
+	if err != nil || node.Type != data.NodeTypeSymlink || node.LinkTarget != "a-file" {
+		t.Fatalf("link=%+v err=%v", node, err)
+	}
+	_ = link.Close()
+	if _, err := source.OpenFile(source.Join(root, "pipe"), sourcefs.O_NOFOLLOW, false); err == nil {
+		t.Fatal("read a special file")
+	}
+	destination := repository.TestRepository(t)
+	archive := archiver.New(destination, source, archiver.Options{CWalkConcurrency: 4, CWalkIncremental: true})
+	snapshot, _, _, err := archive.Snapshot(ctx, []string{source.Join(root, "a-file"), source.Join(root, "z-link")}, archiver.SnapshotOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadNodes := func(id vaultic.ID) []*data.Node {
+		iterator, err := data.LoadTree(ctx, destination, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var nodes []*data.Node
+		for result := range iterator {
+			if result.Error != nil {
+				t.Fatal(result.Error)
+			}
+			nodes = append(nodes, result.Node)
+		}
+		return nodes
+	}
+	nodes := loadNodes(*snapshot.Tree)
+	for _, component := range []string{source.VolumeName(root), "snapshot"} {
+		if len(nodes) != 1 || nodes[0].Name != component || nodes[0].Subtree == nil {
+			t.Fatalf("NFS snapshot namespace: %+v", nodes)
+		}
+		nodes = loadNodes(*nodes[0].Subtree)
+	}
+	if len(nodes) != 2 || nodes[0].Name != "a-file" || nodes[1].LinkTarget != "a-file" {
+		t.Fatalf("NFS snapshot entries: %+v", nodes)
+	}
+	var restored []byte
+	for _, id := range nodes[0].Content {
+		blob, err := destination.LoadBlob(ctx, vaultic.BlobHandle{Type: vaultic.DataBlob, ID: id}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		restored = append(restored, blob...)
+	}
+	if !bytes.Equal(restored, payload) || nodes[0].UID != 12 || nodes[0].GID != 34 {
+		t.Fatal("NFS archive content or ownership mismatch")
+	}
+	cancel()
+	if _, err := source.Lstat(root); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled lookup=%v", err)
+	}
+}
 
 func TestFilesystemReadOnlyContract(t *testing.T) {
 	fs, payload := testFilesystem(t, 4)

@@ -245,6 +245,8 @@ github.com/minio/md5-simd v1.1.2 h1:Gdi1DZK69+ZVMoNHRXJyNcxrMA4dSxoYHZSQbirFg34=
 github.com/minio/md5-simd v1.1.2/go.mod h1:MzdKDxYpY2BT9XQFocsiZf/NKVtR7nkE4RoEpN+20RM=
 github.com/minio/minio-go/v7 v7.3.0 h1:HM4pFCSQq/TK+j0/zmorSh5ddh81iDgRgU0BG0Vz/YU=
 github.com/minio/minio-go/v7 v7.3.0/go.mod h1:KUPWdecEO1LWyUz+sTGXAuf2jZHrPh5fCsRH86QbPfk=
+github.com/moby/sys/mountinfo v0.7.2 h1:1shs6aH5s4o5H2zQLn796ADW1wMrIwHsyJ2v9KouLrg=
+github.com/moby/sys/mountinfo v0.7.2/go.mod h1:1YOa8w8Ih7uW0wALDUgT1dTTSBrZ+HiBLGws92L2RU4=
 github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 h1:C3w9PqII01/Oq1c1nUAm88MOHcQC9l5mIlSMApZMrHA=
 github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822/go.mod h1:+n7T8mK8HuQTcFwEeznm/DIxMOiR9yIdICNftLE1DvQ=
 github.com/ncw/swift/v2 v2.0.5 h1:9o5Gsd7bInAFEqsGPcaUdsboMbqf8lnNtxqWKFT9iz8=
@@ -259,6 +261,8 @@ github.com/otuschhoff/go-nfs v0.0.0-20260914094923-10c2fcac207a h1:K/ZI8oGHWhjN4
 github.com/otuschhoff/go-nfs v0.0.0-20260914094923-10c2fcac207a/go.mod h1:VhNccO67Oug787VNXcyx9JDI3ZoSpqoKMT/lWMhUIDg=
 github.com/otuschhoff/go-nfs-client v0.0.0-20260914094943-59cc678e915f h1:uM9C8q0fBrOA1zNoScf5cIp5DEjvbrdthajAq5nasU0=
 github.com/otuschhoff/go-nfs-client v0.0.0-20260914094943-59cc678e915f/go.mod h1:Tq++Lr/FgiS3X48q5FETemXiSLGuYMQT2sPjYNPJSwA=
+github.com/otuschhoff/go-nfs-client v0.0.0-20260926094517-532b38a76eda h1:kafXz1HEe0V6UVkTVHf1P1xHMdwaW2tzpSdiPHoifqw=
+github.com/otuschhoff/go-nfs-client v0.0.0-20260926094517-532b38a76eda/go.mod h1:EYS0tJsDD1SquKubQLIiNu2INlkdoG5hrUL6SnpXOes=
 github.com/otuschhoff/gokrb5/v8 v8.5.3 h1:L3L81YmukI8Fjv2mXeF0pFXTvoBdVDsty9FQG6uC3nA=
 github.com/otuschhoff/gokrb5/v8 v8.5.3/go.mod h1:A4JXdxHouADmlVRW/WQoz68Woq/7Z6DI3TUzWZG+QPU=
 github.com/otuschhoff/pathdiff v0.0.0-20260906012451-6c092b832e20 h1:VGZBUVtZJmNiIKio1cG9opwpeWsSmoxX4OZOvWuKp4A=

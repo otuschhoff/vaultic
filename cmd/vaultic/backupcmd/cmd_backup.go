@@ -108,6 +108,9 @@ type backupOptions struct {
 	UseCWalk                  bool
 	NoCWalk                   bool
 	CWalkConcurrency          int
+	NFSDirect                 bool
+	NFSAllowMissingMetadata   bool
+	NFSConnections            int
 	MetadataOnDemand          bool
 	MetadataScratch           string
 	MetadataCacheMiB          int
@@ -252,6 +255,10 @@ func (options *backupOptions) addTraversalFlags(f *pflag.FlagSet) {
 	f.BoolVar(&options.UseCWalk, "use-cwalk", true, "use parallel cwalk traversal for the backup scanner")
 	f.BoolVar(&options.NoCWalk, "no-cwalk", false, "use the legacy traversal instead of cwalk")
 	f.IntVar(&options.CWalkConcurrency, "cwalk-concurrency", 32, "run `n` concurrent cwalk workers")
+	f.BoolVar(&options.NFSDirect, "nfs-direct", false, "upgrade detected Linux NFSv3 source mounts to direct read-only NFS access")
+	f.BoolVar(&options.NFSAllowMissingMetadata, "nfs-allow-missing-metadata", false,
+		"acknowledge that direct NFS does not preserve ACLs or extended attributes")
+	f.IntVar(&options.NFSConnections, "nfs-connections", 4, "use `n` direct NFS connections per export (1-16)")
 	f.BoolVar(&options.MetadataOnDemand, "metadata-on-demand", false, "use bounded point lookups for authoritative backup metadata")
 	f.StringVar(&options.MetadataScratch, "metadata-scratch", "", "encrypted on-demand metadata scratch `directory`")
 	f.IntVar(&options.MetadataCacheMiB, "metadata-cache-mib", 64, "accounted on-demand lookup cache budget in `MiB` (not a process memory limit)")
@@ -406,6 +413,13 @@ var ErrNoSourceData = errors.Fatal("all source directories/files do not exist")
 // ErrNoSourceData if none remain, or ErrInvalidSourceData if some were skipped.
 func filterExisting(items []string, warnf func(msg string, args ...any)) (result []string, err error) {
 	for _, item := range items {
+		if fs.IsNFSSource(item) {
+			if _, err := fs.ParseNFSSource(item); err != nil {
+				return nil, err
+			}
+			result = append(result, item)
+			continue
+		}
 		_, err := fs.Lstat(item)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
@@ -784,7 +798,45 @@ func collectTargets(options backupOptions, args []string, warnf func(msg string,
 		return nil, errors.Fatal("nothing to backup, please specify source files/dirs")
 	}
 
+	if options.NFSDirect {
+		return targets, nil
+	}
 	return filterExisting(targets, warnf)
+}
+
+func usesDirectNFS(options backupOptions, targets []string) bool {
+	if options.NFSDirect {
+		return true
+	}
+	for _, target := range targets {
+		if fs.IsNFSSource(target) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateNFSSources(options backupOptions, targets []string) error {
+	if !usesDirectNFS(options, targets) {
+		return nil
+	}
+	if !options.NFSAllowMissingMetadata {
+		return fmt.Errorf("direct NFS requires --nfs-allow-missing-metadata; ACLs and xattrs are not preserved")
+	}
+	if options.NFSConnections < 1 || options.NFSConnections > 16 {
+		return fmt.Errorf("--nfs-connections must be between 1 and 16")
+	}
+	if options.UseFsSnapshot || options.APFSSnapshot || options.UsePathdiff || options.UseFSEvents || options.Stdin || options.StdinCommand {
+		return fmt.Errorf("direct NFS cannot be combined with filesystem snapshots, pathdiff, FSEvents or stdin")
+	}
+	for _, target := range targets {
+		if fs.IsNFSSource(target) {
+			if _, err := fs.ParseNFSSource(target); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // parent returns the ID of the parent snapshot. If there is none, nil is

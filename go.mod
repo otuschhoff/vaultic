@@ -34,6 +34,7 @@ require (
 	github.com/itchyny/gojq v0.12.19
 	github.com/klauspost/compress v1.20.0
 	github.com/minio/minio-go/v7 v7.3.0
+	github.com/moby/sys/mountinfo v0.7.2
 	github.com/ncw/swift/v2 v2.0.5
 	github.com/otuschhoff/cwalk v1.0.1
 	github.com/otuschhoff/pathdiff v0.0.0-20260906012451-6c092b832e20
@@ -158,4 +159,4 @@ require (
 
 replace github.com/willscott/go-nfs => github.com/otuschhoff/go-nfs v0.0.0-20260914094923-10c2fcac207a
 
-replace github.com/willscott/go-nfs-client => github.com/otuschhoff/go-nfs-client v0.0.0-20260914094943-59cc678e915f
+replace github.com/willscott/go-nfs-client => github.com/otuschhoff/go-nfs-client v0.0.0-20260926094517-532b38a76eda

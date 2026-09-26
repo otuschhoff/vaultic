@@ -260,6 +260,9 @@ func prepareBackupTargets(run *backupRun) error {
 		run.success = false
 	}
 	run.targets = targets
+	if err := validateNFSSources(run.options, targets); err != nil {
+		return err
+	}
 	run.timeStamp = time.Now()
 	run.start = run.timeStamp
 	if run.options.TimeStamp != "" {
@@ -411,8 +414,34 @@ func openBackupFilesystem(run *backupRun) (resultErr error) {
 	if run.options.Stdin || run.options.StdinCommand {
 		return openBackupStdin(run)
 	}
+	if usesDirectNFS(run.options, run.targets) {
+		if err := validateNFSSources(run.options, run.targets); err != nil {
+			return err
+		}
+		direct, err := fs.NewNFS(run.ctx, run.targets, fs.NFSOptions{UpgradeMounts: run.options.NFSDirect,
+			AllowMissingMetadata: run.options.NFSAllowMissingMetadata, Connections: run.options.NFSConnections})
+		if err != nil {
+			return err
+		}
+		run.targetFS = direct
+		run.closeSource = func() {
+			_ = direct.Close()
+			stats := direct.Stats()
+			run.printer.V("direct NFS: %d READDIRPLUS, %d LOOKUP, %d GETATTR, %d READ calls, %d bytes, %d metadata cache hits\n",
+				stats.ReadDirPlus, stats.Lookups, stats.Getattrs, stats.Reads, stats.ReadBytes, stats.CacheHits)
+		}
+		for _, target := range run.targets {
+			if _, err := direct.Lstat(target); err != nil {
+				return fmt.Errorf("direct NFS source %q: %w", target, err)
+			}
+		}
+		run.printer.V("direct NFS uses READDIRPLUS traversal; ACLs and extended attributes are not captured\n")
+	}
 	if run.options.FSTestHook != nil {
 		run.targetFS = run.options.FSTestHook(run.targetFS)
+		return nil
+	}
+	if usesDirectNFS(run.options, run.targets) {
 		return nil
 	}
 	return configureMacOSSource(run)
@@ -869,7 +898,7 @@ func configureBackupSelection(run *backupRun) (archiver.SelectByNameFunc, archiv
 }
 
 func configureBackupScanner(ctx context.Context, run *backupRun, byName archiver.SelectByNameFunc, selectItem archiver.SelectFunc) {
-	if run.options.NoScan || run.pathdiffPlan.Selective || run.options.UseCWalk && fs.IsLocal(run.targetFS) {
+	if run.options.NoScan || run.pathdiffPlan.Selective || run.options.UseCWalk && (fs.IsLocal(run.targetFS) || usesDirectNFS(run.options, run.targets)) {
 		return
 	}
 	scanner := archiver.NewScanner(run.targetFS)
