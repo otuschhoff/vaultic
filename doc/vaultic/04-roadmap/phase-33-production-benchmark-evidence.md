@@ -1,5 +1,76 @@
 # Phase 33 Production Benchmark Evidence
 
+## Atomic publication scalability gate, isolated R37 (2026-09-26)
+
+**Do not promote the R36 prototype to normal backup configuration.** Its extra
+counter conflicts outweigh the saved durability round trip for distinct content
+under concurrent publication. No runtime code or defaults changed in R37; the
+prototype remains opt-in and disabled in the backup command.
+
+The existing fixture now supports bounded inode/content/stream counts and validates
+complete manifest-backed content plus every content reference count. Four streams
+own independent reconcilers and maps, each retaining four-worker groups, for at
+most sixteen in-flight publications. They share one schema store/daemon, so this
+models publisher contention, not four independent full backup processes.
+
+Each profile used three sequential unprofiled repetitions with the unchanged
+12f686c29 daemon, fresh disposable HDD-NFS databases, explicit per-file path
+bindings, and the normal 100ms WAL flush interval. No other builds/tests ran during
+measurement. Each profile command had a 600-second cap and 45-second termination
+grace; both completed normally. The profiles were 128 inodes with one content ID
+each and 64 inodes with 129 IDs each (above the 128-ID inline threshold). Distinct
+content uses unique IDs per inode; shared content uses the same list and canonical
+manifest. Compare modes within each profile, not absolute times between profiles.
+
+| Profile / content / mode | Mean seconds | Daemon CPU seconds | RSS end MiB | Commit attempts / failures | WAL PUT attempts |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| One ID / distinct / grouped | 1.593786 | 0.540000 | 29.91 | 208.00 / 48.00 | 32.00 |
+| One ID / distinct / atomic | 1.811381 | 1.926667 | 32.91 | 870.33 / 742.33 | 36.00 |
+| One ID / shared / grouped | 2.251795 | 1.570000 | 30.96 | 728.33 / 568.33 | 44.67 |
+| One ID / shared / atomic | 1.704827 | 1.850000 | 32.12 | 845.33 / 717.33 | 34.00 |
+| 129 IDs / distinct / grouped | 1.440545 | 3.126667 | 57.15 | 101.00 / 21.00 | 19.33 |
+| 129 IDs / distinct / atomic | 6.512823 | 16.346667 | 50.93 | 471.67 / 407.67 | 108.67 |
+| 129 IDs / shared / grouped | 7.385534 | 19.150000 | 52.89 | 539.67 / 459.67 | 120.67 |
+| 129 IDs / shared / atomic | 6.478079 | 15.816667 | 52.35 | 449.33 / 385.33 | 107.33 |
+
+All table values are three-run means, including fractional attempt counts. Runtime
+ratios (atomic/grouped) were 1.137 and 4.521 for distinct one-ID/manifest-backed
+content, with daemon CPU ratios 3.568 and 5.228. Shared-content runtime ratios were
+0.757 and 0.877; daemon CPU ratios were 1.178 and 0.826. The shared-content benefit
+does not justify accepting the distinct-content regressions. Aggregate successful
+commits still fell from 160 to 128 (one-ID profile) and 80 to 64 (manifest profile),
+but fewer successful commits did not imply less work or lower runtime.
+
+CPU figures are daemon process user+system deltas spanning publication, including
+background daemon work and measurement-call overhead. CPU/memory availability was
+verified for all 24 records. RSS is sampled once at phase end: it is not peak RSS,
+service/cgroup memory, or evidence of a peak-memory improvement. CLI CPU/RSS and
+sustained large-repository behavior remain unmeasured. WAL PUTs are instrumented
+attempts, not a count of distinct physical objects. Summed per-stream/group and
+worker durations overlap and must not be added to elapsed time.
+
+All measured cases passed publication accounting, full ordered content assembly,
+inode/manifest reference counts, path bindings, unchanged reuse with no extra
+allocation/publication, zero active transactions/intents, graceful close/reopen,
+current pointers, immutable records and the next revision. A two-stream 129-ID
+fixture passed under the race detector, followed by the full reconciliation race
+suite. New-code lint is clean. The first small manifest fixture used an inline-only
+reference expectation; it was corrected to include canonical manifest references
+and its failed runs were excluded. The planner and production code were unchanged.
+
+Next candidate: amortize allocation and publication across a bounded group without
+making each independent inode replan against the global counter. Group atomicity,
+read-your-writes reference accounting, failure ordering and revision/fence safety
+must be proven before accepting such a design. No group-atomic implementation,
+heuristic threshold, concurrency increase or durability relaxation is included here.
+
+Artifacts: `/volume2/NASDA2/rustic/db.test/atomic-scaling-20260926-r37-mJnUej`
+contains the exact source diff, executable, daemon/test hashes, `inline.log`,
+`manifest.log`, and validated `analysis.json`. Production remains MainPID0,
+inactive/dead and unrepaired with unchanged daemon/unit hashes. No deployment,
+service restart, live repair, actual backup or push was performed. Any later actual
+backup comparison must explicitly use `--use-cwalk` under the existing time limits.
+
 ## Atomic allocation/publication prototype, isolated R36 (2026-09-26)
 
 Following R35's roughly 49% allocation share, an opt-in prototype reserves one

@@ -109,10 +109,27 @@ after an acknowledged atomic publication. Failed or uncertain calls therefore
 cannot be used to infer an exact durable revision count. Group size and joined
 wall-time metrics retain their existing meaning.
 
-Isolated R36 measurements halve publication-stage runtime but increase conflict
-attempts for distinct content. This is not an end-to-end backup claim or a default
-rollout decision. Larger workload/memory/CPU validation and complete backup/restore
-checks remain gates before enabling this in normal backup configuration.
+R36's small single-stream measurements halved publication-stage runtime, but R37
+rejects general rollout: four independent streams made distinct one-ID files
+13.65% slower and distinct 129-ID manifest-backed files 4.52x slower, with 3.57x
+and 5.23x daemon CPU respectively. Shared-content cases can still improve. The
+prototype remains default-off and is retained only for controlled comparisons;
+the standalone counter in every atomic publication is a contention bottleneck.
+Bounded group-level allocation/publication is the next candidate to investigate,
+not an implemented or accepted solution. Complete backup/restore, sustained load,
+client CPU and peak-memory acceptance are still outstanding.
+
+The native attribution fixture accepts bounded test-only environment variables:
+`VAULTICDB_TEST_PUBLICATION_INODES` (default 32, maximum 1024),
+`VAULTICDB_TEST_PUBLICATION_CONTENT_IDS` (default 1, maximum 1024), and
+`VAULTICDB_TEST_PUBLICATION_STREAMS` (default 1, maximum 4). The inode count must
+be divisible by four times the stream count. Streams own independent reconcilers
+and publication maps, each retaining four-worker groups; they share one daemon
+and schema store, not separate backup CLI processes. Full content reconstruction,
+all content reference counts, manifest references, path bindings, unchanged reuse,
+cleanup and reopen are checked outside the measured publication phase. Group
+durations summed across streams overlap and are not elapsed time. Daemon CPU is
+a before/after process-counter delta; RSS is an end sample, not a peak.
 
 **Implementation steps:**
 
