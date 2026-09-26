@@ -787,6 +787,24 @@ func TestPublicationMetricsEmptyPartialAndScalarGroups(t *testing.T) {
 	}
 }
 
+func TestAtomicPublicationRequiresStoreSupport(t *testing.T) {
+	store := &blockAllocationStore{fakeStore: newFakeStore()}
+	reconciler := &Reconciler{
+		ctx: context.Background(), filesystem: testFilesystem(), store: store, options: Options{AtomicInodePublication: true},
+	}
+	published := make(map[string]publishedItem)
+	reconciler.publishInodes(publicationTestBatch(0, publicationConcurrency), published)
+	if len(published) != 0 || len(reconciler.errors) != publicationConcurrency || store.next != 0 || len(store.requests) != 0 {
+		t.Fatalf("unsupported atomic publication: published=%d errors=%v next=%d requests=%v",
+			len(published), reconciler.errors, store.next, store.requests)
+	}
+	for _, err := range reconciler.errors {
+		if !strings.Contains(err.Error(), "does not support atomic inode publication") {
+			t.Fatalf("unsupported error=%v", err)
+		}
+	}
+}
+
 func TestPublicationRevisionBlockFailureAndCancellation(t *testing.T) {
 	for _, canceled := range []bool{false, true} {
 		t.Run(fmt.Sprintf("canceled=%t", canceled), func(t *testing.T) {
@@ -1254,8 +1272,12 @@ func TestDefaultWorkerCountAppliesBackpressure(t *testing.T) {
 
 func TestDaemonBackedPublicationAttribution(t *testing.T) {
 	for _, shared := range []bool{false, true} {
-		for _, groupSize := range []int{1, publicationConcurrency} {
-			t.Run(fmt.Sprintf("shared=%t/group=%d", shared, groupSize), func(t *testing.T) {
+		for _, mode := range []string{"scalar", "grouped", "atomic"} {
+			groupSize := publicationConcurrency
+			if mode == "scalar" {
+				groupSize = 1
+			}
+			t.Run(fmt.Sprintf("shared=%t/mode=%s", shared, mode), func(t *testing.T) {
 				ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 				defer cancel()
 				dataDirectory := t.TempDir()
@@ -1282,13 +1304,19 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 				}
 				defer client.Close(context.Background())
 				store := daemon.NewSchemaStore(client)
-				reconciler := &Reconciler{ctx: ctx, filesystem: testFilesystem(), store: store}
+				reconciler := &Reconciler{
+					ctx: ctx, filesystem: testFilesystem(), store: store,
+					options: Options{AtomicInodePublication: mode == "atomic"},
+				}
 				before, err := client.WriterStatus(ctx)
 				if err != nil || before.EngineFlushIntervalMS != 100 {
 					t.Fatalf("initial writer status=%+v err=%v", before, err)
 				}
 				const count = 32
 				batch := publicationTestBatch(0, count)
+				for _, item := range batch {
+					reconciler.options.PathIndexPaths = append(reconciler.options.PathIndexPaths, item.snapshotPath)
+				}
 				if !shared {
 					for index := range batch {
 						batch[index].node.Content = []vaultic.ID{testVaulticID(byte(index + 1))}
@@ -1301,7 +1329,11 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 				}
 				elapsed := time.Since(started)
 				metrics := reconciler.Metrics()
-				if len(reconciler.errors) != 0 || len(published) != count || metrics.RevisionAllocationCalls != uint64(count/groupSize) ||
+				allocationCalls := uint64(count / groupSize)
+				if mode == "atomic" {
+					allocationCalls = 0
+				}
+				if len(reconciler.errors) != 0 || len(published) != count || metrics.RevisionAllocationCalls != allocationCalls ||
 					metrics.RevisionsReserved != count || metrics.InodeRevisionsAssigned != count || metrics.InodePublicationCalls != count ||
 					metrics.InodePublicationFailures != 0 || metrics.RevisionAllocationFailures != 0 ||
 					metrics.PublicationGroups[groupSize-1] != uint64(count/groupSize) {
@@ -1313,7 +1345,7 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 				}
 				attempts := after.Attribution.CommitRequest.Attempts - before.Attribution.CommitRequest.Attempts
 				failures := after.Attribution.CommitRequest.Failures - before.Attribution.CommitRequest.Failures
-				if attempts-failures != uint64(count+count/groupSize) {
+				if attempts-failures != count+allocationCalls {
 					t.Fatalf("commit accounting: attempts=%d failures=%d", attempts, failures)
 				}
 				t.Logf("inodes=%d seconds=%.6f groups=%v allocation_calls=%d allocation_ns=%d publication_calls=%d publication_ns=%d "+
@@ -1347,6 +1379,16 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 					if err != nil || !bytes.Equal(pointer.RecordKey, published[item.sourcePath].key) {
 						t.Fatalf("reopened pointer=%+v err=%v", pointer, err)
 					}
+					pathKey := schema.PathVersionKey(0, strings.TrimPrefix(item.snapshotPath, "/"), pointer.Revision)
+					pathValue, pathFound, pathErr := store.Get(ctx, pathKey)
+					if pathErr != nil || !pathFound {
+						t.Fatalf("reopened path found=%t err=%v", pathFound, pathErr)
+					}
+					pathRecord, pathErr := schema.UnmarshalPathVersionRecord(pathValue)
+					if pathErr != nil || pathRecord.State != schema.PathBound || pathRecord.Revision != pointer.Revision ||
+						pathRecord.Inode != item.identity.inode {
+						t.Fatalf("reopened path=%+v err=%v", pathRecord, pathErr)
+					}
 					value, found, err = store.Get(ctx, pointer.RecordKey)
 					if err != nil || !found {
 						t.Fatalf("reopened revision: found=%t err=%v", found, err)
@@ -1354,6 +1396,19 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 					record, err := schema.UnmarshalInodeRevision(value)
 					if err != nil || len(record.ContentIDs) != 1 || record.ContentIDs[0] != schema.ID(item.node.Content[0]) {
 						t.Fatalf("reopened content=%+v err=%v", record, err)
+					}
+					value, found, err = store.Get(ctx, schema.ReferenceCountKey(record.ContentIDs[0]))
+					if err != nil || !found {
+						t.Fatalf("reopened reference count: found=%t err=%v", found, err)
+					}
+					references, err := schema.UnmarshalReferenceCountRecord(value)
+					wantReferences := uint64(1)
+					if shared {
+						wantReferences = count
+					}
+					if err != nil || references.TotalReferences != wantReferences || references.DistinctInodes != wantReferences ||
+						references.DistinctRevisions != wantReferences {
+						t.Fatalf("reopened references=%+v want=%d err=%v", references, wantReferences, err)
 					}
 				}
 				if next, err := store.AllocateRevision(ctx); err != nil || next != count+1 {

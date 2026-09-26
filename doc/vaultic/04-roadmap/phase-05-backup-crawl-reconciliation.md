@@ -82,6 +82,38 @@ as allocation/publication calls. Concurrent worker durations overlap: do not add
 them to group wall time or equate them with daemon-only durable-wait time.
 These counters are diagnostic and do not change durability or concurrency.
 
+### Experimental Atomic Allocation
+
+`Options.AtomicInodePublication` is an internal, default-false prototype switch.
+No backup CLI flag enables it, and normal backup configuration still uses the
+group-scoped reservation path. A supporting store implements
+`PublishAllocatedReconciledRevision(ctx, build)`: the counter read/update,
+metadata revision, current pointer, references, path bindings and debt resolution
+share one serializable transaction and one normal durable commit. Directory and
+synthetic-root publication are unchanged. Verified reuse still does no allocation.
+Unsupported stores fail closed when the prototype is explicitly selected.
+
+The builder receives the candidate revision and must construct the same logical
+operation without external side effects. It may run again with a new revision
+after a serialization conflict. All revision-bearing keys and values must be
+rebuilt; callers must not publish or retain the losing candidate as committed.
+The existing bounded retry policy applies only to `Aborted` conflicts. Other
+errors, including uncertain commit outcomes, are returned without a fresh
+allocation retry. An error does not prove that nothing committed: a lost durable
+acknowledgement may leave the complete publication and advanced counter durable.
+The returned revision is nonzero only after an acknowledged durable commit.
+
+In prototype mode, allocation is included in `inode_publication_ns` and no
+standalone allocation call is recorded. Reserved/assigned counters advance only
+after an acknowledged atomic publication. Failed or uncertain calls therefore
+cannot be used to infer an exact durable revision count. Group size and joined
+wall-time metrics retain their existing meaning.
+
+Isolated R36 measurements halve publication-stage runtime but increase conflict
+attempts for distinct content. This is not an end-to-end backup claim or a default
+rollout decision. Larger workload/memory/CPU validation and complete backup/restore
+checks remain gates before enabling this in normal backup configuration.
+
 **Implementation steps:**
 
 1. Start the bounded scanner pool, default 128 workers and a 50,000-item queue.

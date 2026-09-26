@@ -67,6 +67,90 @@ func (store *SchemaStore) publishReconciledRevisionOnce(ctx context.Context, rec
 	return nil
 }
 
+func (store *SchemaStore) PublishAllocatedReconciledRevision(
+	ctx context.Context,
+	build func(uint64) (ReconciledRevision, error),
+) (uint64, error) {
+	if build == nil {
+		return 0, fmt.Errorf("allocated publication requires a builder")
+	}
+	backoff := 100 * time.Microsecond
+	for range revisionAllocationAttempts {
+		revision, err := store.publishAllocatedReconciledRevisionOnce(ctx, build)
+		if status.Code(err) != codes.Aborted {
+			return revision, err
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return 0, ctx.Err()
+		case <-timer.C:
+		}
+		backoff = min(backoff*2, 25*time.Millisecond)
+	}
+	return 0, fmt.Errorf("allocate and publish reconciled revision: transaction conflict retry limit exceeded")
+}
+
+func (store *SchemaStore) publishAllocatedReconciledRevisionOnce(
+	ctx context.Context,
+	build func(uint64) (ReconciledRevision, error),
+) (uint64, error) {
+	transaction, err := store.client.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer rollbackTransaction(ctx, transaction)
+	key := schema.NextRevisionKey()
+	encoded, found, err := transaction.Get(ctx, key)
+	if err != nil {
+		return 0, err
+	}
+	revision := uint64(1)
+	if found {
+		revision, err = schema.UnmarshalNextRevision(encoded)
+		if err != nil {
+			return 0, err
+		}
+	}
+	if revision == math.MaxUint64 {
+		return 0, fmt.Errorf("repository revision sequence exhausted")
+	}
+	reconciled, err := build(revision)
+	if err != nil {
+		return 0, err
+	}
+	if reconciled.Revision != revision {
+		return 0, fmt.Errorf("publication does not use allocated revision")
+	}
+	input, err := prepareReconciledRevision(reconciled)
+	if err != nil {
+		return 0, err
+	}
+	plan, noop, err := store.planReconciledRevision(ctx, transaction, input)
+	if err != nil {
+		return 0, err
+	}
+	if noop {
+		return 0, fmt.Errorf("allocated revision already published")
+	}
+	encodedNext, err := schema.MarshalNextRevision(revision + 1)
+	if err != nil {
+		return 0, err
+	}
+	if _, exists := plan.puts[string(key)]; exists {
+		return 0, fmt.Errorf("publication modifies revision allocation counter")
+	}
+	plan.puts[string(key)] = Mutation{Key: key, Value: encodedNext}
+	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), sortedReconciledMutations(plan), nil); err != nil {
+		return 0, err
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return revision, nil
+}
+
 func (store *SchemaStore) planReconciledRevision(
 	ctx context.Context,
 	transaction *Transaction,

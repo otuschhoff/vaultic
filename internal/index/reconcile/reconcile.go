@@ -29,11 +29,12 @@ const (
 )
 
 type Options struct {
-	Workers        int
-	QueueDepth     int
-	BatchSize      int
-	PathIndexPaths []string
-	Authoritative  *AuthoritativeCrawlScope
+	Workers                int
+	QueueDepth             int
+	BatchSize              int
+	PathIndexPaths         []string
+	Authoritative          *AuthoritativeCrawlScope
+	AtomicInodePublication bool
 }
 
 type AuthoritativeCrawlScope struct {
@@ -1034,6 +1035,10 @@ func (reconciler *Reconciler) publishRecordWithAllocator(
 			return reusedKey, true, nil
 		}
 	}
+	if !directory && reconciler.options.AtomicInodePublication {
+		key, err := reconciler.publishAllocatedInodeRecord(item, currentKey, value, content, writePathBinding)
+		return key, false, err
+	}
 	revision, err := allocate(reconciler.ctx)
 	if err != nil {
 		return nil, false, err
@@ -1071,6 +1076,38 @@ func (reconciler *Reconciler) publishRecordWithAllocator(
 		return nil, false, err
 	}
 	return revisionKey, false, nil
+}
+
+func (reconciler *Reconciler) publishAllocatedInodeRecord(
+	item preparedItem, currentKey, value []byte, content []schema.ID, writePathBinding bool,
+) ([]byte, error) {
+	store, ok := reconciler.store.(interface {
+		PublishAllocatedReconciledRevision(context.Context, func(uint64) (daemon.ReconciledRevision, error)) (uint64, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("store does not support atomic inode publication")
+	}
+	started := time.Now()
+	revision, err := store.PublishAllocatedReconciledRevision(reconciler.ctx, func(revision uint64) (daemon.ReconciledRevision, error) {
+		pathPuts, err := reconciler.pathVersionMutations(item, revision, nodeType(item.node.Type), writePathBinding)
+		if err != nil {
+			return daemon.ReconciledRevision{}, err
+		}
+		return daemon.ReconciledRevision{
+			CurrentKey: currentKey, RevisionKey: schema.InodeRevisionKey(item.identity.fsid, item.identity.inode, revision),
+			RevisionValue: value, Revision: revision, ContentIDs: content, DebtKeys: item.debtKeys, RelatedPuts: pathPuts,
+			HasMultipleParents: item.HasMultipleParents, HardlinkParents: item.HardlinkParents,
+		}, nil
+	})
+	reconciler.inodePublicationCalls.Add(1)
+	reconciler.inodePublicationNS.Add(uint64(time.Since(started)))
+	if err != nil {
+		reconciler.inodePublicationFailures.Add(1)
+		return nil, err
+	}
+	reconciler.revisionsReserved.Add(1)
+	reconciler.inodeRevisionsAssigned.Add(1)
+	return schema.InodeRevisionKey(item.identity.fsid, item.identity.inode, revision), nil
 }
 
 func (reconciler *Reconciler) reuseExistingRecord(

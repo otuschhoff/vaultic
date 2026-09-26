@@ -1,5 +1,75 @@
 # Phase 33 Production Benchmark Evidence
 
+## Atomic allocation/publication prototype, isolated R36 (2026-09-26)
+
+Following R35's roughly 49% allocation share, an opt-in prototype reserves one
+revision inside the same serializable transaction that publishes its metadata.
+It uses the existing complete reconciliation planner and normal durable `Commit`,
+including reference counts, immutable records, debt and revisioned path bindings.
+Counter conflicts retry the whole transaction with a newly built revision. It
+does not weaken writer fencing, acknowledgement requirements, or the 100ms WAL
+flush interval. There is no process-wide reservation cache or larger group.
+
+`reconcile.Options.AtomicInodePublication` defaults to false and is enabled only
+by the explicit native test fixture in this change. No CLI flag/default or daemon
+deployment changes. The regular backup path remains the grouped-reservation path.
+The API contract and uncertainty/metric semantics are documented in Phase 5.
+
+Three sequential unprofiled repetitions compared grouped reservations with atomic
+publication, using the same unchanged 12f686c29 daemon executable, fresh disposable
+HDD-NFS databases, four publication workers per group, 32 inodes, and 100ms flush.
+Each mode tested distinct or shared content and explicit per-file path bindings.
+Both modes then checked unchanged reuse, current pointers, immutable content,
+path bindings, reference counts, zero active transactions/intents, normal close,
+reopen and the next revision. No build/test jobs overlapped measured repetitions.
+R35's earlier fixture had no path bindings; use the matched R36 control here.
+
+| Content / mode | Mean seconds | Commit attempts / failures | Successful commits | Instrumented WAL PUT attempts |
+| --- | ---: | ---: | ---: | ---: |
+| Distinct / grouped | 1.603379 | 40 / 0 | 40 | 32 |
+| Distinct / atomic | 0.801002 | 80 / 48 | 32 | 16 |
+| Shared / grouped | 1.602141 | 88 / 48 | 40 | 32 |
+| Shared / atomic | 0.793930 | 80 / 48 | 32 | 16 |
+
+Atomic publication reduced elapsed time 50.04% for distinct content (2.002x) and
+50.45% for shared content (2.018x). All commit/failure/WAL counts were identical
+across repetitions. Successful commits fell 20%; instrumented WAL PUT attempts
+halved. However, distinct-content commit attempts doubled because independent
+publications now contend on the same counter. This additional retry/planning work
+is a scalability risk; no CPU/RSS improvement or sustained-load benefit is claimed.
+The speedup is specific to this small publication fixture, not a real backup.
+
+Correctness gates passed:
+
+- Failed builders, malformed requests, revision mismatches, attempted counter
+  overwrite and sequence exhaustion publish nothing and preserve the counter.
+- A held transaction loses a conflict to an intervening standalone revision fence,
+  retries above it, and leaves no losing revision. Cancellation joins cleanly.
+- Process-kill tests on fresh HDD-NFS stores cover buffered/uncommitted mutations,
+  durable commit with its response withheld, and an acknowledged commit. Ordinary
+  reopen reads recover counter, pointer, revision and references together, or none
+  for uncommitted work. No forced ownership, reset or live storage was used.
+- Native atomic/fence/crash/validation plus existing concurrent allocation,
+  immutability and shared-publication tests passed three race repetitions. Full
+  reconciliation and backup-command race suites passed. New-code lint is clean.
+
+These are process-crash tests, not power-loss tests or proof of full repository
+integrity. Larger content manifests, sustained concurrent backups and complete
+backup/restore acceptance still require broader candidate validation. The prototype
+is retained for that next step, not enabled by default.
+
+Two invalid fixture assumptions were corrected before the final measurements:
+counter exhaustion must use the allocator rather than protected `SchemaStore.Put`,
+and path validation must explicitly select the tested file paths. Failed fixture
+runs are excluded from the table.
+
+Artifacts: `/volume2/NASDA2/rustic/db.test/atomic-publication-20260926-r36-4EPhVL`
+contains the exact source diff, test executable, daemon/test SHA256 hashes, complete
+repetition log, and validated means in `analysis.json`. No backup command ran;
+future actual comparisons must use `--use-cwalk` and the normal 600s/45s limits.
+Production remains stopped and unrepaired. No deployment, unit change, live repair,
+restart or push was performed.
+
 ## Publication attribution and cleanup, isolated R35 (2026-09-26)
 
 Backup optimization resumed without restarting or repairing production. R31/R32
