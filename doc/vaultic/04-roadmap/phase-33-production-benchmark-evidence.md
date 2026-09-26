@@ -1,5 +1,100 @@
 # Phase 33 Production Benchmark Evidence
 
+## Bounded atomic publication groups, isolated R38 (2026-09-26)
+
+**Keep the group prototype default-off; reject general rollout.** Combining up to
+four changed inode publications and their revision allocation in one transaction
+improves the one-ID and shared-manifest fixtures, but distinct manifest-backed
+publication is 2.54x slower and consumes 1.95x daemon CPU versus the current default.
+This is an isolated publication-stage experiment, not completed-backup throughput.
+
+`PublishAllocatedReconciledRevisionGroup` allocates consecutive revisions, stages
+each member's existing reconciliation plan in order, updates the counter, and uses
+one normal serializable durable commit. Later plans read earlier staged writes,
+including shared canonical manifests and reference counts. Only `Aborted` causes
+bounded retry; the pure builder must regenerate every revision-bearing key/value.
+Lost durable acknowledgements can leave the entire group committed despite an
+error; returned revisions and success counters require acknowledgement.
+
+The API accepts one to four changed members, at most 4096 content IDs per group,
+8 MiB of accounted input bytes, and at most 1024 related puts, debt keys, and
+hardlink parents per member. Accounted bytes cover revision values, related
+mutation keys/values, debt keys and hardlink names, not all keys, planner expansion,
+transaction memory or process RSS. These are input limits, not a total-memory bound.
+`Options.AtomicPublicationGroups` is default false, has no CLI flag, and rejects
+combination with `AtomicInodePublication`. Ordinary grouping/reservation remains
+the default. Directory/root and hardlink routing are unchanged.
+
+Preparation completes before publication; preparation failure fails the group.
+Verified unchanged members are reused without allocation. Changed members publish
+all-or-nothing, and failed/uncertain calls expose no tentative changed entries in
+the reconciler's result map. Already verified reused entries remain valid.
+`atomic_group_calls`, `atomic_group_failures`, and `atomic_group_ns` separately
+attribute the combined API; group mode records no ordinary inode publication or
+standalone allocation calls. Reserved/assigned counts advance only after success.
+
+Matched measurements used the unchanged 12f686c29 daemon, explicit 100ms WAL flush,
+fresh disposable HDD-NFS databases, four independent reconciler streams sharing
+one schema store/daemon, and three sequential unprofiled repetitions per profile.
+There were no concurrent builds/tests. Each profile command retained the
+600-second cap plus 45-second termination grace and completed normally. Control
+streams publish four independent inodes concurrently after one group reservation;
+candidate streams plan four members sequentially inside one atomic transaction.
+All values below are three-run means; compare modes within each profile.
+
+| Profile / content / mode | Mean seconds | Daemon CPU seconds | RSS end MiB | Commit attempts / failures | WAL PUT attempts |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| One ID / distinct / grouped | 1.608005 | 0.580000 | 28.68 | 208.00 / 48.00 | 32.00 |
+| One ID / distinct / atomic-group | 0.787151 | 0.420000 | 22.93 | 80.00 / 48.00 | 16.00 |
+| One ID / shared / grouped | 1.875280 | 1.426667 | 29.48 | 680.00 / 520.00 | 36.00 |
+| One ID / shared / atomic-group | 0.785419 | 0.430000 | 22.91 | 80.00 / 48.00 | 16.00 |
+| 129 IDs / distinct / grouped | 1.488564 | 3.163333 | 57.63 | 102.00 / 22.00 | 21.33 |
+| 129 IDs / distinct / atomic-group | 3.787211 | 6.173333 | 39.35 | 53.33 / 37.33 | 32.00 |
+| 129 IDs / shared / grouped | 6.782913 | 16.880000 | 51.99 | 503.33 / 423.33 | 116.67 |
+| 129 IDs / shared / atomic-group | 3.726365 | 6.110000 | 33.76 | 54.67 / 38.67 | 32.00 |
+
+The one-ID profile has 128 inodes; the manifest profile has 64 inodes with 129 IDs
+each, above the 128-ID inline threshold. Candidate/control runtime ratios are
+0.490, 0.419, 2.544 and 0.549 in table order; daemon CPU ratios are 0.724, 0.301,
+1.952 and 0.362. Successful commits fell from 160 to 32 and 80 to 16 respectively.
+That reduction still does not guarantee lower runtime: distinct-manifest failed
+attempts increased from 22.00 to 37.33 while each conflict can replan four members.
+Sequential in-group planning also reduces independent planning overlap. Further
+attribution is needed to separate these costs; no automatic size threshold or
+fallback is justified by two profiles.
+
+All 24 measured cases passed complete ordered content reconstruction, every
+inode/manifest reference count, path bindings, no-work unchanged reuse, publication
+accounting, zero active transactions/intents, graceful close/reopen, immutable
+records/current pointers and next-revision checks. Native tests additionally cover
+shared 129-ID read-your-writes (four inode references plus one manifest reference),
+late-member rejection/rollback, bounds/exhaustion, forced fence conflict/retry,
+cancellation, process crash before commit, withheld durable acknowledgement and
+acknowledged recovery for both single and group publication. Mixed reuse reserves
+only changed members; preparation and group failures expose no changed results.
+Unsupported stores and mutually exclusive modes are rejected.
+
+Three race-enabled repetitions of native publication/allocation regressions passed,
+as did full reconciliation and backup-command race suites, new-code lint and editor
+diagnostics. The cancellation fixture initially expected only a Go context error;
+it now also accepts gRPC `Canceled`. Failed fixture attempts and the earlier tiny
+two-stream exploratory run are excluded from the table. No durability check was
+relaxed. Production remains stopped, unrepaired and unmodified.
+
+CPU is the daemon user+system counter delta, including background work and status
+overhead. RSS is an end sample, not a peak or total client/service memory claim.
+WAL PUTs are instrumented attempts, not distinct physical objects. Group/API time
+sums overlap across streams. Client CPU, sustained large-repository load, complete
+backup/restore and peak-memory acceptance remain outstanding.
+
+Artifacts: `/volume2/NASDA2/rustic/db.test/atomic-group-20260926-r38-PeLPKO` contains
+the measured source diff/base, executable, hashes, both profile logs, reproducible
+`analyze.cjs`, validated `analysis.json` and final source diff. Test executable SHA256:
+`1898577ee0d73fa2d152150b48bf395acbf89ca6d1002f096cac98a97c0c4fb3`.
+No deployment, service restart, settings change, live repair, actual backup or push
+was performed. Any future actual backup must explicitly use `--use-cwalk` and
+retain the existing time limits unless separately approved.
+
 ## Atomic publication scalability gate, isolated R37 (2026-09-26)
 
 **Do not promote the R36 prototype to normal backup configuration.** Its extra

@@ -115,10 +115,9 @@ rejects general rollout: four independent streams made distinct one-ID files
 and 5.23x daemon CPU respectively. Shared-content cases can still improve. The
 prototype remains default-off and is retained only for controlled comparisons;
 the standalone counter in every atomic publication is a contention bottleneck.
-Bounded group-level allocation/publication is the next candidate to investigate,
-not an implemented or accepted solution. Complete backup/restore, sustained load,
-client CPU and peak-memory acceptance are still outstanding.
-
+Bounded group-level allocation/publication is implemented as the default-off R38
+prototype below, but is not accepted for general rollout. Complete backup/restore,
+sustained load, client CPU and peak-memory acceptance are still outstanding.
 The native attribution fixture accepts bounded test-only environment variables:
 `VAULTICDB_TEST_PUBLICATION_INODES` (default 32, maximum 1024),
 `VAULTICDB_TEST_PUBLICATION_CONTENT_IDS` (default 1, maximum 1024), and
@@ -130,6 +129,36 @@ all content reference counts, manifest references, path bindings, unchanged reus
 cleanup and reopen are checked outside the measured publication phase. Group
 durations summed across streams overlap and are not elapsed time. Daemon CPU is
 a before/after process-counter delta; RSS is an end sample, not a peak.
+
+The R38 group prototype uses `Options.AtomicPublicationGroups` (default false,
+no CLI flag, mutually exclusive with `AtomicInodePublication`). The optional
+`PublishAllocatedReconciledRevisionGroup` store API reserves and publishes one to
+four changed members in a single serializable, normally durable transaction.
+Each member is planned and staged before the next, preserving read-your-writes
+for shared manifests and references. Bounded `Aborted` retries rebuild consecutive
+revisions and every revisioned binding. Other errors are returned without fresh
+allocation retry; an uncertain acknowledgement can still mean all members committed.
+
+Preparation failure fails the entire input group before publication. Verified
+unchanged members need no allocation; changed members commit all-or-nothing.
+Failed or uncertain calls expose no tentative changed entries, while verified reused
+entries remain valid. Reserved/assigned and changed/reconciled counters advance
+only on acknowledged success. `atomic_group_calls`, `atomic_group_failures`, and
+`atomic_group_ns` measure the combined API, including retries and allocation;
+ordinary inode-publication/allocation counters remain zero for that group call.
+Directory/root and hardlink routing retain their existing behavior.
+
+Input limits are four members, 4096 total content IDs, 8 MiB of accounted revision
+values/related mutation keys and values/debt keys/hardlink names, and 1024 entries
+per member for each related-put/debt-key/hardlink-parent collection. These limits
+do not bound all generated mutations, transaction memory, or total process RSS.
+
+R38's matched four-stream comparisons improve one-ID and shared-manifest cases,
+but distinct 129-ID manifests take 2.54x the default runtime and 1.95x daemon CPU.
+Keep the group prototype only for controlled comparisons. Fewer successful commits
+do not establish a throughput improvement; no heuristic threshold, automatic
+fallback, concurrency change or durability relaxation is enabled. Further planning
+and retry-cost attribution is needed before another design or rollout decision.
 
 **Implementation steps:**
 

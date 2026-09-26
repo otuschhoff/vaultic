@@ -19,6 +19,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/otuschhoff/vaultic/internal/archiver"
 	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/fs"
@@ -807,6 +810,108 @@ func TestAtomicPublicationRequiresStoreSupport(t *testing.T) {
 	}
 }
 
+type failingAtomicGroupStore struct {
+	*daemon.SchemaStore
+	failure error
+}
+
+func (store *failingAtomicGroupStore) PublishAllocatedReconciledRevisionGroup(
+	ctx context.Context, count int, build func(uint64) ([]daemon.ReconciledRevision, error),
+) (uint64, error) {
+	if store.failure != nil {
+		return 0, store.failure
+	}
+	return store.SchemaStore.PublishAllocatedReconciledRevisionGroup(ctx, count, build)
+}
+
+func TestDaemonBackedAtomicGroupMixedReuseAndFailure(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	socketDirectory, err := os.MkdirTemp("", "vaultic-group-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDirectory) })
+	client, err := daemon.Ensure(ctx, daemon.Options{
+		Socket: filepath.Join(socketDirectory, "daemon.sock"), RepositoryID: "mixed-atomic-group",
+		DaemonPath: reconciliationDaemonBinary(t), DataDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	store := &failingAtomicGroupStore{SchemaStore: daemon.NewSchemaStore(client)}
+	reconciler := &Reconciler{ctx: ctx, filesystem: testFilesystem(), store: store, options: Options{AtomicPublicationGroups: true}}
+	first := publicationTestBatch(0, 4)
+	reconciler.publishInodes(first, make(map[string]publishedItem))
+	if len(reconciler.errors) != 0 {
+		t.Fatal(reconciler.errors)
+	}
+	mixed := append(append([]preparedItem(nil), first[:3]...), publicationTestBatch(4, 1)...)
+	store.failure = errors.New("group failed")
+	published := make(map[string]publishedItem)
+	reconciler.publishInodes(mixed, published)
+	metrics := reconciler.Metrics()
+	if len(published) != 3 || len(reconciler.errors) != 1 || metrics.Reused != 3 || metrics.RevisionsReserved != 4 ||
+		metrics.AtomicGroupCalls != 2 || metrics.AtomicGroupFailures != 1 || metrics.Reconciled != 4 {
+		t.Fatalf("failed mixed group: published=%d metrics=%+v errors=%v", len(published), metrics, reconciler.errors)
+	}
+	if _, found, err := store.Get(ctx, schema.CurrentInodeKey(1, 104)); err != nil || found {
+		t.Fatalf("failed member published: found=%t err=%v", found, err)
+	}
+	store.failure = nil
+	reconciler.publishInodes(mixed, published)
+	reconciler.publishInodes(mixed, published)
+	metrics = reconciler.Metrics()
+	if len(published) != 4 || len(reconciler.errors) != 1 || metrics.Reused != 10 || metrics.RevisionsReserved != 5 ||
+		metrics.AtomicGroupCalls != 3 || metrics.AtomicGroupFailures != 1 || metrics.Reconciled != 5 {
+		t.Fatalf("mixed group reuse: published=%d metrics=%+v errors=%v", len(published), metrics, reconciler.errors)
+	}
+	if next, err := store.AllocateRevision(ctx); err != nil || next != 6 {
+		t.Fatalf("mixed group reservation: next=%d err=%v", next, err)
+	}
+	for _, preparationFailure := range []bool{false, true} {
+		t.Run(fmt.Sprintf("preparation_failure=%t", preparationFailure), func(t *testing.T) {
+			failureCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			store.failure = errors.New("group failed")
+			wantCalls := uint64(1)
+			if preparationFailure {
+				cancel()
+				wantCalls = 0
+			}
+			failed := &Reconciler{ctx: failureCtx, filesystem: testFilesystem(), store: store, options: Options{AtomicPublicationGroups: true}}
+			published := make(map[string]publishedItem)
+			failed.publishInodes(publicationTestBatch(8, 4), published)
+			metrics := failed.Metrics()
+			if len(published) != 0 || len(failed.errors) != 4 || metrics.RevisionsReserved != 0 || metrics.InodeRevisionsAssigned != 0 ||
+				metrics.Changed != 0 || metrics.Reconciled != 0 || metrics.AtomicGroupCalls != wantCalls || metrics.AtomicGroupFailures != wantCalls {
+				t.Fatalf("failed group exposed work: published=%d errors=%v metrics=%+v", len(published), failed.errors, metrics)
+			}
+			if preparationFailure {
+				for _, err := range failed.errors {
+					if !errors.Is(err, context.Canceled) && status.Code(err) != codes.Canceled {
+						t.Fatalf("preparation error=%v", err)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestAtomicGroupModesAndUnsupportedStore(t *testing.T) {
+	if _, err := (Options{AtomicInodePublication: true, AtomicPublicationGroups: true}).withDefaults(); err == nil {
+		t.Fatal("conflicting atomic modes accepted")
+	}
+	store := newFakeStore()
+	reconciler := &Reconciler{ctx: context.Background(), filesystem: testFilesystem(), store: store, options: Options{AtomicPublicationGroups: true}}
+	published := make(map[string]publishedItem)
+	reconciler.publishInodes(publicationTestBatch(0, 4), published)
+	if len(published) != 0 || len(reconciler.errors) != 4 || store.next != 0 || reconciler.Metrics().AtomicGroupCalls != 0 {
+		t.Fatalf("unsupported group: published=%d errors=%v next=%d", len(published), reconciler.errors, store.next)
+	}
+}
+
 func TestPublicationRevisionBlockFailureAndCancellation(t *testing.T) {
 	for _, canceled := range []bool{false, true} {
 		t.Run(fmt.Sprintf("canceled=%t", canceled), func(t *testing.T) {
@@ -1298,6 +1403,9 @@ func publicationTestMetrics(reconcilers []*Reconciler) Metrics {
 		total.InodePublicationCalls += metrics.InodePublicationCalls
 		total.InodePublicationFailures += metrics.InodePublicationFailures
 		total.InodePublicationNS += metrics.InodePublicationNS
+		total.AtomicGroupCalls += metrics.AtomicGroupCalls
+		total.AtomicGroupFailures += metrics.AtomicGroupFailures
+		total.AtomicGroupNS += metrics.AtomicGroupNS
 		total.PublicationGroupNS += metrics.PublicationGroupNS
 		for index := range total.PublicationGroups {
 			total.PublicationGroups[index] += metrics.PublicationGroups[index]
@@ -1314,7 +1422,7 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 		t.Fatal("publication inode count must be divisible by group size times stream count")
 	}
 	for _, shared := range []bool{false, true} {
-		for _, mode := range []string{"scalar", "grouped", "atomic"} {
+		for _, mode := range []string{"scalar", "grouped", "atomic", "atomic-group"} {
 			groupSize := publicationConcurrency
 			if mode == "scalar" {
 				groupSize = 1
@@ -1348,7 +1456,7 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 				store := daemon.NewSchemaStore(client)
 				reconciler := &Reconciler{
 					ctx: ctx, filesystem: testFilesystem(), store: store,
-					options: Options{AtomicInodePublication: mode == "atomic"},
+					options: Options{AtomicInodePublication: mode == "atomic", AtomicPublicationGroups: mode == "atomic-group"},
 				}
 				before, err := client.WriterStatus(ctx)
 				if err != nil || before.EngineFlushIntervalMS != 100 {
@@ -1399,12 +1507,16 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 				}
 				metrics := publicationTestMetrics(reconcilers)
 				allocationCalls := uint64(count / groupSize)
-				if mode == "atomic" {
+				publicationCalls, groupCalls := uint64(count), uint64(0)
+				if mode == "atomic" || mode == "atomic-group" {
 					allocationCalls = 0
+				}
+				if mode == "atomic-group" {
+					publicationCalls, groupCalls = 0, uint64(count/groupSize)
 				}
 				if len(published) != count || metrics.RevisionAllocationCalls != allocationCalls ||
 					metrics.RevisionsReserved != uint64(count) || metrics.InodeRevisionsAssigned != uint64(count) ||
-					metrics.InodePublicationCalls != uint64(count) ||
+					metrics.InodePublicationCalls != publicationCalls || metrics.AtomicGroupCalls != groupCalls || metrics.AtomicGroupFailures != 0 ||
 					metrics.InodePublicationFailures != 0 || metrics.RevisionAllocationFailures != 0 ||
 					metrics.PublicationGroups[groupSize-1] != uint64(count/groupSize) {
 					t.Fatalf("publication: metrics=%+v published=%d", metrics, len(published))
@@ -1415,7 +1527,7 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 				}
 				attempts := after.Attribution.CommitRequest.Attempts - before.Attribution.CommitRequest.Attempts
 				failures := after.Attribution.CommitRequest.Failures - before.Attribution.CommitRequest.Failures
-				if attempts-failures != uint64(count)+allocationCalls {
+				if attempts-failures != publicationCalls+allocationCalls+groupCalls {
 					t.Fatalf("commit accounting: attempts=%d failures=%d", attempts, failures)
 				}
 				cpuAvailable := before.ProcessCPUAvailable && after.ProcessCPUAvailable
@@ -1436,6 +1548,7 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 					after.Attribution.ObjectStoreWAL.Put.Timing.Attempts-before.Attribution.ObjectStoreWAL.Put.Timing.Attempts)
 				t.Logf("daemon_cpu_available=%t daemon_cpu_us=%d daemon_memory_available=%t daemon_rss_end_bytes=%d",
 					cpuAvailable, cpuUS, after.ProcessMemAvailable, after.ProcessRSSBytes)
+				t.Logf("atomic_group_calls=%d atomic_group_ns=%d", metrics.AtomicGroupCalls, metrics.AtomicGroupNS)
 				publish()
 				for stream, reconciler := range reconcilers {
 					if len(reconciler.errors) != 0 {
@@ -1443,6 +1556,7 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 					}
 				}
 				if reused := publicationTestMetrics(reconcilers); reused.Reused != uint64(count) ||
+					reused.AtomicGroupCalls != metrics.AtomicGroupCalls ||
 					reused.InodePublicationCalls != metrics.InodePublicationCalls || reused.RevisionAllocationCalls != metrics.RevisionAllocationCalls {
 					t.Fatalf("reuse attribution: %+v", reused)
 				}

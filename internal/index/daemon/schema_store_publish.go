@@ -151,6 +151,124 @@ func (store *SchemaStore) publishAllocatedReconciledRevisionOnce(
 	return revision, nil
 }
 
+func (store *SchemaStore) PublishAllocatedReconciledRevisionGroup(
+	ctx context.Context, count int, build func(uint64) ([]ReconciledRevision, error),
+) (uint64, error) {
+	if count < 1 || count > 4 || build == nil {
+		return 0, fmt.Errorf("allocated publication group requires 1 to 4 revisions and a builder")
+	}
+	backoff := 100 * time.Microsecond
+	for range revisionAllocationAttempts {
+		first, err := store.publishAllocatedReconciledRevisionGroupOnce(ctx, count, build)
+		if status.Code(err) != codes.Aborted {
+			return first, err
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return 0, ctx.Err()
+		case <-timer.C:
+		}
+		backoff = min(backoff*2, 25*time.Millisecond)
+	}
+	return 0, fmt.Errorf("allocate and publish revision group: transaction conflict retry limit exceeded")
+}
+
+func (store *SchemaStore) publishAllocatedReconciledRevisionGroupOnce(
+	ctx context.Context, count int, build func(uint64) ([]ReconciledRevision, error),
+) (uint64, error) {
+	transaction, err := store.client.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer rollbackTransaction(ctx, transaction)
+	counterKey := schema.NextRevisionKey()
+	encoded, found, err := transaction.Get(ctx, counterKey)
+	if err != nil {
+		return 0, err
+	}
+	first := uint64(1)
+	if found {
+		first, err = schema.UnmarshalNextRevision(encoded)
+		if err != nil {
+			return 0, err
+		}
+	}
+	if first > math.MaxUint64-uint64(count) {
+		return 0, fmt.Errorf("repository revision sequence exhausted")
+	}
+	requests, err := build(first)
+	if err != nil {
+		return 0, err
+	}
+	if len(requests) != count {
+		return 0, fmt.Errorf("publication group does not match allocated count")
+	}
+	if err := validateAllocatedPublicationGroup(requests, first); err != nil {
+		return 0, err
+	}
+	for _, request := range requests {
+		input, err := prepareReconciledRevision(request)
+		if err != nil {
+			return 0, err
+		}
+		plan, noop, err := store.planReconciledRevision(ctx, transaction, input)
+		if err != nil {
+			return 0, err
+		}
+		if noop {
+			return 0, fmt.Errorf("allocated group revision already published")
+		}
+		if _, exists := plan.puts[string(counterKey)]; exists {
+			return 0, fmt.Errorf("publication group modifies allocation counter")
+		}
+		if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), sortedReconciledMutations(plan), nil); err != nil {
+			return 0, err
+		}
+	}
+	encodedNext, err := schema.MarshalNextRevision(first + uint64(count))
+	if err != nil {
+		return 0, err
+	}
+	if err := transaction.WriteBatch(ctx, []Mutation{{Key: counterKey, Value: encodedNext}}, nil); err != nil {
+		return 0, err
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return first, nil
+}
+
+func validateAllocatedPublicationGroup(requests []ReconciledRevision, first uint64) error {
+	contentIDs, inputBytes := 0, 0
+	seen := make(map[string]bool, len(requests))
+	for index, request := range requests {
+		if request.Revision != first+uint64(index) || seen[string(request.CurrentKey)] {
+			return fmt.Errorf("publication group has mismatched revisions or duplicate identities")
+		}
+		seen[string(request.CurrentKey)] = true
+		contentIDs += len(request.ContentIDs)
+		inputBytes += len(request.RevisionValue)
+		if len(request.RelatedPuts) > 1024 || len(request.DebtKeys) > 1024 || len(request.HardlinkParents) > 1024 {
+			return fmt.Errorf("publication group exceeds related metadata limit")
+		}
+		for _, mutation := range request.RelatedPuts {
+			inputBytes += len(mutation.Key) + len(mutation.Value)
+		}
+		for _, key := range request.DebtKeys {
+			inputBytes += len(key)
+		}
+		for _, parent := range request.HardlinkParents {
+			inputBytes += len(parent.Name)
+		}
+		if contentIDs > 4096 || inputBytes > 8<<20 {
+			return fmt.Errorf("publication group exceeds content or input byte limit")
+		}
+	}
+	return nil
+}
+
 func (store *SchemaStore) planReconciledRevision(
 	ctx context.Context,
 	transaction *Transaction,

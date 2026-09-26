@@ -29,12 +29,13 @@ const (
 )
 
 type Options struct {
-	Workers                int
-	QueueDepth             int
-	BatchSize              int
-	PathIndexPaths         []string
-	Authoritative          *AuthoritativeCrawlScope
-	AtomicInodePublication bool
+	Workers                 int
+	QueueDepth              int
+	BatchSize               int
+	PathIndexPaths          []string
+	Authoritative           *AuthoritativeCrawlScope
+	AtomicInodePublication  bool
+	AtomicPublicationGroups bool
 }
 
 type AuthoritativeCrawlScope struct {
@@ -46,6 +47,9 @@ type AuthoritativeCrawlScope struct {
 }
 
 func (options Options) withDefaults() (Options, error) {
+	if options.AtomicInodePublication && options.AtomicPublicationGroups {
+		return Options{}, fmt.Errorf("atomic inode and group publication modes are mutually exclusive")
+	}
 	if options.Workers == 0 {
 		options.Workers = DefaultWorkers
 	}
@@ -82,6 +86,9 @@ type Metrics struct {
 	InodePublicationCalls      uint64                         `json:"inode_publication_calls"`
 	InodePublicationFailures   uint64                         `json:"inode_publication_failures"`
 	InodePublicationNS         uint64                         `json:"inode_publication_ns"`
+	AtomicGroupCalls           uint64                         `json:"atomic_group_calls"`
+	AtomicGroupFailures        uint64                         `json:"atomic_group_failures"`
+	AtomicGroupNS              uint64                         `json:"atomic_group_ns"`
 }
 
 type Store interface {
@@ -165,6 +172,9 @@ type Reconciler struct {
 	inodePublicationCalls      atomic.Uint64
 	inodePublicationFailures   atomic.Uint64
 	inodePublicationNS         atomic.Uint64
+	atomicGroupCalls           atomic.Uint64
+	atomicGroupFailures        atomic.Uint64
+	atomicGroupNS              atomic.Uint64
 }
 
 func New(ctx context.Context, filesystem statFS, store Store, options Options) (*Reconciler, error) {
@@ -239,6 +249,9 @@ func (reconciler *Reconciler) Metrics() Metrics {
 		InodePublicationCalls:      reconciler.inodePublicationCalls.Load(),
 		InodePublicationFailures:   reconciler.inodePublicationFailures.Load(),
 		InodePublicationNS:         reconciler.inodePublicationNS.Load(),
+		AtomicGroupCalls:           reconciler.atomicGroupCalls.Load(),
+		AtomicGroupFailures:        reconciler.atomicGroupFailures.Load(),
+		AtomicGroupNS:              reconciler.atomicGroupNS.Load(),
 	}
 	for index := range metrics.PublicationGroups {
 		metrics.PublicationGroups[index] = reconciler.publicationGroups[index].Load()
@@ -679,6 +692,10 @@ func (reconciler *Reconciler) publishInodes(items []preparedItem, published map[
 	started := time.Now()
 	reconciler.publicationGroups[len(items)-1].Add(1)
 	defer func() { reconciler.publicationGroupNS.Add(uint64(time.Since(started))) }()
+	if reconciler.options.AtomicPublicationGroups {
+		reconciler.publishInodeGroup(items, published)
+		return
+	}
 	if len(items) == 1 {
 		reconciler.publishInode(items[0], published)
 		return
@@ -731,6 +748,111 @@ func (reconciler *Reconciler) publishInodes(items []preparedItem, published map[
 			typeID: nodeType(item.node.Type), snapshotPath: item.snapshotPath,
 		}
 	}
+}
+
+func (reconciler *Reconciler) publishInodeGroup(items []preparedItem, published map[string]publishedItem) {
+	type member struct {
+		request   daemon.ReconciledRevision
+		binding   bool
+		reusedKey []byte
+	}
+	members := make([]member, len(items))
+	pending := make([]int, 0, len(items))
+	for index, item := range items {
+		request, binding, reusedKey, err := reconciler.prepareGroupMember(item)
+		if err != nil {
+			for _, failed := range items {
+				reconciler.fail(failed.sourcePath, err, failed.debtKeys)
+			}
+			return
+		}
+		members[index] = member{request: request, binding: binding, reusedKey: reusedKey}
+	}
+	for index, item := range items {
+		if members[index].reusedKey == nil {
+			pending = append(pending, index)
+			continue
+		}
+		reconciler.reused.Add(1)
+		published[item.sourcePath] = publishedItem{
+			identity: item.identity, key: members[index].reusedKey, typeID: nodeType(item.node.Type), snapshotPath: item.snapshotPath,
+		}
+	}
+	if len(pending) == 0 {
+		return
+	}
+	fail := func(err error) {
+		for _, index := range pending {
+			item := items[index]
+			reconciler.fail(item.sourcePath, err, item.debtKeys)
+		}
+	}
+	store, ok := reconciler.store.(interface {
+		PublishAllocatedReconciledRevisionGroup(context.Context, int, func(uint64) ([]daemon.ReconciledRevision, error)) (uint64, error)
+	})
+	if !ok {
+		fail(fmt.Errorf("store does not support atomic publication groups"))
+		return
+	}
+	started := time.Now()
+	first, err := store.PublishAllocatedReconciledRevisionGroup(reconciler.ctx, len(pending), func(first uint64) ([]daemon.ReconciledRevision, error) {
+		requests := make([]daemon.ReconciledRevision, len(pending))
+		for offset, index := range pending {
+			item := items[index]
+			request := members[index].request
+			request.Revision = first + uint64(offset)
+			request.RevisionKey = schema.InodeRevisionKey(item.identity.fsid, item.identity.inode, request.Revision)
+			var err error
+			request.RelatedPuts, err = reconciler.pathVersionMutations(item, request.Revision, nodeType(item.node.Type), members[index].binding)
+			if err != nil {
+				return nil, err
+			}
+			requests[offset] = request
+		}
+		return requests, nil
+	})
+	reconciler.atomicGroupCalls.Add(1)
+	reconciler.atomicGroupNS.Add(uint64(time.Since(started)))
+	if err != nil {
+		reconciler.atomicGroupFailures.Add(1)
+		fail(err)
+		return
+	}
+	count := uint64(len(pending))
+	reconciler.revisionsReserved.Add(count)
+	reconciler.inodeRevisionsAssigned.Add(count)
+	reconciler.changed.Add(count)
+	reconciler.reconciled.Add(count)
+	for offset, index := range pending {
+		item := items[index]
+		published[item.sourcePath] = publishedItem{
+			identity: item.identity, key: schema.InodeRevisionKey(item.identity.fsid, item.identity.inode, first+uint64(offset)),
+			typeID: nodeType(item.node.Type), snapshotPath: item.snapshotPath,
+		}
+	}
+}
+
+func (reconciler *Reconciler) prepareGroupMember(item preparedItem) (daemon.ReconciledRevision, bool, []byte, error) {
+	value, content, err := prepareInodeValue(item, false)
+	if err != nil {
+		return daemon.ReconciledRevision{}, false, nil, err
+	}
+	request := daemon.ReconciledRevision{
+		CurrentKey: schema.CurrentInodeKey(item.identity.fsid, item.identity.inode), RevisionValue: value,
+		ContentIDs: content, DebtKeys: item.debtKeys,
+	}
+	values, found, err := reconciler.store.MultiGet(reconciler.ctx, [][]byte{request.CurrentKey})
+	if err != nil {
+		return daemon.ReconciledRevision{}, false, nil, err
+	}
+	if !found[0] {
+		return request, true, nil, nil
+	}
+	key, binding, reused, err := reconciler.reuseExistingRecord(item, values[0].Value, value, false, content)
+	if !reused {
+		key = nil
+	}
+	return request, binding, key, err
 }
 
 func (reconciler *Reconciler) recordRevisionAllocation(started time.Time, count uint64, err error) {
@@ -956,6 +1078,24 @@ func (reconciler *Reconciler) publishInodeRecordWithAllocator(
 	hardlink bool,
 	allocate func(context.Context) (uint64, error),
 ) ([]byte, error) {
+	value, content, err := prepareInodeValue(item, hardlink)
+	if err != nil {
+		return nil, err
+	}
+	key, reused, err := reconciler.publishRecordWithAllocator(item, value, false, content, allocate)
+	if err != nil {
+		return nil, err
+	}
+	if reused {
+		reconciler.reused.Add(1)
+	} else {
+		reconciler.changed.Add(1)
+		reconciler.reconciled.Add(1)
+	}
+	return key, nil
+}
+
+func prepareInodeValue(item preparedItem, hardlink bool) ([]byte, []schema.ID, error) {
 	known := schema.KnownMTime | schema.KnownCTime | schema.KnownSize | schema.KnownMode
 	known |= schema.KnownUID | schema.KnownGID | schema.KnownParent | schema.KnownPath
 	record := schema.InodeRevision{
@@ -984,20 +1124,7 @@ func (reconciler *Reconciler) publishInodeRecordWithAllocator(
 		}
 	}
 	value, err := record.MarshalBinary()
-	if err != nil {
-		return nil, err
-	}
-	key, reused, err := reconciler.publishRecordWithAllocator(item, value, false, content, allocate)
-	if err != nil {
-		return nil, err
-	}
-	if reused {
-		reconciler.reused.Add(1)
-	} else {
-		reconciler.changed.Add(1)
-		reconciler.reconciled.Add(1)
-	}
-	return key, nil
+	return value, content, err
 }
 
 func (reconciler *Reconciler) publishRecord(

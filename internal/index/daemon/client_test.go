@@ -643,6 +643,164 @@ func TestSchemaStoreConcurrentRevisionAllocationAndImmutability(t *testing.T) {
 	}
 }
 
+func TestSchemaStoreAllocatedGroupReadYourWrites(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	client, err := Ensure(ctx, Options{
+		Socket: testSocket(t), RepositoryID: "allocated-group", DaemonPath: daemonBinary(t), DataDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	store := NewSchemaStore(client)
+	content := make([]schema.ID, schema.MaxInlineContentIDs+1)
+	for index := range content {
+		content[index] = daemonTestID(byte(index + 1))
+	}
+	value := encodeSchemaRecord(t, schema.InodeRevision{
+		ParentInode: 7, Known: schema.KnownParent, Freshness: schema.FreshnessVerified,
+		ContentMode: schema.ContentManifestRef, ContentManifestID: schema.ContentManifestID(content), ContentCount: uint32(len(content)),
+	})
+	before, err := client.WriterStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.PublishAllocatedReconciledRevisionGroup(ctx, 4, func(first uint64) ([]ReconciledRevision, error) {
+		requests := make([]ReconciledRevision, 4)
+		for index := range requests {
+			inode, revision := uint64(10+index), first+uint64(index)
+			requests[index] = ReconciledRevision{
+				CurrentKey: schema.CurrentInodeKey(3, inode), RevisionKey: schema.InodeRevisionKey(3, inode, revision),
+				RevisionValue: value, Revision: revision, ContentIDs: content,
+			}
+		}
+		return requests, nil
+	})
+	if err != nil || first != 1 {
+		t.Fatalf("group first=%d err=%v", first, err)
+	}
+	for _, id := range content {
+		encoded, found, err := store.Get(ctx, schema.ReferenceCountKey(id))
+		if err != nil || !found {
+			t.Fatalf("reference found=%t err=%v", found, err)
+		}
+		references, err := schema.UnmarshalReferenceCountRecord(encoded)
+		if err != nil || references.TotalReferences != 5 || references.DistinctInodes != 4 ||
+			references.DistinctRevisions != 4 || references.DistinctManifests != 1 {
+			t.Fatalf("group references=%+v err=%v", references, err)
+		}
+	}
+	after, err := client.WriterStatus(ctx)
+	if err != nil || after.ActiveTransactions != 0 || after.ActiveWriteIntents != 0 ||
+		after.Attribution.CommitRequest.Successes-before.Attribution.CommitRequest.Successes != 1 {
+		t.Fatalf("group accounting=%+v err=%v", after, err)
+	}
+	if next, err := store.AllocateRevision(ctx); err != nil || next != 5 {
+		t.Fatalf("next revision=%d err=%v", next, err)
+	}
+}
+
+func TestSchemaStoreAllocatedGroupRejectsPartialPublication(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	client, err := Ensure(ctx, Options{
+		Socket: testSocket(t), RepositoryID: "allocated-group-failure", DaemonPath: daemonBinary(t), DataDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	store := NewSchemaStore(client)
+	value := encodeSchemaRecord(t, schema.InodeRevision{ParentInode: 7, Known: schema.KnownParent, Freshness: schema.FreshnessVerified})
+	for _, test := range []struct {
+		name   string
+		change func([]ReconciledRevision) []ReconciledRevision
+	}{
+		{name: "count", change: func(requests []ReconciledRevision) []ReconciledRevision { return requests[:3] }},
+		{name: "late-invalid", change: func(requests []ReconciledRevision) []ReconciledRevision {
+			requests[3].RevisionValue = []byte("invalid")
+			return requests
+		}},
+		{name: "late-duplicate", change: func(requests []ReconciledRevision) []ReconciledRevision {
+			requests[3].CurrentKey = requests[0].CurrentKey
+			return requests
+		}},
+		{name: "late-counter-write", change: func(requests []ReconciledRevision) []ReconciledRevision {
+			requests[3].RelatedPuts = []Mutation{{Key: schema.NextRevisionKey(), Value: []byte("invalid")}}
+			return requests
+		}},
+		{name: "content-limit", change: func(requests []ReconciledRevision) []ReconciledRevision {
+			requests[3].ContentIDs = make([]schema.ID, 4097)
+			return requests
+		}},
+		{name: "byte-limit", change: func(requests []ReconciledRevision) []ReconciledRevision {
+			requests[3].RevisionValue = make([]byte, (8<<20)+1)
+			return requests
+		}},
+		{name: "related-limit", change: func(requests []ReconciledRevision) []ReconciledRevision {
+			requests[3].DebtKeys = make([][]byte, 1025)
+			return requests
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			first, err := store.PublishAllocatedReconciledRevisionGroup(ctx, 4, func(first uint64) ([]ReconciledRevision, error) {
+				requests := make([]ReconciledRevision, 4)
+				for index := range requests {
+					inode, revision := uint64(10+index), first+uint64(index)
+					requests[index] = ReconciledRevision{
+						CurrentKey: schema.CurrentInodeKey(3, inode), RevisionKey: schema.InodeRevisionKey(3, inode, revision),
+						RevisionValue: value, Revision: revision,
+					}
+				}
+				return test.change(requests), nil
+			})
+			if err == nil || first != 0 {
+				t.Fatalf("invalid group first=%d err=%v", first, err)
+			}
+			keys := [][]byte{schema.NextRevisionKey()}
+			for index := range 4 {
+				keys = append(keys, schema.CurrentInodeKey(3, uint64(10+index)), schema.InodeRevisionKey(3, uint64(10+index), uint64(index+1)))
+			}
+			for _, key := range keys {
+				if _, found, err := store.Get(ctx, key); err != nil || found {
+					t.Fatalf("partial group key=%x found=%t err=%v", key, found, err)
+				}
+			}
+			writer, err := client.WriterStatus(ctx)
+			if err != nil || writer.ActiveTransactions != 0 || writer.ActiveWriteIntents != 0 {
+				t.Fatalf("failed group cleanup=%+v err=%v", writer, err)
+			}
+		})
+	}
+	for _, count := range []int{0, 5} {
+		if _, err := store.PublishAllocatedReconciledRevisionGroup(ctx, count, func(uint64) ([]ReconciledRevision, error) {
+			t.Fatal("invalid count reached builder")
+			return nil, nil
+		}); err == nil {
+			t.Fatalf("invalid group count=%d accepted", count)
+		}
+	}
+	if _, err := store.PublishAllocatedReconciledRevisionGroup(ctx, 4, nil); err == nil {
+		t.Fatal("nil group builder accepted")
+	}
+	if next, err := store.AllocateRevision(ctx); err != nil || next != 1 {
+		t.Fatalf("failed group consumed revisions: next=%d err=%v", next, err)
+	}
+	if _, err := store.AllocateRevisionBlock(ctx, math.MaxUint64-3); err != nil {
+		t.Fatal(err)
+	}
+	if first, err := store.PublishAllocatedReconciledRevisionGroup(ctx, 4, func(uint64) ([]ReconciledRevision, error) {
+		t.Fatal("exhausted group reached builder")
+		return nil, nil
+	}); err == nil || first != 0 {
+		t.Fatalf("exhausted group first=%d err=%v", first, err)
+	}
+	if next, err := store.AllocateRevision(ctx); err != nil || next != math.MaxUint64-1 {
+		t.Fatalf("exhausted group consumed revisions: next=%d err=%v", next, err)
+	}
+}
+
 func TestSchemaStoreAllocatedPublicationSingleCommit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -753,8 +911,9 @@ func TestSchemaStoreAllocatedPublicationRejectsInvalidRequests(t *testing.T) {
 }
 
 func TestSchemaStoreAllocatedPublicationFenceAndCancellation(t *testing.T) {
-	for _, canceled := range []bool{false, true} {
-		t.Run(fmt.Sprintf("canceled=%t", canceled), func(t *testing.T) {
+	for _, variant := range []struct{ canceled, group bool }{{}, {canceled: true}, {group: true}, {canceled: true, group: true}} {
+		canceled := variant.canceled
+		t.Run(fmt.Sprintf("canceled=%t/group=%t", canceled, variant.group), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			client, err := Ensure(ctx, Options{
@@ -777,9 +936,13 @@ func TestSchemaStoreAllocatedPublicationFenceAndCancellation(t *testing.T) {
 				err      error
 			}
 			done := make(chan result, 1)
+			count := 1
+			if variant.group {
+				count = 4
+			}
 			go func() {
 				first := true
-				revision, err := store.PublishAllocatedReconciledRevision(publicationCtx, func(revision uint64) (ReconciledRevision, error) {
+				build := func(revision uint64) (ReconciledRevision, error) {
 					if first {
 						first = false
 						close(entered)
@@ -793,7 +956,26 @@ func TestSchemaStoreAllocatedPublicationFenceAndCancellation(t *testing.T) {
 						CurrentKey: schema.CurrentInodeKey(3, 10), RevisionKey: schema.InodeRevisionKey(3, 10, revision),
 						RevisionValue: value, Revision: revision,
 					}, nil
-				})
+				}
+				var revision uint64
+				var err error
+				if variant.group {
+					revision, err = store.PublishAllocatedReconciledRevisionGroup(publicationCtx, count, func(first uint64) ([]ReconciledRevision, error) {
+						requests := make([]ReconciledRevision, count)
+						for index := range requests {
+							request, err := build(first + uint64(index))
+							if err != nil {
+								return nil, err
+							}
+							request.CurrentKey = schema.CurrentInodeKey(3, uint64(10+index))
+							request.RevisionKey = schema.InodeRevisionKey(3, uint64(10+index), request.Revision)
+							requests[index] = request
+						}
+						return requests, nil
+					})
+				} else {
+					revision, err = store.PublishAllocatedReconciledRevision(publicationCtx, build)
+				}
 				done <- result{revision: revision, err: err}
 			}()
 			select {
@@ -822,17 +1004,20 @@ func TestSchemaStoreAllocatedPublicationFenceAndCancellation(t *testing.T) {
 			} else if outcome.revision != 2 || outcome.err != nil {
 				t.Fatalf("publication did not retry above fence: %+v", outcome)
 			}
-			if _, found, err := store.Get(ctx, schema.InodeRevisionKey(3, 10, 1)); err != nil || found {
-				t.Fatalf("losing revision found=%t err=%v", found, err)
-			}
-			encoded, found, err := store.Get(ctx, schema.CurrentInodeKey(3, 10))
-			if err != nil || found == canceled {
-				t.Fatalf("current pointer found=%t err=%v", found, err)
-			}
-			if !canceled {
-				pointer, err := schema.UnmarshalCurrentPointer(encoded)
-				if err != nil || pointer.Revision != 2 {
-					t.Fatalf("current pointer=%+v err=%v", pointer, err)
+			for index := range count {
+				inode := uint64(10 + index)
+				if _, found, err := store.Get(ctx, schema.InodeRevisionKey(3, inode, uint64(1+index))); err != nil || found {
+					t.Fatalf("losing revision found=%t err=%v", found, err)
+				}
+				encoded, found, err := store.Get(ctx, schema.CurrentInodeKey(3, inode))
+				if err != nil || found == canceled {
+					t.Fatalf("current pointer found=%t err=%v", found, err)
+				}
+				if !canceled {
+					pointer, err := schema.UnmarshalCurrentPointer(encoded)
+					if err != nil || pointer.Revision != uint64(2+index) {
+						t.Fatalf("current pointer=%+v err=%v", pointer, err)
+					}
 				}
 			}
 			writer, err := client.WriterStatus(ctx)
@@ -848,10 +1033,14 @@ func TestSchemaStoreAllocatedPublicationCrashRecovery(t *testing.T) {
 		name    string
 		method  string
 		durable bool
+		group   bool
 	}{
 		{name: "buffered", method: "WriteBatch"},
 		{name: "durable-response-withheld", method: "Commit", durable: true},
 		{name: "acknowledged", durable: true},
+		{name: "group-buffered", method: "WriteBatch", group: true},
+		{name: "group-durable-response-withheld", method: "Commit", durable: true, group: true},
+		{name: "group-acknowledged", durable: true, group: true},
 	} {
 		t.Run(point.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -894,13 +1083,31 @@ func TestSchemaStoreAllocatedPublicationCrashRecovery(t *testing.T) {
 			publicationCtx, cancelPublication := context.WithCancel(ctx)
 			defer cancelPublication()
 			done := make(chan error, 1)
+			count := 1
+			if point.group {
+				count = 4
+			}
 			go func() {
-				_, err := store.PublishAllocatedReconciledRevision(publicationCtx, func(revision uint64) (ReconciledRevision, error) {
+				build := func(inode, revision uint64) ReconciledRevision {
 					return ReconciledRevision{
-						CurrentKey: schema.CurrentInodeKey(3, 10), RevisionKey: schema.InodeRevisionKey(3, 10, revision),
+						CurrentKey: schema.CurrentInodeKey(3, inode), RevisionKey: schema.InodeRevisionKey(3, inode, revision),
 						RevisionValue: value, Revision: revision, ContentIDs: content,
-					}, nil
-				})
+					}
+				}
+				var err error
+				if point.group {
+					_, err = store.PublishAllocatedReconciledRevisionGroup(publicationCtx, count, func(first uint64) ([]ReconciledRevision, error) {
+						requests := make([]ReconciledRevision, count)
+						for index := range requests {
+							requests[index] = build(uint64(10+index), first+uint64(index))
+						}
+						return requests, nil
+					})
+				} else {
+					_, err = store.PublishAllocatedReconciledRevision(publicationCtx, func(revision uint64) (ReconciledRevision, error) {
+						return build(10, revision), nil
+					})
+				}
 				done <- err
 			}()
 			if point.method == "" {
@@ -939,10 +1146,14 @@ func TestSchemaStoreAllocatedPublicationCrashRecovery(t *testing.T) {
 			}
 			defer reopened.Close(context.Background())
 			store = NewSchemaStore(reopened)
-			for _, key := range [][]byte{
+			keys := [][]byte{
 				schema.NextRevisionKey(), schema.CurrentInodeKey(3, 10), schema.InodeRevisionKey(3, 10, 1),
 				schema.ReferenceCountKey(content[0]), schema.ReverseInodeKey(content[0], 3, 10),
-			} {
+			}
+			for index := range count {
+				keys = append(keys, schema.CurrentInodeKey(3, uint64(10+index)), schema.InodeRevisionKey(3, uint64(10+index), uint64(index+1)))
+			}
+			for _, key := range keys {
 				_, found, err := store.Get(ctx, key)
 				if err != nil || found != point.durable {
 					t.Fatalf("recovered key=%x found=%t want=%t err=%v", key, found, point.durable, err)
@@ -953,7 +1164,7 @@ func TestSchemaStoreAllocatedPublicationCrashRecovery(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if next, err := schema.UnmarshalNextRevision(encoded); err != nil || next != 2 {
+				if next, err := schema.UnmarshalNextRevision(encoded); err != nil || next != uint64(count+1) {
 					t.Fatalf("recovered counter=%d err=%v", next, err)
 				}
 				encoded, _, err = store.Get(ctx, schema.InodeRevisionKey(3, 10, 1))
