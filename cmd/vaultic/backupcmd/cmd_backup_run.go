@@ -177,6 +177,10 @@ func (run *backupRun) close() {
 	if run.cancel != nil {
 		run.cancel()
 	}
+	if run.reconciler != nil {
+		_ = run.reconciler.Close()
+		run.reportReconciliationStats(run.reconciler.Metrics())
+	}
 	if run.closeSource != nil {
 		run.closeSource()
 	}
@@ -215,6 +219,20 @@ func (run *backupRun) reportMetadataLookupStats(stats enginepkg.BlobLookupStats)
 	} else if !run.globalOptions.Quiet {
 		run.printer.V("metadata lookup cache: %d hits, %d misses, %d evictions, peak %d/%d entries; %d size RPCs for %d handles\n",
 			stats.CacheHits, stats.CacheMisses, stats.Evictions, stats.PeakEntries, stats.Capacity, stats.SizeRPCs, stats.SizeHandles)
+	}
+}
+
+func (run *backupRun) reportReconciliationStats(stats reconcile.Metrics) {
+	if run.globalOptions.JSON {
+		run.term.Print(ui.ToJSONString(struct {
+			MessageType string `json:"message_type"`
+			reconcile.Metrics
+		}{MessageType: "reconciliation_stats", Metrics: stats}))
+	} else if !run.globalOptions.Quiet {
+		run.printer.V("metadata reconciliation: groups by size %v, %d/%d inode revisions assigned/reserved; "+
+			"allocation %s, publication %s (summed call time), groups %s (wall time)\n",
+			stats.PublicationGroups, stats.InodeRevisionsAssigned, stats.RevisionsReserved,
+			time.Duration(stats.RevisionAllocationNS), time.Duration(stats.InodePublicationNS), time.Duration(stats.PublicationGroupNS))
 	}
 }
 

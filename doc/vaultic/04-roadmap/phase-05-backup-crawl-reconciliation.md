@@ -50,6 +50,38 @@ authoritative engine, publishing snapshot scope, and exporting legacy JSON
 remain Phase 6 responsibilities; daemon attach/start CLI options remain Phase
 7. Phase 5 does not weaken the existing fail-closed authority guard.
 
+### Publication Attribution
+
+The backup command emits `reconciliation_stats` at cleanup after joining the
+reconciler, including on cancellation or failure. JSON output contains the six
+original counters plus these cumulative measurements; verbose text reports a
+summary and quiet non-JSON mode suppresses it:
+
+- `publication_groups_by_size`: four counters for ordinary inode groups of sizes
+  one through four. Empty flushes are excluded; reused and failed items still
+  occupy slots. Hardlinks and directories are outside this histogram.
+- `publication_group_ns`: summed wall time to complete those sequential groups,
+  including reads, allocation, worker joins and failure recording.
+- `revision_allocation_calls`, `revision_allocation_failures`,
+  `revision_allocation_ns`: completed inode allocation API calls, their failures,
+  and summed client-observed duration. Block reservations count once, not once
+  per waiting worker; time waiting for the group's allocation mutex is excluded.
+  Internal store retries are included in duration but are not separate calls.
+- `revisions_reserved`: inode revision numbers successfully reserved, including
+  unused group slots. Failed calls contribute zero.
+- `inode_revisions_assigned`: numbers handed to changed inodes, including ones
+  whose later path planning or publication fails. The difference from reserved
+  numbers is unused capacity, not a count of failed publications.
+- `inode_publication_calls`, `inode_publication_failures`,
+  `inode_publication_ns`: completed publication API calls, their failures, and
+  summed client-observed duration, including internal retries and durable waits.
+
+The allocation and publication counters include hardlinks but exclude directory
+and synthetic-root work. Reuse and cancellation before a store call do not count
+as allocation/publication calls. Concurrent worker durations overlap: do not add
+them to group wall time or equate them with daemon-only durable-wait time.
+These counters are diagnostic and do not change durability or concurrency.
+
 **Implementation steps:**
 
 1. Start the bounded scanner pool, default 128 workers and a 50,000-item queue.

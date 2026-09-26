@@ -20,6 +20,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/fs"
 	"github.com/otuschhoff/vaultic/internal/global"
 	enginepkg "github.com/otuschhoff/vaultic/internal/index"
+	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/reconcile"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	rtest "github.com/otuschhoff/vaultic/internal/test"
@@ -69,6 +70,73 @@ func TestBackupCloseReportsLookupStatsAfterCancellation(t *testing.T) {
 	}
 	if record.MessageType != "metadata_lookup_stats" || record.Capacity != 2 || record.SizeRPCs != 7 {
 		t.Fatalf("invalid final stats: %+v", record)
+	}
+}
+
+type backupReconciliationStore struct {
+	reconcile.Store
+}
+
+func (*backupReconciliationStore) ScanPrefix(context.Context, []byte, []byte, uint32) ([]daemon.KeyValue, bool, error) {
+	return nil, true, nil
+}
+
+func TestBackupCloseJoinsReconciliationAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	reconciler, err := reconcile.New(ctx, fs.NewLocal(), &backupReconciliationStore{}, reconcile.Options{Workers: 1, QueueDepth: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	term := &ui.MockTerminal{}
+	run := &backupRun{ctx: ctx, cancel: cancel, reconciler: reconciler, term: term, globalOptions: global.Options{JSON: true}}
+	run.closeSource = func() {
+		if ctx.Err() == nil || len(term.Output) != 1 {
+			t.Fatal("source closed before cancellation and final reconciliation stats")
+		}
+	}
+	run.close()
+	var record struct {
+		MessageType string `json:"message_type"`
+		reconcile.Metrics
+	}
+	if len(term.Output) != 1 {
+		t.Fatalf("output=%v", term.Output)
+	}
+	if err := json.Unmarshal([]byte(term.Output[0]), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.MessageType != "reconciliation_stats" || record.Metrics != reconciler.Metrics() || record.Failed == 0 {
+		t.Fatalf("incomplete final reconciliation stats: %+v", record)
+	}
+}
+
+func TestBackupReportsReconciliationStats(t *testing.T) {
+	term := &ui.MockTerminal{}
+	run := &backupRun{term: term, globalOptions: global.Options{JSON: true}}
+	stats := reconcile.Metrics{
+		PublicationGroups: [4]uint64{1, 2, 3, 4}, RevisionAllocationCalls: 7, RevisionAllocationFailures: 1,
+		RevisionsReserved: 20, InodeRevisionsAssigned: 18, RevisionAllocationNS: 100,
+		InodePublicationCalls: 17, InodePublicationFailures: 2, InodePublicationNS: 200, PublicationGroupNS: 150,
+	}
+	run.reportReconciliationStats(stats)
+	if len(term.Output) != 1 {
+		t.Fatalf("output=%v", term.Output)
+	}
+	var record struct {
+		MessageType string `json:"message_type"`
+		reconcile.Metrics
+	}
+	if err := json.Unmarshal([]byte(term.Output[0]), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.MessageType != "reconciliation_stats" || record.Metrics != stats {
+		t.Fatalf("invalid reconciliation stats: %+v", record)
+	}
+	run.globalOptions = global.Options{Quiet: true}
+	run.reportReconciliationStats(stats)
+	if len(term.Output) != 1 {
+		t.Fatal("quiet mode emitted reconciliation stats")
 	}
 }
 

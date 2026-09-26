@@ -1,5 +1,65 @@
 # Phase 33 Production Benchmark Evidence
 
+## Publication attribution and cleanup, isolated R35 (2026-09-26)
+
+Backup optimization resumed without restarting or repairing production. R31/R32
+profiles identified group revision allocation and durable publication waits, but
+their aggregate daemon counters did not separate the two client-side stages.
+This iteration adds attribution and joins reconciliation during backup cleanup;
+it does not change publication concurrency, reservation scope, or durability.
+
+Backup cleanup now cancels and joins reconciliation before closing source or
+repository handles. It emits one final `reconciliation_stats` JSON record, or a
+verbose text summary, including failed/canceled runs. Counters distinguish group
+occupancy, reserved/assigned inode revisions, allocation calls/failures, and inode
+publication calls/failures. Summed client-call nanoseconds include RPCs, internal
+retries and durable waits; they are not daemon-only durable-wait measurements.
+The group timer measures joined wall time. Concurrent call times must not be
+added to it. Unchanged items occupy slots without allocating or publishing.
+The metric definitions and exclusions are recorded in the Phase 5 document.
+
+Three sequential unprofiled repetitions used fresh disposable HDD-NFS databases
+and the unchanged deployed-daemon executable, with an explicit 100ms WAL flush
+interval. Each case published 32 distinct inodes, then checked unchanged reuse,
+zero active transactions/intents, graceful close/reopen, current pointers,
+immutable content records and the next revision. Content IDs were either all
+distinct or shared by all inodes. Groups of one are a diagnostic control, not the
+previous production implementation. No build/test jobs overlapped measurements.
+
+| Content / group size | Mean seconds | Allocation summed seconds | Publication summed seconds | Commit attempts / failures | Instrumented WAL PUT attempts |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Distinct / 1 | 6.458560 | 3.210757 | 3.236309 | 64 / 0 | 128 |
+| Distinct / 4 | 1.594969 | 0.780487 | 3.239493 | 40 / 0 | 32 |
+| Shared / 1 | 6.452848 | 3.207743 | 3.233986 | 64 / 0 | 128 |
+| Shared / 4 | 1.594311 | 0.779105 | 3.243711 | 88 / 48 | 32 |
+
+All attempt/failure/WAL counts were identical across repetitions. Grouped
+allocation consumed 48.93% (distinct) and 48.87% (shared) of measured group wall
+time. Shared-content conflicts added 48 failed commits but no meaningful elapsed
+time in this small workload; failed-attempt reduction alone is therefore not a
+runtime improvement metric. The roughly fourfold grouping benefit is attribution
+of already-implemented behavior, **not a new speedup from this commit**. A next
+candidate should investigate removing a separate allocation durability round trip
+while preserving revision/fence ordering, rather than increase concurrency or
+repeat the rejected 10ms flush trial. No such semantic change is included here.
+
+The first fixture attempt was rejected by the daemon's private runtime-directory
+check before work began. It was excluded; the corrected fixture uses the existing
+short private socket-directory convention, without weakening permissions.
+
+Full reconciliation and backup-command race suites passed, including all native
+measurement cases. Focused allocation/reuse/failure/cancellation and cleanup/output
+tests passed three race repetitions. New-code lint reports zero issues. This is
+an isolated publication experiment, not an actual cwalk backup or completed
+snapshot validation; no backup command was invoked. Representative production
+comparison remains blocked by the stopped, unrepaired R34 database, and any later
+backup trial must explicitly use `--use-cwalk` and the normal 600s/45s limits.
+
+Artifacts: `/volume2/NASDA2/rustic/db.test/publication-attribution-20260926-r35-CXfLWB`
+contains the measurement executable, its source diff, daemon/test SHA256 hashes,
+and complete three-repetition log. No production deployment, restart, unit change,
+live repair, or push was performed.
+
 ## Automatic WAL diagnosis implementation (2026-09-26)
 
 After the isolated recovery investigation, the user approved implementing
