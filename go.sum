@@ -269,6 +269,8 @@ github.com/otuschhoff/go-nfs-client v0.0.0-20260926094517-532b38a76eda h1:kafXz1
 github.com/otuschhoff/go-nfs-client v0.0.0-20260926094517-532b38a76eda/go.mod h1:EYS0tJsDD1SquKubQLIiNu2INlkdoG5hrUL6SnpXOes=
 github.com/otuschhoff/go-nfs-client v0.0.0-20260926105642-647f2757219b h1:w2OV20fcSeo5jTioiyB/IGCQ7ULRDT1is/JdgEwDjoA=
 github.com/otuschhoff/go-nfs-client v0.0.0-20260926105642-647f2757219b/go.mod h1:EYS0tJsDD1SquKubQLIiNu2INlkdoG5hrUL6SnpXOes=
+github.com/otuschhoff/go-nfs-client v0.0.0-20260926124503-28cae75b1beb h1:9HwWkMYAhVqd/OP3qO7n2VjyUyIC3PCsqsZQWekk6LM=
+github.com/otuschhoff/go-nfs-client v0.0.0-20260926124503-28cae75b1beb/go.mod h1:EYS0tJsDD1SquKubQLIiNu2INlkdoG5hrUL6SnpXOes=
 github.com/otuschhoff/gokrb5/v8 v8.5.3 h1:L3L81YmukI8Fjv2mXeF0pFXTvoBdVDsty9FQG6uC3nA=
 github.com/otuschhoff/gokrb5/v8 v8.5.3/go.mod h1:A4JXdxHouADmlVRW/WQoz68Woq/7Z6DI3TUzWZG+QPU=
 github.com/otuschhoff/pathdiff v0.0.0-20260906012451-6c092b832e20 h1:VGZBUVtZJmNiIKio1cG9opwpeWsSmoxX4OZOvWuKp4A=

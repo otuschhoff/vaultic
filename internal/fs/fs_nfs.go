@@ -65,6 +65,11 @@ type NFS struct {
 	endpoints                                                   map[string]*nfsEndpoint
 	servers                                                     map[string]*nfsServer
 	operations                                                  [5]nfsOperationCounters
+	connectionsOpened, poolShortfalls, poolReuses               atomic.Uint64
+	poolGrowthAttempts, poolGrowthFailures, poolRetired         atomic.Uint64
+	nextMaintenance                                             atomic.Int64
+	maintaining                                                 atomic.Bool
+	maintenance                                                 sync.WaitGroup
 	entries                                                     *lru.Cache[string, nfsCachedEntry]
 	directories                                                 *lru.Cache[nfsDirectoryKey, nfsDirectoryHandle]
 	parentHits, retainedOpens                                   atomic.Uint64
@@ -72,15 +77,21 @@ type NFS struct {
 }
 
 type NFSStats struct {
-	Lookups       uint64                       `json:"lookup_calls"`
-	Getattrs      uint64                       `json:"getattr_calls"`
-	ReadDirPlus   uint64                       `json:"readdirplus_calls"`
-	Reads         uint64                       `json:"read_calls"`
-	ReadBytes     uint64                       `json:"read_bytes"`
-	CacheHits     uint64                       `json:"metadata_cache_hits"`
-	ParentHits    uint64                       `json:"parent_handle_hits"`
-	RetainedOpens uint64                       `json:"retained_metadata_opens"`
-	Operations    map[string]NFSOperationStats `json:"rpc_operations"`
+	PoolGrowthAttempts uint64                       `json:"connection_pool_growth_attempts"`
+	PoolGrowthFailures uint64                       `json:"connection_pool_growth_failures"`
+	PoolRetired        uint64                       `json:"nfs_connections_retired_idle"`
+	ConnectionsOpened  uint64                       `json:"nfs_connections_opened"`
+	PoolShortfalls     uint64                       `json:"connection_pool_shortfalls"`
+	PoolReuses         uint64                       `json:"connection_pool_reuses"`
+	Lookups            uint64                       `json:"lookup_calls"`
+	Getattrs           uint64                       `json:"getattr_calls"`
+	ReadDirPlus        uint64                       `json:"readdirplus_calls"`
+	Reads              uint64                       `json:"read_calls"`
+	ReadBytes          uint64                       `json:"read_bytes"`
+	CacheHits          uint64                       `json:"metadata_cache_hits"`
+	ParentHits         uint64                       `json:"parent_handle_hits"`
+	RetainedOpens      uint64                       `json:"retained_metadata_opens"`
+	Operations         map[string]NFSOperationStats `json:"rpc_operations"`
 }
 
 func (filesystem *NFS) Stats() NFSStats {
@@ -89,6 +100,9 @@ func (filesystem *NFS) Stats() NFSStats {
 		operations[name] = filesystem.operations[index].stats()
 	}
 	return NFSStats{Lookups: filesystem.lookups.Load(), Getattrs: filesystem.getattrs.Load(), ReadDirPlus: filesystem.readDirPlus.Load(),
+		PoolGrowthAttempts: filesystem.poolGrowthAttempts.Load(), PoolGrowthFailures: filesystem.poolGrowthFailures.Load(),
+		PoolRetired:       filesystem.poolRetired.Load(),
+		ConnectionsOpened: filesystem.connectionsOpened.Load(), PoolShortfalls: filesystem.poolShortfalls.Load(), PoolReuses: filesystem.poolReuses.Load(),
 		Reads: filesystem.reads.Load(), ReadBytes: filesystem.readBytes.Load(), CacheHits: filesystem.cacheHits.Load(),
 		ParentHits: filesystem.parentHits.Load(), RetainedOpens: filesystem.retainedOpens.Load(), Operations: operations}
 }
@@ -119,16 +133,23 @@ type nfsCachedEntry struct {
 }
 
 type nfsEndpoint struct {
-	source      NFSSource
-	device      uint64
-	rootFSID    uint64
-	mutex       sync.Mutex
-	initialized bool
-	err         error
-	root        string
-	targets     []*client.Target
-	pool        *nfsPool
-	server      *nfsServer
+	source        NFSSource
+	device        uint64
+	rootFSID      uint64
+	mutex         sync.Mutex
+	initialized   bool
+	err           error
+	root          string
+	targets       []*client.Target
+	borrowed      bool
+	bindings      map[*client.Target]*client.Target
+	bindingsMutex sync.Mutex
+	recovered     atomic.Pointer[nfsPool]
+	lastUse       atomic.Int64
+	lastGrowth    atomic.Int64
+	dial          func(string, uint32, int) (*rpc.Client, error)
+	pool          *nfsPool
+	server        *nfsServer
 }
 
 func NewNFS(ctx context.Context, sources []string, options NFSOptions) (*NFS, error) {
@@ -215,15 +236,36 @@ func nfsProcessAuth() (rpc.Auth, error) {
 }
 
 func (filesystem *NFS) Close() error {
+	filesystem.mutex.Lock()
 	filesystem.cancel()
+	filesystem.mutex.Unlock()
+	filesystem.maintenance.Wait()
 	filesystem.mutex.Lock()
 	defer filesystem.mutex.Unlock()
 	for _, endpoint := range filesystem.endpoints {
 		endpoint.mutex.Lock()
-		for _, target := range endpoint.targets {
-			target.Client.Close()
+		if !endpoint.borrowed {
+			targets := endpoint.targets
+			if endpoint.pool != nil {
+				targets = endpoint.pool.snapshot()
+			}
+			for _, target := range targets {
+				target.Client.Close()
+			}
+		}
+		if pool := endpoint.recovered.Load(); pool != nil {
+			for _, target := range pool.snapshot() {
+				target.Client.Close()
+			}
 		}
 		endpoint.mutex.Unlock()
+	}
+	for _, server := range filesystem.servers {
+		server.mutex.Lock()
+		if server.mount != nil {
+			server.mount.Close()
+		}
+		server.mutex.Unlock()
 	}
 	filesystem.entries.Purge()
 	filesystem.directories.Purge()
@@ -321,8 +363,10 @@ func (filesystem *NFS) initialize(endpoint *nfsEndpoint) error {
 	endpoint.initialized = true
 	endpoint.err = filesystem.connectEndpoint(endpoint)
 	if endpoint.err != nil {
-		for _, target := range endpoint.targets {
-			target.Client.Close()
+		if !endpoint.borrowed {
+			for _, target := range endpoint.targets {
+				target.Client.Close()
+			}
 		}
 		endpoint.targets = nil
 	}
@@ -330,46 +374,105 @@ func (filesystem *NFS) initialize(endpoint *nfsEndpoint) error {
 }
 
 func (filesystem *NFS) connectEndpoint(endpoint *nfsEndpoint) error {
-	mount, err := filesystem.dial(endpoint.source.Server, client.MountProg, filesystem.options.MountPort)
-	if err != nil {
-		return err
+	return filesystem.connectEndpointWithDial(endpoint, filesystem.dial)
+}
+
+func (filesystem *NFS) mountEndpoint(endpoint *nfsEndpoint, dial func(string, uint32, int) (*rpc.Client, error)) ([]byte, error) {
+	server := endpoint.server
+	if server.mount == nil {
+		mount, err := dial(endpoint.source.Server, client.MountProg, filesystem.options.MountPort)
+		if err != nil {
+			return nil, err
+		}
+		server.mount = mount
 	}
-	defer mount.Close()
 	root := endpoint.source.Path
 	var handle []byte
+	var err error
 	for {
-		handle, err = client.MountHandle(mount, root, filesystem.auth)
+		handle, err = client.MountHandle(server.mount, root, filesystem.auth)
 		if err == nil {
 			break
 		}
 		if root == "/" || filesystem.ctx.Err() != nil {
-			return err
+			return nil, err
 		}
 		root = path.Dir(root)
 	}
 	endpoint.root = root
+	return handle, nil
+}
+
+func (filesystem *NFS) connectEndpointWithDial(endpoint *nfsEndpoint, dial func(string, uint32, int) (*rpc.Client, error)) error {
+	endpoint.dial = dial
+	server := endpoint.server
+	server.mutex.Lock()
+	defer server.mutex.Unlock()
+	handle, err := filesystem.mountEndpoint(endpoint, dial)
+	if err != nil {
+		return err
+	}
+	root := endpoint.root
 	for index := 0; index < filesystem.options.Connections; index++ {
-		connection, err := filesystem.dial(endpoint.source.Server, client.Nfs3Prog, filesystem.options.NFSPort)
+		connection, err := dial(endpoint.source.Server, client.Nfs3Prog, filesystem.options.NFSPort)
 		if err != nil {
-			return err
+			if contextErr := filesystem.ctx.Err(); contextErr != nil {
+				return contextErr
+			}
+			if !errors.Is(err, rpc.ErrNoReservedPort) {
+				return err
+			}
+			filesystem.poolShortfalls.Add(1)
+			if len(endpoint.targets) == 0 {
+				if server.fallback == nil {
+					return err
+				}
+				if err := filesystem.borrowPool(endpoint, server.fallback, handle); err != nil {
+					return err
+				}
+			}
+			break
 		}
+		filesystem.connectionsOpened.Add(1)
 		target, err := client.NewTargetWithClient(connection, filesystem.auth, handle, root, 0)
 		if err != nil {
 			connection.Close()
 			return err
 		}
 		endpoint.targets = append(endpoint.targets, target)
-		if index == 0 {
-			filesystem.getattrs.Add(1)
-			attributes, err := target.GetAttr(handle)
-			if err != nil {
-				return err
-			}
-			endpoint.rootFSID = attributes.FSID
-			filesystem.cacheDirectory(endpoint, root, target.RootHandle())
-		}
 	}
-	endpoint.pool = newNFSPool(endpoint.targets, endpoint.server)
+	filesystem.getattrs.Add(1)
+	attributes, err := endpoint.targets[0].GetAttr(handle)
+	if err != nil {
+		return err
+	}
+	endpoint.rootFSID = attributes.FSID
+	filesystem.cacheDirectory(endpoint, root, handle)
+	if endpoint.pool == nil {
+		endpoint.pool = newNFSPool(endpoint.targets, server)
+	}
+	if endpoint.borrowed {
+		filesystem.poolReuses.Add(1)
+	}
+	if server.fallback == nil {
+		server.fallback = endpoint.pool
+	}
+	return nil
+}
+
+func (filesystem *NFS) borrowPool(endpoint *nfsEndpoint, pool *nfsPool, handle []byte) error {
+	endpoint.borrowed = true
+	targets := pool.snapshot()
+	endpoint.bindings = make(map[*client.Target]*client.Target, len(targets))
+	for _, original := range targets {
+		target, err := client.NewTargetWithClient(original.Client, filesystem.auth, handle, endpoint.root, 0)
+		if err != nil {
+			return err
+		}
+		endpoint.targets = append(endpoint.targets, target)
+		endpoint.bindings[original] = target
+	}
+	endpoint.pool = pool
 	return nil
 }
 

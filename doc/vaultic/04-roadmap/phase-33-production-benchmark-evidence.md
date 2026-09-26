@@ -1,5 +1,90 @@
 # Phase 33 Production Benchmark Evidence
 
+## Direct NFS connection sweep, R40 (2026-09-26)
+
+**The authorized 4/8/16 sweep stopped on a reserved-source-port allocation
+failure at 8 connections. Only the 4-connection observation completed its time
+window; 16 connections was not attempted.** The implementation was committed
+locally as `d9b496ed7bfbee5add4a262b0abeadd1cbedb6fd` with a detailed message.
+Affected race suites, changed-code lint and whitespace checks passed again
+before measurement. Nothing was pushed or deployed to the daemon.
+
+Artifacts are under
+`/volume2/NASDA2/rustic/db.test/backup-direct-nfs-sweep-20260926-r40-profile-oXpapn`.
+The manifest records the exact CLI/source hashes and trial settings. The CLI
+was built with `-tags profile`, SHA256
+`fc2b8ea427fd97af86c18066c5c44c58f90d90b96adc4bd6449ab4b516187383`.
+The scripts, per-trial commands, process/writer samples, CPU profile, four
+goroutine captures, final counters and analyzer are retained. An earlier plain
+build rejected `--cpu-profile` before backup work; that failed startup and its
+healthy postcheck remain separately preserved under
+`/volume2/NASDA2/rustic/db.test/backup-direct-nfs-sweep-20260926-r40-awgbab`.
+
+The workload retained R39's 52 source roots, `--use-cwalk --nfs-direct`, 32 cwalk
+workers, two readers, 64 MiB client lookup capacity and 600-second timeout plus
+45-second shutdown grace. PID 1440079 / epoch 74, 128 MiB daemon metadata cache,
+512 MiB block cache and 100 ms flush interval were asserted before and after
+each attempt. No cache flushing, service restart or daemon setting change was
+performed. Trials are sequential without resetting source or repository state.
+
+| Four-Connection Measurement | Result |
+| --- | ---: |
+| Timeout exit / measured duration | 124 / 600.254 s |
+| Whole harness through postchecks | 601.090 s |
+| Last progress sample | 599 s |
+| Files / logical bytes | 38,068 / 68,451,353,645 |
+| Logical progress rate | 108.98 MiB/s |
+| CLI CPU / peak RSS | 903.74 CPU-s / 867,688 KiB |
+| Daemon CPU / sampled peak RSS | 3,352.97 CPU-s / 1,107,759,104 bytes |
+| Metadata GETs / delivered body bytes | 436,494 / 1,217,158,251,345 |
+| Single-handle size RPCs / mean latency | 90,515 / 17.934 ms |
+| Client lookup cache peak / evictions | 90,511 of 349,525 / 0 |
+| Parent-handle hits / retained metadata opens | 89,850 / 50,000 |
+| Snapshot IDs before / after | 143 / 143, unchanged |
+
+Direct source counters recorded 255,812 LOOKUPs, 73,650 GETATTRs, 12,134
+READDIRPLUS calls, 1,140,464 reads and 68,452,598,829 read bytes. Operation timing
+excludes setup RPCs and is not server-only latency:
+
+| Operation | Mean Queue ms | Mean Service ms | Peak Active |
+| --- | ---: | ---: | ---: |
+| LOOKUP | 0.026 | 0.248 | 4 |
+| GETATTR | 0.301 | 0.217 | 4 |
+| READDIRPLUS | 2.687 | 0.921 | 4 |
+| READ | 0.008 | 0.872 | 2 |
+
+All operation active counts returned to zero. LOOKUP recorded 39,374 errors
+without a reported per-file source error; these are unclassified RPC outcomes,
+not evidence of 39,374 failed backup files. The two READ errors were counted as
+cancellations. There were no reported source errors, sampler failures or commit
+failures in the completed trial. Reconciliation ended with 49,981 scanned,
+34,453 reused, zero changed and 3,616 failed at close; individual close-time
+failures were not classified. There were 34,453 commit requests, zero engine
+writes and no inode revision allocation/publication. No snapshot completed.
+
+The CPU profile contains 890.91 sampled CPU-seconds over 600.09 seconds. SHA256
+accounts for 24.11% flat samples and chunker split-point work for 9.66% flat /
+13.51% cumulative. The 108.98 MiB/s observation versus R39's 82.05 MiB/s is
+historical context only: progress, cache warmth and repository/source state
+were not matched, so this is not a causal speedup claim.
+
+The subsequent 8-connection attempt exited 1 after 3.129 seconds with
+`no available reserved RPC source port` while initializing a source export.
+It made no READDIRPLUS or READ calls. The active-RPC admission limit does not
+bound socket allocation: each export still opens its own pool, and the client
+allocates reserved source ports in 512..1023. Multi-export pools and sockets
+left by preceding trials can exhaust this range; their individual contributions
+were not separately measured. The driver stopped rather than changing source
+port security, waiting/retrying repeatedly, or attempting 16 connections.
+
+Both attempted profile trials left scratch empty and the same 143 snapshot IDs.
+Final read-only preflight reconfirmed PID 1440079, epoch 74, read-write status,
+zero transactions/intents and unchanged cache/flush settings; the profile
+listener was gone. The next prerequisite is bounded shared or lazy per-server
+transport allocation with cancellation/fairness tests, followed by a newly
+identified comparison. RPC multiplexing and higher defaults are not justified
+by this partial sweep. Recovery evidence and WAL quarantine were untouched.
+
 ## Direct NFSv3 backup observation, R39 (2026-09-26)
 
 **The direct-NFS backup ran and stopped cleanly at the approved time limit. No

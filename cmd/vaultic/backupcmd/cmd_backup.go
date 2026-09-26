@@ -258,7 +258,7 @@ func (options *backupOptions) addTraversalFlags(f *pflag.FlagSet) {
 	f.BoolVar(&options.NFSDirect, "nfs-direct", false, "upgrade detected Linux NFSv3 source mounts to direct read-only NFS access")
 	f.BoolVar(&options.NFSAllowMissingMetadata, "nfs-allow-missing-metadata", true,
 		"allow direct NFS without ACLs or extended attributes; set false to require them")
-	f.IntVar(&options.NFSConnections, "nfs-connections", 4, "use `n` direct NFS connections per export (1-16)")
+	f.IntVar(&options.NFSConnections, "nfs-connections", 4, "use up to `n` direct NFS connections per export (1-16)")
 	f.BoolVar(&options.MetadataOnDemand, "metadata-on-demand", false, "use bounded point lookups for authoritative backup metadata")
 	f.StringVar(&options.MetadataScratch, "metadata-scratch", "", "encrypted on-demand metadata scratch `directory`")
 	f.IntVar(&options.MetadataCacheMiB, "metadata-cache-mib", 64, "accounted on-demand lookup cache budget in `MiB` (not a process memory limit)")

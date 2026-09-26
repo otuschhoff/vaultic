@@ -90,7 +90,7 @@ func (options *restoreOptions) AddFlags(f *pflag.FlagSet) {
 	f.BoolVar(&options.NFSDirect, "nfs-direct", false, "restore directly to a detected Linux NFSv3 target mount")
 	f.BoolVar(&options.NFSAllowMissingMetadata, "nfs-allow-missing-metadata", true,
 		"allow direct NFS without ACLs or extended attributes; set false to require them")
-	f.IntVar(&options.NFSConnections, "nfs-connections", 4, "use `n` direct NFS connections per export (1-16)")
+	f.IntVar(&options.NFSConnections, "nfs-connections", 4, "use up to `n` direct NFS connections per export (1-16)")
 
 	options.ExcludePatternOptions.Add(f)
 	options.IncludePatternOptions.Add(f)

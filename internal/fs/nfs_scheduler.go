@@ -4,15 +4,20 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	client "github.com/willscott/go-nfs-client/nfs"
+	"github.com/willscott/go-nfs-client/nfs/rpc"
 )
 
 type nfsServer struct {
-	slots chan struct{}
-	reads chan struct{}
+	slots    chan struct{}
+	reads    chan struct{}
+	mutex    sync.Mutex
+	mount    *rpc.Client
+	fallback *nfsPool
 }
 
 type nfsOperation int
@@ -28,7 +33,19 @@ const (
 var nfsOperationNames = [...]string{"lookup", "getattr", "readdirplus", "read", "readlink"}
 
 func (filesystem *NFS) call(endpoint *nfsEndpoint, operation nfsOperation, call func(*client.Target) error) error {
-	return endpoint.pool.call(filesystem.ctx, operation == nfsRead, &filesystem.operations[operation], call)
+	endpoint.lastUse.Store(time.Now().UnixNano())
+	filesystem.maybeMaintainPools()
+	pool, borrowed := endpoint.activePool()
+	return pool.call(filesystem.ctx, operation == nfsRead, &filesystem.operations[operation], func(target *client.Target) error {
+		if borrowed {
+			var err error
+			target, err = filesystem.bindTarget(endpoint, pool, target)
+			if err != nil {
+				return err
+			}
+		}
+		return call(target)
+	})
 }
 
 func newNFSServer(connections int) *nfsServer {
@@ -36,24 +53,81 @@ func newNFSServer(connections int) *nfsServer {
 }
 
 type nfsPool struct {
+	mutex     sync.Mutex
+	size      atomic.Int64
+	lastUse   atomic.Int64
+	reserved  bool
+	targets   []*client.Target
 	available chan *client.Target
 	metadata  chan *client.Target
 	server    *nfsServer
 }
 
 func newNFSPool(targets []*client.Target, server *nfsServer) *nfsPool {
-	pool := &nfsPool{available: make(chan *client.Target, len(targets)), metadata: make(chan *client.Target, 1), server: server}
-	for index, target := range targets {
-		if index == 0 && len(targets) > 1 {
-			pool.metadata <- target
-		} else {
-			pool.available <- target
-		}
+	pool := &nfsPool{available: make(chan *client.Target, cap(server.slots)), metadata: make(chan *client.Target, 1), server: server}
+	for _, target := range targets {
+		pool.add(target)
 	}
+	pool.lastUse.Store(time.Now().UnixNano())
 	return pool
 }
 
+func (pool *nfsPool) add(target *client.Target) {
+	pool.mutex.Lock()
+	defer pool.mutex.Unlock()
+	pool.targets = append(pool.targets, target)
+	if len(pool.targets) > 1 && !pool.reserved {
+		pool.metadata <- target
+		pool.reserved = true
+	} else {
+		pool.available <- target
+	}
+	pool.size.Store(int64(len(pool.targets)))
+}
+
+func (pool *nfsPool) snapshot() []*client.Target {
+	pool.mutex.Lock()
+	defer pool.mutex.Unlock()
+	return append([]*client.Target(nil), pool.targets...)
+}
+
+func (pool *nfsPool) trimIdle(now time.Time) int {
+	pool.mutex.Lock()
+	defer pool.mutex.Unlock()
+	if now.Sub(time.Unix(0, pool.lastUse.Load())) < 30*time.Second {
+		return 0
+	}
+	var retired []*client.Target
+	for len(pool.available) > 1 {
+		select {
+		case target := <-pool.available:
+			retired = append(retired, target)
+		default:
+		}
+	}
+	if len(pool.available) > 0 {
+		select {
+		case target := <-pool.metadata:
+			retired = append(retired, target)
+			pool.reserved = false
+		default:
+		}
+	}
+	for _, target := range retired {
+		for index, current := range pool.targets {
+			if current == target {
+				pool.targets = append(pool.targets[:index], pool.targets[index+1:]...)
+				break
+			}
+		}
+		target.Client.Close()
+	}
+	pool.size.Store(int64(len(pool.targets)))
+	return len(retired)
+}
+
 func (pool *nfsPool) acquire(ctx context.Context, read bool) (*client.Target, func(), error) {
+	pool.lastUse.Store(time.Now().UnixNano())
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}

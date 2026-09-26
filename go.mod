@@ -160,4 +160,4 @@ require (
 
 replace github.com/willscott/go-nfs => github.com/otuschhoff/go-nfs v0.0.0-20260914094923-10c2fcac207a
 
-replace github.com/willscott/go-nfs-client => github.com/otuschhoff/go-nfs-client v0.0.0-20260926105642-647f2757219b
+replace github.com/willscott/go-nfs-client => github.com/otuschhoff/go-nfs-client v0.0.0-20260926124503-28cae75b1beb

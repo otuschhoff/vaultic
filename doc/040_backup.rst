@@ -115,7 +115,8 @@ captured. Linux mounted-root device IDs are retained, and different server-side
 filesystem IDs remain distinct for ``--one-file-system``. The process's effective
 UNIX UID/GID and supplementary groups are sent using AUTH_SYS. More than 16
 supplementary groups is rejected rather than truncated. Root uses a reserved
-source port where required; non-root users still need the server to allow their
+source port, searching ports 1 through 1023 without repeating candidates within
+the dial deadline. Non-root users still need the server to allow their
 connection. Export permissions and root squashing continue to apply. NFS traffic
 is not encrypted and this mode cannot substitute for Kerberos security.
 
@@ -127,8 +128,35 @@ mounted root; failures propagate without an unbounded retry loop. File reads
 refresh handle attributes before reading and use negotiated read sizes, capped
 at 1 MiB.
 
-The default is four connections per export; ``--nfs-connections`` accepts 1
-through 16. Each source RPC leases an available connection. With more than one
+The default requests up to four connections per export; ``--nfs-connections``
+accepts 1 through 16. If privileged ports run out, a partially opened pool keeps
+its usable connections. An export that cannot open any new NFS connection can
+reuse an existing pool for the same server hostname, preserving its own root
+handle and negotiated limits. One MOUNT connection is retained per server to
+allow subsequent exports to mount without allocating another source port.
+Server errors, authentication failures and cancellation still propagate. If no
+NFS connection exists for a required server, port exhaustion remains an error;
+connections cannot be borrowed across servers. No unprivileged fallback or
+automatic reconnection is attempted.
+
+Reduced pools are not permanently fixed at their initial size. Source activity
+can start one background maintenance pass at most every five seconds, with no
+overlapping passes. A pass retries an active reduced pool toward its requested
+capacity, prioritizing pools least recently retried. A borrowing export can
+obtain its own connections while existing reads continue on the shared pool.
+New exports also attempt fresh allocation, so newly available privileged ports
+can serve both existing and new exports. Optional growth failures retain the
+working connections; failed file operations are not automatically retried.
+
+Pools unused for 30 seconds release idle surplus connections, retaining at least
+one usable connection. Leased connections are never retired. This is an idle
+heuristic, not an archiver signal that an export has finished; a resumed export
+can grow again. Borrowed activity keeps the shared pool active. The kernel may
+retain released ports in TIME_WAIT, so reuse is possible only when the ports
+become bindable again. Filesystem close cancels and joins maintenance before
+closing its connections.
+
+Each source RPC leases an available connection. With more than one
 connection, one is reserved for metadata; metadata can also use any other idle
 connection. Missing READDIRPLUS attributes are resolved in bounded parallel
 requests. Active source RPCs across exports sharing the same server hostname
@@ -155,7 +183,10 @@ RPC timeouts/cancellation and source errors propagate without falling back to
 mounted reads for a selected direct NFS source. Source-file close issues no
 write or COMMIT RPC. Verbose output reports NFS read/traversal counters.
 JSON output includes ``nfs_source_stats`` after source close, including parent
-handle hits, retained metadata opens, and ``rpc_operations`` for LOOKUP,
+handle hits, retained metadata opens, ``nfs_connections_opened``,
+``connection_pool_shortfalls``, ``connection_pool_reuses``,
+``connection_pool_growth_attempts``, ``connection_pool_growth_failures``,
+``nfs_connections_retired_idle``, and ``rpc_operations`` for LOOKUP,
 GETATTR, READDIRPLUS, READ and READLINK. Each operation reports attempts, calls
 admitted to a connection, errors, cancellations/deadlines, queue and service
 nanoseconds, and active/maximum concurrent calls. EOF is not an error. Service

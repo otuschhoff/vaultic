@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"testing"
 	"time"
 
 	client "github.com/willscott/go-nfs-client/nfs"
+	"github.com/willscott/go-nfs-client/nfs/rpc"
 )
 
 func TestNFSPool(t *testing.T) {
@@ -31,7 +33,7 @@ func TestNFSPool(t *testing.T) {
 			}
 			if connections > 1 {
 				target, release, err := pool.acquire(ctx, false)
-				if err != nil || target != targets[0] {
+				if err != nil || target != targets[1] {
 					t.Fatalf("metadata reservation: %p %v", target, err)
 				}
 				releases = append(releases, release)
@@ -60,7 +62,7 @@ func TestNFSPool(t *testing.T) {
 			}
 			releases[0]()
 			target, release, err := pool.acquire(ctx, false)
-			if err != nil || target != targets[min(1, connections-1)] {
+			if err != nil || target != targets[0] {
 				t.Fatalf("did not select the available connection: %p %v", target, err)
 			}
 			releases[0] = release
@@ -90,5 +92,36 @@ func TestNFSPool(t *testing.T) {
 				t.Fatal("scheduler leaked admission or connections")
 			}
 		})
+	}
+}
+
+func TestNFSPoolRegrowth(t *testing.T) {
+	newTarget := func() *client.Target {
+		local, remote := net.Pipe()
+		connection := rpc.NewClient(t.Context(), local)
+		t.Cleanup(func() { connection.Close(); _ = remote.Close() })
+		return &client.Target{Client: connection}
+	}
+	pool := newNFSPool([]*client.Target{newTarget()}, newNFSServer(4))
+	pool.add(newTarget())
+	pool.add(newTarget())
+	pool.add(newTarget())
+	_, release, err := pool.acquire(t.Context(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed := pool.trimIdle(time.Now()); removed != 0 {
+		t.Fatal("trimmed a recently used pool")
+	}
+	if removed := pool.trimIdle(time.Now().Add(time.Minute)); removed != 2 || pool.size.Load() != 2 {
+		t.Fatalf("retired=%d size=%d", removed, pool.size.Load())
+	}
+	release()
+	if removed := pool.trimIdle(time.Now().Add(time.Minute)); removed != 1 || pool.size.Load() != 1 {
+		t.Fatalf("retired=%d size=%d", removed, pool.size.Load())
+	}
+	pool.add(newTarget())
+	if pool.size.Load() != 2 || len(pool.metadata) != 1 || len(pool.available) != 1 {
+		t.Fatal("regrowth did not restore metadata reservation")
 	}
 }
