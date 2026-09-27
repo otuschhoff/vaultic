@@ -1,5 +1,488 @@
 # Phase 33 Production Benchmark Evidence
 
+## Offline cancellation-ordering reproduction (2026-09-27)
+
+The cancellation/rollback ordering hypothesized after R44 is now reproducible
+with an isolated daemon. A barrier immediately before `Storage::commit`
+removes its transaction allows the test to cancel the client RPC, observe its
+`transactionCommitUncertain` state, finish rollback using the normal cleanup
+context, and then release the detached server commit. The resulting diagnostic
+is exactly `storage_commit / NotFound / transaction_consumed=false`.
+
+The control ordering uses the existing before-apply barrier, after transaction
+removal. Rollback then returns `NotFound`, while the detached commit succeeds.
+Both orderings are tested with read-only and mutating transactions:
+
+| Ordering | Rollback Result | Server Commit | Data After Reopen |
+| --- | --- | --- | --- |
+| Rollback first, read-only | Success | NotFound, not consumed | Absent; zero engine writes |
+| Rollback first, mutating | Success | NotFound, not consumed | Staged value absent |
+| Commit takes ownership first, read-only | NotFound | Success | Absent; zero engine writes |
+| Commit takes ownership first, mutating | NotFound | Success | Committed value retained |
+
+`TestProcessCancelledCommitFinalizationOrdering` passes all four cases across
+ten race-detector repetitions. It verifies settled counters, zero active
+transactions/write intents, exact failure diagnostics after process exit and
+data visibility after reopening the temporary database. Settlement waits for
+reconciled outcomes and quiescence, not `completed` alone: timing counters are
+separate atomics and a snapshot can briefly observe a partial update.
+Neighboring delayed-response recovery, response-delivery barrier and deferred
+durability-token tests also pass. Changed-code Go lint and normal daemon
+compilation pass. The new Rust barrier's formatting is valid; existing unrelated
+storage-file formatting differences were verified against HEAD and preserved.
+
+The normal lazy-build test path also passes; binary preparation occurs before
+the per-case timeout. Its first build exhausted the root filesystem and the
+LLVM linker stopped with a bus error. The 6.1 GiB generated process-test cache
+was preserved under `/run/vaultic-cancel-ordering-build-yFNQBs/process-tests`,
+with the original target path retained as a symlink. This cache is ephemeral
+and must be recreated after reboot; no production data or settings were moved.
+
+The new barrier is compiled only for Unix builds with `test-failpoints` and
+uses the existing process-test capability gate. It is absent from normal
+production builds. No transaction semantics, retry policy, production binary,
+daemon settings or live workloads were changed; sealed R44 evidence remains
+untouched. This is a deterministic characterization, not a correctness fix or
+permission to waive the failed benchmark gate.
+
+The experiment proves that the proposed ordering can generate R44's observed
+signature even with zero engine writes. It does not establish the identity or
+ordering of the specific live transaction, or retroactively classify R43's
+four failures. A fix must coordinate finalization while preserving both
+uncertain-commit durability and cleanup when a commit never reached the server;
+blindly suppressing `NotFound`, retrying mutations or skipping cleanup would
+not satisfy that contract.
+
+## Diagnostic baseline, R44 (2026-09-27)
+
+**The approved baseline completed its 600-second window but failed the strict
+commit-outcome gate.** The newly deployed instrumentation captured one
+`NotFound` result at `storage_commit`, with `transaction_consumed=false`,
+600.008 seconds after launch. No additional live run, candidate sweep, daemon
+change, commit or push followed. The result is diagnostic evidence, not an
+accepted performance baseline or a retroactive explanation for R43.
+
+Artifacts are retained under
+`/volume2/NASDA2/rustic/db.test/diagnostic-baseline-20260927-r44-0hvUOg`.
+The immutable baseline CLI is SHA256
+`b67d19ebe426bbdef1cfb3f407db19af44db8bfcd2b4c9e65b5f13d3c0cbc9c3`, using source
+base `94b54dc3e180284e4907b86d19893d2be5cc5a28`; the diagnostic daemon is SHA256
+`7c711452bd218a8715225c8f18398d56a8f9b18e6821c30aa072e0b6bf52427b` at PID
+1572244 / epoch 75. A fresh harness and nine synthetic acceptance-gate tests
+were validated before the single approved run. Previous sealed trial files
+were not modified. The harness pinned binary/unit/environment identities and
+would stop the backup on a sampled non-success or identity failure. The error
+appeared after the final periodic sample, so the post-shutdown gate rejected
+it. `decision.json` records `accepted=false` and retains both rejection reasons.
+
+The run used the same 52 sources, explicit `--use-cwalk --nfs-direct`, four
+readers, eight NFS connections, 32 cwalk workers and 64 MiB client lookup cache.
+The daemon remained at 128 MiB metadata cache, 512 MiB block cache and 100 ms
+flush interval. No builds or tests ran concurrently. GNU timeout returned 124
+after 600.295 seconds, within the approved 45-second shutdown grace; no forced
+kill or early safety stop was required.
+
+| Measurement | R44 |
+| --- | ---: |
+| Files / logical bytes at 599 seconds | 45,670 / 87,142,967,123 |
+| Logical throughput | 138.741 MiB/s |
+| Commit attempts / successes / failures | 42,246 / 42,245 / 1 |
+| Commit cancellations / timeouts / active | 0 / 0 / 0 |
+| Size RPCs / handles | 111,410 / 111,410 |
+| Mean size RPC latency | 19.496 ms |
+| Metadata GETs / GETs per handle | 623,177 / 5.594 |
+| Metadata logical body bytes | 1,489,364,624,141 |
+| CLI / daemon mean cores | 2.040 / 7.278 |
+| CLI peak RSS | 998,536 KiB |
+| Daemon sampled peak RSS | 1,134,202,880 bytes |
+| Client cache peak occupancy / evictions | 31.87% / 0 |
+| NFS connections opened / idle-retired / shortfalls | 384 / 329 / 0 |
+| Peak / final sampled owned reserved sockets | 387 / 58 |
+| Mean NFS READ queue / service latency | 0.0086 / 1.161 ms |
+
+The last periodic status at 595.643 seconds showed 41,806 successful commits
+and no non-successes. The failure event occurred at the timeout boundary; final
+status at 600.325 seconds showed one failure, with no active transactions or
+write intents. All 143 snapshot IDs match, scratch is empty and the profile
+listener is gone. Reported source and sampler errors are zero, and engine
+writes are zero. NFS READ counters include four cancellations; LOOKUP reports
+48,066 unclassified errors, and reconciler close-time accounting reports
+3,431 failed entries. These are not silently reclassified as successful work.
+
+The diagnostic identifies a storage-commit error before this commit consumed
+transaction state, not an explicit gRPC cancellation or deadline result. Local
+inspection found that `Storage::remove_transaction` returns transaction
+`NotFound` when the map entry is absent. The client can mark a cancelled commit
+response uncertain and subsequently issue rollback with a cleanup context,
+while the server continues detached commit processing. Rollback winning that
+ordering is a plausible hypothesis, but the event contains no transaction ID
+or causal ordering evidence; expiry or another removal cannot be excluded.
+A deterministic cancellation/rollback reproduction is required before changing
+transaction semantics or relaxing any gate. R43's four historical failures
+remain unclassified.
+
+The 360-second stack contains four active size MultiGet calls, four repository
+blob-save tasks waiting for lookup results and 32 cwalk waiters. Metadata
+per-key cost remains a supported investigation target; more NFS connections or
+a larger client cache is not justified by this run. The 138.741 MiB/s result
+is not a causal regression estimate against the earlier roughly 153 MiB/s
+measurements: this run followed a daemon restart and has different cache warmth
+and work mix. Logical throughput is not uploaded-byte throughput, and no
+completed-backup runtime or payload-restore claim is made.
+
+## Diagnostic daemon deployment (2026-09-27)
+
+The user explicitly approved deployment after the offline attribution and
+benchmark-accounting work. A native Linux release build of the diagnostic
+daemon was tested against temporary storage, then deployed to the unchanged
+`vaulticdb-rustic.service`. No benchmark, fault injection, commit or push was
+performed. This deployment supersedes the earlier pending-deployment notes;
+it does not change R43's rejected result or classify its historical failures.
+
+Private deployment evidence is retained under
+`/volume2/NASDA2/rustic/db.test/diagnostic-deployment-20260927-W03LCF`.
+It includes the guarded deployment script, original and candidate binaries,
+source patch, configuration fingerprints, writer/snapshot records, startup
+journal, validation results and checksum manifest. The source base remains
+`94b54dc3e180284e4907b86d19893d2be5cc5a28` with the recorded uncommitted diagnostic
+and test changes. The deployed binary SHA256 is
+`7c711452bd218a8715225c8f18398d56a8f9b18e6821c30aa072e0b6bf52427b`;
+the retained original SHA256 is
+`3a825c277b2273627ca9349122e8c77b32f7ac91710a888411c4765fd6531ccd`.
+
+The exact release candidate passed `TestCommitFailureAttribution`,
+`TestRealDaemonAdmissionErrorsAreTyped` and
+`TestStorageRoundTripTransactionsPaginationAndRestart` with the Go race
+detector before deployment. Production preflight required the original PID,
+binary and unit identity, quiescent transactions/commits and 143 snapshots.
+The installed helper CLI was stale and failed a socket-correctness preflight;
+no service change occurred. The guard was corrected to use the immutable R43
+baseline CLI, SHA256
+`b67d19ebe426bbdef1cfb3f407db19af44db8bfcd2b4c9e65b5f13d3c0cbc9c3`.
+
+The transport handles SIGINT, but the unit's unchanged default stop signal is
+SIGTERM. The deployment therefore explicitly signalled SIGINT to the verified
+main process and required an inactive unit with successful exit status zero
+before atomically replacing the executable and starting the existing unit.
+No forced termination, takeover, WAL manipulation or recovery bypass occurred.
+The old binary remains available for a separately verified recovery procedure.
+
+Post-deployment verification confirmed PID **1572244**, read-write role and
+current/observed epoch **75**, advancing normally from PID 1440079 / epoch 74.
+The configured instance ID remains `vaulticdb-dev`; process identity was checked
+using the executable hash, new PID and increased process-start timestamp, not
+by incorrectly treating that stable instance ID as a restart identifier.
+Unit/environment fingerprints, runtime configuration and all effective engine
+tuning values are unchanged: 128 MiB metadata cache, 512 MiB block cache and
+100 ms flush interval. All 143 snapshot IDs match exactly; active transactions,
+write intents and commits are zero. This is a deployment health/membership
+check, not a full metadata audit or payload restore.
+
+The old counters recorded 347,392 commit attempts and four failures. The new
+process starts with zero commit attempts, failures, cancellations, timeouts
+and engine writes. These resets must not be interpreted as resolving R43.
+Future measurements need a fresh baseline using the new PID, epoch and binary,
+and must check every non-success outcome. Existing sealed trial artifacts and
+their identity guards remain unchanged; no old trial was resumed.
+
+## Rejected client-side lookup batching, R43 (2026-09-26)
+
+**Cross-caller batching reduced RPC count but did not improve throughput, and
+the candidate failed the zero-commit-failure gate. The experimental code was
+removed from the worktree; its patch, tests and binary remain in the artifacts.**
+No implementation commit, push, daemon deployment, restart or setting change
+was made. The restored cache files and backup documentation match HEAD, and the
+restored cache race tests pass. Earlier R41/R42 evidence edits were preserved.
+
+Artifacts are under
+`/volume2/NASDA2/rustic/db.test/backup-metadata-batching-20260926-r43-Jtayol`.
+The baseline is commit `94b54dc3e180284e4907b86d19893d2be5cc5a28`, CLI SHA256
+`b67d19ebe426bbdef1cfb3f407db19af44db8bfcd2b4c9e65b5f13d3c0cbc9c3`.
+The candidate CLI SHA256 is
+`6f1e0d6db77f6ebc19dffb09e951adf228bfe99466e5b48017f333a1e13ea68b`;
+the frozen `source.patch` SHA256 is
+`a43e636e03e18e6c6e56bbf582e404df340f7cbcb9ffe5b8275c9f10ea02e683`.
+Both sequential trials used four readers, eight NFS connections, 32 cwalk
+workers, the same 52 sources, explicit `--use-cwalk --nfs-direct`, 64 MiB client
+lookup capacity and 600-second timeout plus 45-second shutdown grace. Source
+and cache state were not reset; differences are not isolated causal estimates
+or completed-backup runtime measurements.
+
+The candidate registered distinct misses before admission in one shared queue,
+limited to 256 handles, in addition to four active size batches. It dispatched
+without an artificial delay, deduplicated across callers, preserved independent
+cancellation and local pending-write overlays, and joined queued/active work on
+close. Deterministic queued batching, ordering, cancellation, full-queue rollover
+and overlay tests passed, including ten repeated race runs. Changed-code lint
+reported zero issues. Production lookup concurrency is explicitly four in
+`cmd/vaultic/backupcmd/cmd_backup_run.go`, not inferred from a sampled peak.
+
+The index and backup-command race suites passed. The repository suite failed
+`TestReadCacheChunkBoundaryAndFinalShortRead` (requests 3 to 4, bytes 216 to 220);
+a Go overlay restoring committed cache code reproduced the identical failure.
+All affected suites passed with only that pre-existing test excluded. An initial
+reduced-capability repository run also failed permission tests; those passed
+under ordinary root. Neither issue was changed as part of this experiment.
+
+| Measurement | Baseline | Batched Candidate |
+| --- | ---: | ---: |
+| Backup duration, seconds (exit 124) | 600.279 | 600.304 |
+| Files at 599 seconds | 49,672 | 49,166 |
+| Logical bytes at 599 seconds | 96,312,717,818 | 94,089,477,106 |
+| Logical MiB/s | 153.341 | 149.801 |
+| Size RPCs / handles | 122,079 / 122,079 | 38,875 / 120,130 |
+| Mean handles per size RPC | 1 | 3.090 |
+| Mean size RPC service, ms | 18.726 | 56.686 |
+| Mean queued-batch wait, ms | unavailable | 11.200 |
+| Metadata GETs | 565,999 | 555,229 |
+| Metadata logical body bytes | 1,625,720,401,434 | 1,596,622,147,972 |
+| CLI / daemon mean cores | 2.154 / 7.846 | 2.185 / 7.644 |
+| CLI peak RSS, KiB | 1,072,780 | 1,071,704 |
+| Daemon sampled peak RSS, bytes | 1,304,006,656 | 1,306,574,848 |
+| Commit attempts / failures | 48,844 / 0 | 46,674 / 4 |
+
+RPC count fell about 68%, but service cost remained about 18 ms per handle and
+metadata GETs remained about 4.6 per handle. The 360-second candidate stack
+shows 32 callers waiting for lookup results, four MultiGet fetches, 32 waiting
+cwalk workers and two file savers blocked at blob-save admission. The queue
+moved waiting work without removing its underlying metadata service cost.
+Client cache occupancy remained about 34% with no eviction. More client
+batching or a larger client result cache is not supported by these results.
+The next performance investigation belongs in daemon MultiGet per-key work and
+metadata table/block reuse, with bounded backend instrumentation before any
+daemon change. No server-side cause or daemon CPU attribution is proven here.
+
+The candidate's four commit failures first appear in the post-timeout writer
+sample at 601.077 seconds relative to the before-status timestamp; earlier
+samples had zero. This bounds detection, not exact failure time. The CLI log
+reports termination and `context canceled`; sampled commit counters classify
+these as failures with zero cancellation/timeout counts. The daemon journal
+provided no matching failure detail. Their exact causes remain unclassified:
+they were not waived as benign shutdown failures. The driver stopped with
+`commit failures`, so there is no successful sweep-completion record. Preserve
+the failure record and investigate commit-error attribution before another live
+candidate trial; do not bypass the gate.
+
+Both runs left scratch empty, zero engine writes, all 143 snapshot IDs unchanged
+and no reported per-file source or sampler errors. All active source RPCs
+returned to zero. Each opened 384 NFS sockets and retired 329 idle sockets,
+with no shortage/reuse/regrowth. Each recorded four READ cancellations; LOOKUP
+errors (53,837/53,507) and reconciliation close-time failures (833/2,497) remain
+unclassified. No snapshot completed. Final writer status was read-write at
+epoch 74 with zero transactions/intents; PID 1440079 remained active/running
+with 128 MiB metadata cache, 512 MiB block cache and 100 ms flush interval.
+The profiling listener was gone. Metadata body bytes are logical, not physical
+network/disk traffic; profiles and raw samples are retained for offline analysis.
+
+### Offline attribution follow-up (2026-09-26)
+
+Inspection found that `TimingGuard::record_result` collapses every returned
+error into `Failure`. A regression using explicit gRPC `Cancelled` and
+`DeadlineExceeded` statuses reproduced zero cancellation/timeout counts. The
+commit handler now uses a status-aware recorder; other generic timing callers
+are unchanged. This proves an attribution gap, not the cause of R43's four
+historical errors. Future gates must check failures, cancellations and timeouts
+together and must not retroactively waive the failed R43 gate.
+
+Failure-only, fixed-cardinality `commit_failure` stderr diagnostics now record
+the commit stage, gRPC status, transaction consumption and occurrence count,
+without raw request/error text. Each stage/status pair logs its first eight
+occurrences and then powers of two. Consumption is not a durability assertion.
+Twelve Rust attribution tests pass, including status classification and bounded
+diagnostics. A temporary in-memory daemon integration test verifies an expired
+commit as a validation timeout, a missing transaction as a storage-commit
+failure, counter settlement, transaction cleanup and request-data redaction.
+Neighboring transaction/publication tests also pass under the Go race detector.
+Go changed-code lint and Rust formatting pass. Clippy completes with existing
+crate warnings; its only warning in the touched files is an unchanged timing
+expression verified against HEAD.
+
+This is an uncommitted, offline diagnostic change, not a throughput optimization
+or a production deployment. The production daemon remains PID 1440079; no new
+live trial, restart, tuning, commit or push occurred. The four R43 failures
+remain unclassified, and further live candidate trials remain gated on their
+attribution. Deployment of the diagnostic daemon requires separate approval.
+
+### Offline benchmark-accounting follow-up (2026-09-27)
+
+No explicit production deployment approval was available, so work remained
+offline. The revision-allocation and daemon-backed publication tests still
+inferred successful commits as attempts minus generic failures. They now use
+the explicit success counter, require all attempts to have completed and all
+completed outcomes to reconcile, and reject active commits, cancellations and
+timeouts. Existing allowance for contention failures is preserved; these tests
+are not the zero-error production benchmark gate. Publication output now lists
+successful, failed, cancelled and timed-out commits separately.
+
+All four revision-allocation modes and all eight publication cases passed with
+the Go race detector against the isolated local daemon and temporary storage.
+The publication cases used 32 inodes, one content ID and one stream; expected
+contention failures remained separately accounted for, with zero cancellations
+or timeouts. Changed-code lint and formatting checks passed. This validates
+test accounting, not a production throughput gain or an explanation for the
+four historical R43 failures. No production deployment, restart, live trial,
+settings change, commit or push was performed; sealed trial artifacts remain
+unchanged.
+
+## Direct NFS reader comparison, R42 (2026-09-26)
+
+**Four file readers achieved 152.85 MiB/s versus 106.95 MiB/s with two, at a
+fixed eight-connection target.** This is 42.91% more logical bytes and 30.17%
+more completed files within the observation window, not a measured reduction
+in full-backup runtime. The fresh two-reader baseline agrees with R41's
+eight-connection result (107.27 MiB/s). These sequential trials did not reset
+caches or source state, and the four-reader run reaches a different work mix;
+the observed difference is not an isolated causal speedup estimate.
+
+Artifacts are under
+`/volume2/NASDA2/rustic/db.test/backup-direct-nfs-readers-20260926-r42-XYpi1y`.
+The exact R41 profile binary was reused at commit
+`94b54dc3e180284e4907b86d19893d2be5cc5a28`, SHA256
+`b67d19ebe426bbdef1cfb3f407db19af44db8bfcd2b4c9e65b5f13d3c0cbc9c3`.
+Only `--read-concurrency=2` versus `4` varied. Both runs retained the same 52
+sources, `--use-cwalk --nfs-direct --nfs-connections=8`, 32 cwalk workers,
+64 MiB client lookup capacity and 600-second timeout with 45-second grace.
+Identity checks allowed only the fingerprinted, pre-existing R41 evidence edit.
+No code changes, builds, daemon deployment, restart, cache flush or tuning
+overlapped the observation. No new commit or push was made.
+
+| Measurement | Two Readers | Four Readers |
+| --- | ---: | ---: |
+| Backup duration, seconds (exit 124) | 600.245 | 600.261 |
+| Files at 599 seconds | 38,026 | 49,500 |
+| Logical bytes at 599 seconds | 67,176,867,875 | 96,005,671,267 |
+| Logical MiB/s | 106.953 | 152.852 |
+| CLI CPU-seconds / mean cores | 912.33 / 1.520 | 1,327.12 / 2.211 |
+| Daemon CPU-seconds / mean cores | 3,369.51 / 5.606 | 4,661.93 / 7.756 |
+| CLI peak RSS, KiB | 891,640 | 1,050,996 |
+| Daemon sampled peak RSS, bytes | 1,152,471,040 | 1,272,504,320 |
+| Peak / average active READ RPCs | 2 / 1.662 | 4 / 2.384 |
+| Mean READ queue / service, ms | 0.0065 / 0.8899 | 0.0079 / 0.9001 |
+| Single-handle size RPCs | 90,011 | 121,639 |
+| Mean size RPC latency, ms | 18.040 | 18.759 |
+| Average active size RPCs | 2.705 | 3.801 |
+| Metadata GETs | 420,346 | 591,900 |
+| Metadata logical body bytes | 1,208,798,934,241 | 1,620,569,741,613 |
+| Client lookup peak entries / evictions | 90,010 / 0 | 121,635 / 0 |
+
+Average active RPCs are aggregate recorded service seconds divided by backup
+wall seconds, not independent instantaneous samples. Both runs opened 384 NFS
+connections, retired 329 idle connections and had 387 peak / 58 final sampled
+process-owned reserved TCP sockets, including setup connections. There were
+zero shortfalls, pool reuses or growth attempts/failures. Extra readers used
+existing transport capacity; no extra sockets were needed. Host-wide reserved
+TIME_WAIT peaks of 330/386 are not exclusively attributable to these processes.
+
+The four-reader 360-second stack contains 22 workers waiting at
+`CachedBlobLookup.LookupSizesContext` admission, four MultiGet fetches and four
+callers waiting for results; all 32 cwalk workers are waiting. Every size RPC
+still carries one handle. Lookup-cache occupancy reaches only 35% of capacity
+without evictions. Four readers improve source overlap but do not remove
+metadata backpressure. The next implementation candidate is bounded cross-caller
+size batching before admission, with tests for deduplication, cancellation,
+shutdown and concurrent pending-blob visibility. Measure handles per RPC,
+admission wait, metadata GETs per unit of work and throughput at fixed four
+readers before increasing readers or daemon resource budgets again. No global
+reader default was changed; four readers is the next benchmark configuration,
+not yet a full-backup production recommendation.
+
+CLI profiles contain 899.61/1,315.58 sampled CPU-seconds. SHA256 accounts for
+23.54/24.75% flat samples; chunk splitting accounts for 9.40/10.34% flat and
+13.02/14.09% cumulative. Cumulative percentages overlap. No daemon CPU profile
+was captured, and metadata body bytes are logical delivered bytes rather than
+physical network or disk traffic.
+
+Both trials left scratch empty, all 143 snapshot IDs unchanged, zero active
+RPCs and no source, sampler or commit failures. Commit requests were
+34,453/48,844 with zero engine writes. Each recorded two READ cancellations;
+LOOKUP errors (39,285/53,822) and reconciliation close-time failures
+(3,574/658) remain unclassified. No snapshot completed. The same PID 1440079,
+epoch 74, read-write role, zero transactions/intents, 128 MiB metadata cache,
+512 MiB block cache and 100 ms flush interval were verified before and after.
+The profiling listener was gone and the daemon remained active/running.
+
+## Direct NFS capacity-recovery sweep, R41 (2026-09-26)
+
+**All three authorized 600-second observations completed their windows. Raising
+the connection target from 4 to 8 or 16 did not improve logical throughput.**
+The implementation was committed locally with a detailed message as
+`94b54dc3e180284e4907b86d19893d2be5cc5a28`; nothing was pushed or deployed.
+Affected race suites and changed-code lint passed before the sweep.
+
+Artifacts are under
+`/volume2/NASDA2/rustic/db.test/backup-direct-nfs-sweep-20260926-r41-omISYv`.
+The profile-tag CLI SHA256 is
+`b67d19ebe426bbdef1cfb3f407db19af44db8bfcd2b4c9e65b5f13d3c0cbc9c3`.
+The manifest, exact commands, per-trial analysis, CPU profiles, four goroutine
+captures per trial, process/writer/socket samples and sweep comparison are
+retained. The workload uses the same 52 sources, `--use-cwalk --nfs-direct`,
+32 cwalk workers, two file readers and 64 MiB client lookup capacity. Trials
+were sequential without cache or source-state reset; small differences are not
+causal regressions, and these windows do not measure completed-backup runtime.
+
+| Measurement | 4 Connections | 8 Connections | 16 Connections |
+| --- | ---: | ---: | ---: |
+| Backup duration, seconds (exit 124) | 600.252 | 600.265 | 600.256 |
+| Files at 599 seconds | 38,046 | 38,028 | 38,012 |
+| Logical bytes at 599 seconds | 67,985,806,519 | 67,374,711,419 | 66,712,921,430 |
+| Logical MiB/s | 108.241 | 107.268 | 106.214 |
+| CLI mean cores | 1.538 | 1.509 | 1.510 |
+| Daemon mean cores | 5.595 | 5.603 | 5.594 |
+| NFS connections opened / retired idle | 192 / 141 | 384 / 329 | 768 / 705 |
+| Peak / final sampled process-owned reserved TCP sockets | 195 / 54 | 387 / 58 | 771 / 66 |
+| Peak concurrent READ RPCs | 2 | 2 | 2 |
+| Mean READ queue / service, ms | 0.0083 / 0.8753 | 0.0065 / 0.8863 | 0.0061 / 0.8959 |
+| Mean READDIRPLUS queue / service, ms | 2.7447 / 0.9090 | 0.9599 / 0.6990 | 0.2971 / 0.6757 |
+| Single-handle size RPCs | 90,269 | 90,074 | 89,883 |
+| Mean size RPC latency, ms | 17.955 | 17.998 | 18.048 |
+| Metadata GETs | 421,590 | 420,655 | 420,086 |
+| Metadata logical body bytes | 1,212,428,791,343 | 1,209,502,048,977 | 1,208,076,443,790 |
+
+There were zero allocation shortfalls, fallback-pool reuses, growth attempts or
+growth failures. Idle retirement is demonstrated; live shortage recovery was
+not exercised in these runs. Process-owned sockets are matched by FD inode and
+include setup connections, not just NFS data sockets. Namespace-wide reserved
+TIME_WAIT peaks were 142/382/763; those include unrelated processes and cannot
+be attributed entirely to Vaultic. The user's observation that only about
+10-15 connections carry notable traffic is consistent with excess idle capacity,
+but the sampler counts sockets rather than per-socket traffic and cannot verify
+that exact busy-connection count.
+
+The 16-connection 360-second stack shows 24 workers at `CachedBlobLookup`
+admission, four size fetches waiting on MultiGet, another four callers waiting
+for results, 32 cwalk workers waiting, and both file readers in NFS reads.
+Each size RPC still carries exactly one handle. Client lookup occupancy peaks
+at about 26% with zero evictions, so enlarging that cache is not supported.
+Metadata delivers about 2.88 MB per GET; repeated metadata work/cache pressure
+is a candidate, not proof of physical network traffic or daemon CPU attribution.
+No daemon CPU profile was captured.
+
+CLI CPU profiles contain 910.61/893.04/893.44 sampled CPU-seconds. SHA256
+accounts for 23.36/23.76/23.44% flat samples; chunk splitting accounts for
+9.33/9.29/9.20% flat and 12.92/12.93/12.89% cumulative. These costs are
+consistent across targets; cumulative percentages overlap and are not additive.
+
+The cheapest next discriminating experiment is two versus four file readers at
+a fixed eight-connection target and unchanged daemon settings. READ service
+occupies about 1.65-1.66 aggregate in-flight calls on average, with a hard
+observed peak of two and negligible connection queueing. More readers may hide
+source latency but could expose more metadata backpressure. The next code
+candidate is bounded cross-caller size-lookup batching before RPC admission,
+preserving cancellation, deduplication and pending-blob visibility. Measure
+handles/RPC, admission wait, GET amplification and end-to-end progress before
+acceptance. Further connection increases or cwalk workers are not supported;
+daemon cache changes require separate authorization.
+
+All trials left scratch empty and all 143 snapshot IDs unchanged. Each made
+34,453 commit requests with zero failures and zero engine writes. There were
+zero reported per-file source errors or sampler errors, and all active RPC
+counts returned to zero. Each run recorded two READ cancellations at timeout;
+LOOKUP errors (39,308/39,292/39,338) and reconciliation close-time failures
+(3,594/3,576/3,563) remain unclassified, not evidence of completed-backup success.
+The same PID 1440079, epoch 74, read-write role, zero transactions/intents,
+128 MiB metadata cache, 512 MiB block cache and 100 ms flush interval were
+verified throughout. No snapshot completed; no restart or tuning occurred.
+
 ## Direct NFS connection sweep, R40 (2026-09-26)
 
 **The authorized 4/8/16 sweep stopped on a reserved-source-port allocation

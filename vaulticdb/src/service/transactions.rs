@@ -5,6 +5,7 @@ use std::time::Instant;
 use tonic::{Request, Response, Status};
 
 use crate::{
+    attribution::CommitStage,
     error::VaulticDbError,
     proto::{
         AwaitDurableThroughRequest, AwaitDurableThroughResponse, BeginResponse, CommitResponse,
@@ -198,6 +199,8 @@ impl Service {
         request: Request<TransactionRequest>,
     ) -> Result<Response<CommitResponse>, Status> {
         let mut timer = self.state.attribution.commit_request.timer();
+        let mut stage = CommitStage::RequestValidation;
+        let mut transaction_consumed = None;
         let result = async {
             check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
             let fence = request.get_ref().publication_fence.as_ref();
@@ -206,10 +209,14 @@ impl Service {
             } else {
                 None
             };
+            stage = CommitStage::Admission;
             let _admission = self.mutation_admission().await?;
+            stage = CommitStage::Storage;
             let storage = self.storage().await?;
+            stage = CommitStage::WriterAuthority;
             self.ensure_writer_authority().await?;
             if let Some(fence) = fence {
+                stage = CommitStage::PublicationFence;
                 if fence.read_session_id.is_empty()
                     || fence.read_session_id == request.get_ref().transaction_id
                     || request.get_ref().defer_durability
@@ -233,7 +240,9 @@ impl Service {
                     .validate_read_session(&fence.read_session_id)
                     .await?;
             }
+            stage = CommitStage::DurabilityAuthority;
             let authority = self.durability_authority(storage.as_ref()).await?;
+            stage = CommitStage::StorageCommit;
             let result = storage
                 .commit(
                     &request.get_ref().transaction_id,
@@ -246,12 +255,15 @@ impl Service {
                 Ok(outcome) => outcome.consumed,
                 Err(failure) => failure.consumed,
             };
+            transaction_consumed = Some(consumed);
             if consumed {
                 self.state.writer_role.lock().await.transaction_closed();
                 *self.state.last_writer_activity.lock().await = Instant::now();
             }
             if result.is_err() && !consumed {
+                stage = CommitStage::PostCommitAuthority;
                 self.ensure_writer_authority().await?;
+                stage = CommitStage::StorageCommit;
             }
             let outcome = result.map_err(|failure| failure.status)?;
             Ok(Response::new(CommitResponse {
@@ -260,7 +272,17 @@ impl Service {
             }))
         }
         .await;
-        timer.record_result(&result);
+        timer.record_status_result(&result);
+        if let Err(status) = &result {
+            if let Some(event) = self.state.attribution.commit_failures.record(
+                stage,
+                status.code(),
+                transaction_consumed,
+            ) {
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr().lock(), "{event}");
+            }
+        }
         result
     }
 

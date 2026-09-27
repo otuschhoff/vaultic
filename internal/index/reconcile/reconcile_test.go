@@ -1525,10 +1525,16 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 				if err != nil || after.ActiveTransactions != 0 || after.ActiveWriteIntents != 0 {
 					t.Fatalf("publication cleanup: writer=%+v err=%v", after, err)
 				}
-				attempts := after.Attribution.CommitRequest.Attempts - before.Attribution.CommitRequest.Attempts
-				failures := after.Attribution.CommitRequest.Failures - before.Attribution.CommitRequest.Failures
-				if attempts-failures != publicationCalls+allocationCalls+groupCalls {
-					t.Fatalf("commit accounting: attempts=%d failures=%d", attempts, failures)
+				prior, latest := before.Attribution.CommitRequest, after.Attribution.CommitRequest
+				attempts := latest.Attempts - prior.Attempts
+				completed := latest.Completed - prior.Completed
+				successes := latest.Successes - prior.Successes
+				failures := latest.Failures - prior.Failures
+				cancellations := latest.Cancellations - prior.Cancellations
+				timeouts := latest.Timeouts - prior.Timeouts
+				if latest.Active != 0 || completed != attempts || completed != successes+failures+cancellations+timeouts ||
+					successes != publicationCalls+allocationCalls+groupCalls || cancellations != 0 || timeouts != 0 {
+					t.Fatalf("commit accounting: before=%+v after=%+v", prior, latest)
 				}
 				cpuAvailable := before.ProcessCPUAvailable && after.ProcessCPUAvailable
 				var cpuUS uint64
@@ -1541,9 +1547,11 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 				}
 				t.Logf("inodes=%d content_ids=%d streams=%d seconds=%.6f groups=%v allocation_calls=%d allocation_ns=%d "+
 					"publication_calls=%d publication_ns=%d "+
-					"group_ns=%d commit_attempts=%d commit_failures=%d durable_us=%d wal_put_attempts=%d",
+					"group_ns=%d commit_attempts=%d commit_failures=%d commit_successes=%d commit_cancellations=%d commit_timeouts=%d "+
+					"durable_us=%d wal_put_attempts=%d",
 					count, contentCount, streams, elapsed.Seconds(), metrics.PublicationGroups, metrics.RevisionAllocationCalls, metrics.RevisionAllocationNS,
-					metrics.InodePublicationCalls, metrics.InodePublicationNS, metrics.PublicationGroupNS, attempts, failures,
+					metrics.InodePublicationCalls, metrics.InodePublicationNS, metrics.PublicationGroupNS,
+					attempts, failures, successes, cancellations, timeouts,
 					after.Attribution.DurableWait.TotalUS-before.Attribution.DurableWait.TotalUS,
 					after.Attribution.ObjectStoreWAL.Put.Timing.Attempts-before.Attribution.ObjectStoreWAL.Put.Timing.Attempts)
 				t.Logf("daemon_cpu_available=%t daemon_cpu_us=%d daemon_memory_available=%t daemon_rss_end_bytes=%d",

@@ -421,11 +421,18 @@ func TestSchemaStoreRevisionAllocationContention(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			attempts := after.Attribution.CommitRequest.Attempts - before.Attribution.CommitRequest.Attempts
-			failures := after.Attribution.CommitRequest.Failures - before.Attribution.CommitRequest.Failures
-			if after.ActiveTransactions != 0 || after.ActiveWriteIntents != 0 || attempts-failures != uint64(count/allocationSize) {
-				t.Fatalf("allocation cleanup/accounting: attempts=%d failures=%d transactions=%d intents=%d",
-					attempts, failures, after.ActiveTransactions, after.ActiveWriteIntents)
+			prior, latest := before.Attribution.CommitRequest, after.Attribution.CommitRequest
+			attempts := latest.Attempts - prior.Attempts
+			completed := latest.Completed - prior.Completed
+			successes := latest.Successes - prior.Successes
+			failures := latest.Failures - prior.Failures
+			cancellations := latest.Cancellations - prior.Cancellations
+			timeouts := latest.Timeouts - prior.Timeouts
+			if after.ActiveTransactions != 0 || after.ActiveWriteIntents != 0 || latest.Active != 0 ||
+				completed != attempts || completed != successes+failures+cancellations+timeouts ||
+				successes != uint64(count/allocationSize) || cancellations != 0 || timeouts != 0 {
+				t.Fatalf("allocation cleanup/accounting: before=%+v after=%+v transactions=%d intents=%d",
+					prior, latest, after.ActiveTransactions, after.ActiveWriteIntents)
 			}
 			if mode != "concurrent" && failures != 0 {
 				t.Fatalf("uncontended allocation had %d failed commits", failures)

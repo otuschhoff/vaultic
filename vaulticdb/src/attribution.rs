@@ -353,6 +353,17 @@ pub(crate) struct TimingGuard<'a> {
 }
 
 impl TimingGuard<'_> {
+    pub(crate) fn record_status_result<T>(&mut self, result: &Result<T, tonic::Status>) {
+        self.outcome = match result {
+            Ok(_) => TimingOutcome::Success,
+            Err(status) => match status.code() {
+                tonic::Code::Cancelled => TimingOutcome::Cancellation,
+                tonic::Code::DeadlineExceeded => TimingOutcome::Timeout,
+                _ => TimingOutcome::Failure,
+            },
+        };
+    }
+
     pub(crate) fn record_result<T, E>(&mut self, result: &Result<T, E>) {
         if result.is_ok() {
             self.succeeded();
@@ -407,6 +418,72 @@ impl Drop for OwnedTimingGuard {
     }
 }
 
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CommitStage {
+    RequestValidation,
+    Admission,
+    Storage,
+    WriterAuthority,
+    PublicationFence,
+    DurabilityAuthority,
+    StorageCommit,
+    PostCommitAuthority,
+}
+
+const GRPC_CODE_COUNT: usize = tonic::Code::Unauthenticated as usize + 1;
+const COMMIT_FAILURE_BUCKETS: usize =
+    (CommitStage::PostCommitAuthority as usize + 1) * GRPC_CODE_COUNT;
+
+#[derive(Debug)]
+pub(crate) struct CommitFailureAttribution {
+    enabled: bool,
+    counts: [AtomicU64; COMMIT_FAILURE_BUCKETS],
+}
+
+impl CommitFailureAttribution {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            counts: [const { AtomicU64::new(0) }; COMMIT_FAILURE_BUCKETS],
+        }
+    }
+
+    pub(crate) fn record(
+        &self,
+        stage: CommitStage,
+        code: tonic::Code,
+        transaction_consumed: Option<bool>,
+    ) -> Option<serde_json::Value> {
+        if !self.enabled {
+            return None;
+        }
+        let index = stage as usize * GRPC_CODE_COUNT + code as usize;
+        let previous = self.counts[index]
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                Some(value.saturating_add(1))
+            })
+            .unwrap_or_else(|value| value);
+        let occurrence = previous.saturating_add(1);
+        if occurrence > 8 && !occurrence.is_power_of_two() {
+            return None;
+        }
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u64::MAX as u128) as u64;
+        Some(serde_json::json!({
+            "category": "diagnostic", "component": "vaulticdb", "event": "commit_failure",
+            "timestamp_unix_ms": timestamp,
+            "fields": {
+                "stage": stage, "grpc_code": code as i32, "grpc_status": format!("{code:?}"),
+                "transaction_consumed": transaction_consumed, "occurrence": occurrence,
+            },
+        }))
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct ServiceAttribution {
     pub(crate) admission_wait: TimingMetric,
@@ -415,6 +492,7 @@ pub(crate) struct ServiceAttribution {
     pub(crate) write_batch_request: TimingMetric,
     pub(crate) begin_request: TimingMetric,
     pub(crate) commit_request: TimingMetric,
+    pub(crate) commit_failures: CommitFailureAttribution,
     pub(crate) rollback_request: TimingMetric,
 }
 
@@ -434,6 +512,7 @@ impl ServiceAttribution {
                 write_batch_request: TimingMetric::disabled(false),
                 begin_request: TimingMetric::disabled(false),
                 commit_request: TimingMetric::disabled(false),
+                commit_failures: CommitFailureAttribution::new(false),
                 rollback_request: TimingMetric::disabled(false),
             };
         }
@@ -444,6 +523,7 @@ impl ServiceAttribution {
             write_batch_request: TimingMetric::default(),
             begin_request: TimingMetric::default(),
             commit_request: TimingMetric::default(),
+            commit_failures: CommitFailureAttribution::new(true),
             rollback_request: TimingMetric::default(),
         }
     }
@@ -579,6 +659,74 @@ mod tests {
         assert_eq!(snapshot.cancellations, 1);
         assert_eq!(snapshot.failures, 1);
         assert_eq!(snapshot.timeouts, 1);
+    }
+
+    #[test]
+    fn status_results_distinguish_cancellation_timeout_and_failure() {
+        let metric = TimingMetric::default();
+        for code in [
+            tonic::Code::Cancelled,
+            tonic::Code::DeadlineExceeded,
+            tonic::Code::Aborted,
+            tonic::Code::FailedPrecondition,
+            tonic::Code::Internal,
+            tonic::Code::Unavailable,
+            tonic::Code::NotFound,
+        ] {
+            let mut guard = metric.timer();
+            guard.record_status_result(&Err::<(), _>(tonic::Status::new(code, "test")));
+        }
+        {
+            let mut guard = metric.timer();
+            guard.record_status_result(&Ok::<(), tonic::Status>(()));
+        }
+        let snapshot = metric.snapshot();
+        assert_eq!(snapshot.attempts, 8);
+        assert_eq!(snapshot.completed, 8);
+        assert_eq!(snapshot.active, 0);
+        assert_eq!(snapshot.successes, 1);
+        assert_eq!(snapshot.cancellations, 1);
+        assert_eq!(snapshot.timeouts, 1);
+        assert_eq!(snapshot.failures, 5);
+    }
+
+    #[test]
+    fn commit_failure_diagnostics_are_bounded_and_separate_stage_and_code() {
+        let attribution = CommitFailureAttribution::new(true);
+        for occurrence in 1_u64..=32 {
+            let event = attribution.record(
+                CommitStage::StorageCommit,
+                tonic::Code::NotFound,
+                Some(false),
+            );
+            assert_eq!(
+                event.is_some(),
+                occurrence <= 8 || occurrence.is_power_of_two()
+            );
+            if let Some(event) = event {
+                assert_eq!(event["event"], "commit_failure");
+                assert_eq!(
+                    event["fields"],
+                    serde_json::json!({
+                        "stage": "storage_commit", "grpc_code": 5, "grpc_status": "NotFound",
+                        "transaction_consumed": false, "occurrence": occurrence,
+                    })
+                );
+            }
+        }
+        assert!(attribution
+            .record(CommitStage::PublicationFence, tonic::Code::NotFound, None)
+            .is_some());
+        assert!(attribution
+            .record(
+                CommitStage::StorageCommit,
+                tonic::Code::Cancelled,
+                Some(true)
+            )
+            .is_some());
+        assert!(CommitFailureAttribution::new(false)
+            .record(CommitStage::StorageCommit, tonic::Code::Internal, None)
+            .is_none());
     }
 
     #[test]

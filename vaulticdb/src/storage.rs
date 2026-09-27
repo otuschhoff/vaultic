@@ -3861,6 +3861,10 @@ impl Storage {
                 });
             }
         }
+        #[cfg(all(feature = "test-failpoints", unix))]
+        crate::service::process_test_barrier("VAULTICDB_TEST_TRANSACTION_BEFORE_REMOVE_BARRIER")
+            .await
+            .map_err(TransactionFailure::before_consumption)?;
         let transaction = self
             .remove_transaction(transaction_id)
             .await

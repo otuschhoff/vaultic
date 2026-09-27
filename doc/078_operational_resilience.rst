@@ -26,6 +26,21 @@ schema, unsafe socket ownership or permissions, and a terminal ``failed``
 lifecycle are returned immediately; ``vaultic`` does not launch a replacement
 process over those errors.
 
+Graceful daemon restarts
+-----------------------
+
+On Linux, the current transport's graceful shutdown path handles SIGINT or the
+authenticated ``Shutdown`` RPC. A service unit's default SIGTERM stop signal
+does not invoke that path. Inspect the unit's restart policy and stop signal
+before maintenance; do not assume an ordinary ``systemctl restart`` will flush
+and close storage gracefully.
+
+For a unit with ``Restart=on-failure``, request SIGINT from its verified main
+process and require a successful exit and an inactive unit before replacing the
+executable and starting it again. Leave the existing binary and configuration
+intact if graceful shutdown cannot be confirmed. Do not substitute a forced
+kill, writer takeover or WAL manipulation for a clean shutdown.
+
 Writer ownership
 ----------------
 
@@ -80,6 +95,43 @@ Promotion opens SlateDB as the newly fenced writer before it returns. Large WAL
 
 The takeover fails if the active object or epoch changed after inspection. It
 must not be used merely to resolve ordinary contention.
+
+Commit failure attribution
+--------------------------
+
+The ``attribution.commit_request`` object in ``index writer status --json``
+separates successful commits, failures, cancellations and timeouts. Explicit
+gRPC ``Cancelled`` results increment ``cancellations``; ``DeadlineExceeded``
+results increment ``timeouts``; other errors increment ``failures``. These are
+disjoint outcomes, not subsets of ``failures``. Older daemon builds counted all
+returned errors as generic failures, so zero cancellation/timeout counters on
+such a build do not establish that cancellation was absent.
+
+A zero-error benchmark gate must require zero deltas for all three non-success
+counters, zero active commit requests, and consistent completed/success counts
+after shutdown. Do not weaken a gate by checking only ``failures`` or assuming
+that an error first observed after timeout is benign. Client cancellation does
+not cancel admitted transaction finalization; inspect writer and transaction
+state before retrying.
+
+When service attribution is enabled, failed commits also emit JSON diagnostic
+records with ``event=commit_failure`` to daemon stderr. The fixed fields identify
+``stage``, numeric ``grpc_code``, ``grpc_status``, ``transaction_consumed`` and
+``occurrence``, with a top-level ``timestamp_unix_ms``. Stages distinguish request
+validation, admission, storage access, writer authority, publication-fence
+validation, durability authority, storage commit and post-commit authority
+checks. ``transaction_consumed`` is null before a storage commit result is
+available; otherwise it reports transaction-state consumption, not commit
+success or durability. Raw error messages, transaction/request IDs, keys and
+values are not logged.
+
+Diagnostics retain fixed-size counters per stage/status pair and log the first
+eight occurrences of each pair, then powers of two. They are sampled diagnostic
+evidence, not a complete audit trail; aggregate timing counters remain the
+source for total outcomes. Capturing these records requires a daemon built with
+this instrumentation. Historical aggregate-only failures cannot be classified
+retroactively. Deployments and production restarts remain explicit operator
+actions, separate from a client performance experiment.
 
 Generation rollback reconciliation
 ----------------------------------

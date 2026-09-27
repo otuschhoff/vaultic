@@ -3,6 +3,7 @@ package daemon
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"strings"
@@ -14,6 +15,165 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+func TestProcessCancelledCommitFinalizationOrdering(t *testing.T) {
+	binary := failureDaemonBinary(t)
+	for _, testCase := range []struct {
+		name          string
+		rollbackFirst bool
+		mutating      bool
+	}{
+		{"rollback-first-read-only", true, false},
+		{"rollback-first-write", true, true},
+		{"commit-first-read-only", false, false},
+		{"commit-first-write", false, true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			listener, path := phase34M2Barrier(t)
+			if err := listener.(*net.UnixListener).SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			barrier := "VAULTICDB_TEST_TRANSACTION_BEFORE_APPLY_BARRIER"
+			if testCase.rollbackFirst {
+				barrier = "VAULTICDB_TEST_TRANSACTION_BEFORE_REMOVE_BARRIER"
+			}
+			directory := t.TempDir()
+			options := Options{
+				Socket: testSocket(t), RepositoryID: "cancelled-commit-ordering",
+				DaemonPath: binary, DataDir: directory, ObjectStore: "local",
+				WALStore: "local", WALDataDir: directory + "/wal", WALFlushInterval: time.Millisecond,
+				testEnvironment: []string{barrier + "=" + path},
+			}
+			client, err := Ensure(ctx, options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			closed := false
+			t.Cleanup(func() {
+				if !closed {
+					_ = client.Close(context.Background())
+				}
+			})
+			before, err := client.WriterStatus(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			transaction, err := client.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := []byte("cancelled-commit-ordering")
+			if testCase.mutating {
+				if err := transaction.WriteBatch(ctx, []Mutation{{Key: key, Value: []byte("value")}}, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			commitCtx, cancelCommit := context.WithCancel(ctx)
+			defer cancelCommit()
+			result := make(chan error, 1)
+			go func() { result <- transaction.Commit(commitCtx) }()
+			connection := phase34M2AwaitBarrier(t, listener, barrier)
+			defer connection.Close()
+			cancelCommit()
+			select {
+			case err := <-result:
+				if status.Code(err) != codes.Canceled || transaction.state.Load() != transactionCommitUncertain {
+					t.Fatalf("cancelled commit: error=%v state=%d", err, transaction.state.Load())
+				}
+			case <-ctx.Done():
+				t.Fatal("cancelled client did not return before detached commit completed")
+			}
+			err = rollbackTransaction(commitCtx, transaction)
+			if testCase.rollbackFirst && err != nil || !testCase.rollbackFirst && status.Code(err) != codes.NotFound {
+				t.Fatalf("rollback: %v", err)
+			}
+			if _, err := connection.Write([]byte{1}); err != nil {
+				t.Fatal(err)
+			}
+			after, err := client.WriterStatus(ctx)
+			ticker := time.NewTicker(time.Millisecond)
+			defer ticker.Stop()
+			for err == nil {
+				prior, latest := before.Attribution.CommitRequest, after.Attribution.CommitRequest
+				completed := latest.Completed - prior.Completed
+				outcomes := latest.Successes - prior.Successes + latest.Failures - prior.Failures +
+					latest.Cancellations - prior.Cancellations + latest.Timeouts - prior.Timeouts
+				if completed == 1 && outcomes == completed && latest.Active == 0 &&
+					after.ActiveTransactions == 0 && after.ActiveWriteIntents == 0 {
+					break
+				}
+				select {
+				case <-ctx.Done():
+					t.Fatalf("detached commit did not settle: counters=%+v transactions=%d intents=%d",
+						latest, after.ActiveTransactions, after.ActiveWriteIntents)
+				case <-ticker.C:
+				}
+				after, err = client.WriterStatus(ctx)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			prior, latest := before.Attribution.CommitRequest, after.Attribution.CommitRequest
+			failures := uint64(0)
+			if testCase.rollbackFirst {
+				failures = 1
+			}
+			if latest.Attempts-prior.Attempts != 1 || latest.Failures-prior.Failures != failures ||
+				latest.Successes-prior.Successes != 1-failures || latest.Cancellations != prior.Cancellations || latest.Timeouts != prior.Timeouts ||
+				latest.Active != 0 || after.ActiveTransactions != 0 || after.ActiveWriteIntents != 0 {
+				t.Fatalf("detached commit accounting: before=%+v after=%+v transactions=%d intents=%d",
+					prior, latest, after.ActiveTransactions, after.ActiveWriteIntents)
+			}
+			if !testCase.mutating && after.Attribution.EngineWriteOps != before.Attribution.EngineWriteOps {
+				t.Fatal("read-only finalization wrote engine data")
+			}
+			process := client.process
+			if err := client.Close(ctx); err != nil {
+				t.Fatal(err)
+			}
+			closed = true
+			assertCommitOrderingDiagnostics(t, daemonStartupError(process), int(failures))
+			reopened, err := Ensure(ctx, options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close(context.Background())
+			value, found, err := reopened.Get(ctx, key, "")
+			wantFound := testCase.mutating && !testCase.rollbackFirst
+			if err != nil || found != wantFound || found && string(value) != "value" {
+				t.Fatalf("reopened transaction outcome: found=%t want=%t value=%q error=%v", found, wantFound, value, err)
+			}
+		})
+	}
+}
+
+func assertCommitOrderingDiagnostics(t *testing.T, output string, want int) {
+	t.Helper()
+	count := 0
+	for _, line := range strings.Split(output, "\n") {
+		var event struct {
+			Event  string `json:"event"`
+			Fields struct {
+				Stage    string `json:"stage"`
+				Code     int    `json:"grpc_code"`
+				Consumed *bool  `json:"transaction_consumed"`
+			} `json:"fields"`
+		}
+		if json.Unmarshal([]byte(line), &event) != nil || event.Event != "commit_failure" {
+			continue
+		}
+		count++
+		if event.Fields.Stage != "storage_commit" || event.Fields.Code != int(codes.NotFound) ||
+			event.Fields.Consumed == nil || *event.Fields.Consumed {
+			t.Fatalf("unexpected commit diagnostic: %+v", event)
+		}
+	}
+	if count != want {
+		t.Fatalf("commit diagnostics=%d want=%d", count, want)
+	}
+}
 
 func TestProcessDeferredCommitDurabilityTokens(t *testing.T) {
 	ctx := context.Background()

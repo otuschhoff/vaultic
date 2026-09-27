@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -19,6 +20,82 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+func TestCommitFailureAttribution(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	client, err := Ensure(ctx, Options{
+		Socket: testSocket(t), RepositoryID: "commit-attribution", DaemonPath: daemonBinary(t),
+		DataDir: t.TempDir(), ObjectStore: "memory",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := false
+	t.Cleanup(func() {
+		if !closed {
+			_ = client.Close(context.Background())
+		}
+	})
+	before, err := client.WriterStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.RPC().Commit(ctx, &vaulticdbv1.TransactionRequest{
+		Context:       &vaulticdbv1.RequestContext{RequestId: "private-deadline-id", DeadlineUnixMs: 1},
+		TransactionId: "private-expired-transaction",
+	})
+	if status.Code(err) != codes.DeadlineExceeded {
+		t.Fatalf("expired commit=%v", err)
+	}
+	_, err = client.RPC().Commit(ctx, &vaulticdbv1.TransactionRequest{
+		Context: requestContext(ctx), TransactionId: "private-missing-transaction",
+	})
+	if status.Code(err) != codes.NotFound {
+		t.Fatalf("missing commit=%v", err)
+	}
+	after, err := client.WriterStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior, latest := before.Attribution.CommitRequest, after.Attribution.CommitRequest
+	if latest.Attempts-prior.Attempts != 2 || latest.Completed-prior.Completed != 2 ||
+		latest.Failures-prior.Failures != 1 || latest.Timeouts-prior.Timeouts != 1 ||
+		latest.Cancellations != prior.Cancellations || latest.Successes != prior.Successes ||
+		latest.Active != 0 || after.ActiveTransactions != 0 || after.ActiveWriteIntents != 0 {
+		t.Fatalf("commit accounting before=%+v after=%+v", prior, latest)
+	}
+	process := client.process
+	if err := client.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	closed = true
+	output := daemonStartupError(process)
+	if strings.Contains(output, "private-") {
+		t.Fatal("commit diagnostic leaked request data")
+	}
+	type failureEvent struct {
+		Event  string `json:"event"`
+		Fields struct {
+			Stage               string `json:"stage"`
+			Code                int    `json:"grpc_code"`
+			TransactionConsumed *bool  `json:"transaction_consumed"`
+		} `json:"fields"`
+	}
+	events := make(map[string]failureEvent)
+	for _, line := range strings.Split(output, "\n") {
+		var event failureEvent
+		if json.Unmarshal([]byte(line), &event) == nil && event.Event == "commit_failure" {
+			events[event.Fields.Stage] = event
+		}
+	}
+	deadline, missing := events["request_validation"], events["storage_commit"]
+	if len(events) != 2 || deadline.Fields.Code != int(codes.DeadlineExceeded) ||
+		deadline.Fields.TransactionConsumed != nil || missing.Fields.Code != int(codes.NotFound) ||
+		missing.Fields.TransactionConsumed == nil || *missing.Fields.TransactionConsumed {
+		t.Fatalf("commit failure stages=%+v", events)
+	}
+}
 
 func TestSchemaStoreImportsSameLegacyPackConcurrently(t *testing.T) {
 	options := Options{Socket: testSocket(t), RepositoryID: "phase4-concurrent-pack", DaemonPath: daemonBinary(t), DataDir: t.TempDir()}
