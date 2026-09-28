@@ -12,9 +12,58 @@ import (
 	"testing"
 	"time"
 
+	vaulticdbv1 "github.com/otuschhoff/vaultic/internal/index/proto/vaulticdb/v1"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
+	"google.golang.org/grpc"
 )
+
+type benchmarkBlobSizeRPC struct {
+	vaulticdbv1.VaulticDBClient
+	value []byte
+}
+
+func (rpc *benchmarkBlobSizeRPC) MultiGet(
+	_ context.Context, request *vaulticdbv1.MultiGetRequest, _ ...grpc.CallOption,
+) (*vaulticdbv1.MultiGetResponse, error) {
+	results := make([]*vaulticdbv1.GetResponse, len(request.GetKeys()))
+	for index, key := range request.GetKeys() {
+		results[index] = &vaulticdbv1.GetResponse{Key: key, Value: rpc.value, Found: true}
+	}
+	return &vaulticdbv1.MultiGetResponse{Results: results}, nil
+}
+
+func BenchmarkBlobSizeLookupInProcess(b *testing.B) {
+	packID, blobID := daemonTestID(40), daemonTestID(80)
+	value, err := readSessionTestPack(packID, blobID).Blobs[blobID].MarshalBinary()
+	if err != nil {
+		b.Fatal(err)
+	}
+	for _, count := range []int{1, 8} {
+		b.Run(fmt.Sprintf("keys=%d", count), func(b *testing.B) {
+			client := &Client{rpc: &benchmarkBlobSizeRPC{value: value}, limits: Limits{MaxBatchItems: 256, MaxMessageBytes: 1 << 20}}
+			client.initializeSubclients()
+			session := &ReadSession{SchemaStore: NewSchemaStore(client), transaction: &Transaction{client: client, id: "pinned"}, ctx: b.Context()}
+			handles := make([]vaultic.BlobHandle, count)
+			for index := range handles {
+				handles[index] = vaultic.BlobHandle{ID: vaultic.ID(daemonTestID(byte(80 + index))), Type: vaultic.DataBlob}
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				sizes, lookupErr := session.LookupBlobSizesContext(b.Context(), handles)
+				if lookupErr != nil || len(sizes) != count {
+					b.Fatalf("lookup sizes=%d error=%v", len(sizes), lookupErr)
+				}
+				for _, size := range sizes {
+					if size != (vaultic.BlobSize{Size: 7, Found: true}) {
+						b.Fatalf("unexpected blob size: %+v", size)
+					}
+				}
+			}
+		})
+	}
+}
 
 func BenchmarkProcessBlobSizeMultiGetModes(b *testing.B) {
 	benchmarkProcessBlobSizeMultiGetModes(b, false)

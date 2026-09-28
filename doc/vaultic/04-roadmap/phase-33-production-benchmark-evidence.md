@@ -291,6 +291,27 @@ backup or validated restore. Further changes should target read/decode
 attribution and error classification offline; full completion and restore
 need a separately scoped live run.
 
+### Offline Go lookup discriminator
+
+An in-process fake MultiGet response with a canonical encoded blob record
+times the unchanged `ReadSession.LookupBlobSizesContext` validation, key
+construction, response checking, blob-size decoding and result mapping without
+starting a daemon. Five 100,000-call repetitions measured a median 3.135 us
+(3.127-3.152 us) for one key and 6.928 us (6.868-7.030 us) for eight keys;
+allocations were 27 and 55 per call respectively. Raw output is retained at
+`/run/vaultic-lookup-inprocess-GM6VNc/benchmark.txt` (ephemeral across reboot),
+SHA256 `ca30f03d59fa2d266d93660da7b47aabaecf65c1e452434ab12afd597e06c980`.
+Run `go test ./internal/index/daemon -run '^$' -bench
+'^BenchmarkBlobSizeLookupInProcess$' -benchtime=100000x -count=5` to repeat.
+
+This discriminator excludes protobuf wire encoding/decoding, Unix transport,
+daemon request processing and object-store/engine reads; the fake reuses its
+encoded value. It cannot be subtracted from R46's approximately 19 ms
+single-handle RPC mean to derive server time or predict throughput. Its
+microsecond-scale client-side path does make a large *local* blob-size decode
+cost unlikely in this fixture; server-side read and transport attribution
+remain open.
+
 ## Isolated empty-debt overhead measurement (2026-09-28)
 
 `BenchmarkProcessEmptyCrawlDebtResolution` compares the unchanged
