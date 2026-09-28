@@ -1,5 +1,104 @@
 # Phase 33 Production Benchmark Evidence
 
+## Finalization ownership and R45 matched pair (2026-09-28)
+
+Following explicit approval, the accepted-commit/rollback race was fixed and
+validated offline, a release daemon was gracefully deployed, and one matched
+baseline/candidate pair was run at 600 seconds plus 45 seconds grace each.
+No additional live run or full backup/restore validation was performed.
+
+Commit and Rollback now share a per-transaction service lock acquired after
+request validation and before asynchronous authority checks. The first owner
+retains ownership through storage finalization and writer accounting. The weak
+lock registry prunes inactive entries on subsequent requests; unrelated
+transactions do not share their finalization locks. Storage validation,
+idempotency, status codes and client cancellation behavior are unchanged.
+This fixes rollback overtaking an already-owned commit, not every possible
+unknown transaction or finalization failure.
+
+The updated deterministic regression failed against the prior daemon because
+rollback completed while an accepted commit was blocked. With the fix, both
+before-remove and before-apply cases, for read-only and mutating transactions,
+retain successful server commits; rollback waits and then reports NotFound.
+Reopening confirms committed writes survive. A separate cancelled-before-dispatch
+test confirms rollback still removes uncommitted data when Commit never reached
+the daemon. Ten race-detector repetitions also cover lost-response recovery and
+durability tokens. Rust tests verify independent locks and cancelled-waiter
+cleanup. Twelve service tests, neighboring publication/writer-fence/durability
+tests, changed-code lint, formatting and exact-release native checks passed.
+
+The deployment preserved the prior daemon and configuration, required an idle
+writer, used handled SIGINT rather than SIGTERM, verified clean exit before
+atomic replacement, and restarted the unchanged unit. PID 1572244/epoch 75
+became PID 1617561/epoch 76, read-write, with identical 143 snapshot IDs and
+unchanged 128 MiB metadata cache, 512 MiB block cache and 100 ms flush interval.
+The installed release SHA256 is
+`6733b8c867f75c86dd73b0f8e85e2d2f641389103eae370c1f8cdd470cbd507e`.
+Deployment artifacts are retained at
+`/volume2/NASDA2/rustic/db.test/finalization-deployment-20260928-zvPLOm`.
+
+R45 artifacts are at
+`/volume2/NASDA2/rustic/db.test/empty-debt-comparison-20260928-r45-i9euDM`.
+Both runs used that same daemon, 52 sources, 4 readers, 8 NFS connections,
+explicit `--use-cwalk --nfs-direct`, 32 cwalk workers and 64 MiB client cache.
+No builds or tests ran concurrently with either measurement. The archived R43
+baseline CLI SHA256 is
+`b67d19ebe426bbdef1cfb3f407db19af44db8bfcd2b4c9e65b5f13d3c0cbc9c3`;
+the candidate CLI built from `5419edd0b` has SHA256
+`f8136ec99463aa111f6965b7e04094321e9ab6304c638369abf12279e0a6c714`.
+The only production Go change between their source revisions is the empty-debt
+guard. The Rust finalization source patch is preserved in both new archives.
+
+| Metric | Baseline | Empty-Debt Candidate |
+| --- | --- | --- |
+| Runtime / exit | 600.294 s / 124 | 600.305 s / 124 |
+| Files at 599 s | 47,236 | 48,443 |
+| Logical MiB/s | 145.881 | 147.999 |
+| Commit attempts / successes | 45,519 / 45,519 | 0 / 0 |
+| Commit failures / cancellations / timeouts | 0 / 0 / 0 | 0 / 0 / 0 |
+| Metadata GETs | 646,898 | 544,979 |
+| Aggregate GETs per size-lookup handle | 5.587 | 4.597 |
+| Mean size-lookup RPC | 19.441 ms | 18.959 ms |
+| CLI CPU seconds | 1,283.21 | 1,292.59 |
+| Daemon CPU seconds | 4,566.28 | 4,390.88 |
+| CLI peak RSS KiB | 1,029,620 | 1,047,060 |
+| Daemon sampled peak RSS bytes | 1,175,781,376 | 1,191,784,448 |
+| Engine writes | 0 | 0 |
+
+Both individual safety gates passed: counters settled without commit
+non-successes or failure diagnostics, no reported source or sampler errors,
+zero final transactions/write intents, empty scratch, and unchanged snapshot
+membership. The baseline's 45,519 real empty commits provide live coverage of
+the new finalization implementation; the candidate removes those calls entirely.
+Neither result retroactively reclassifies the rejected R43/R44 failures.
+
+The observed changes are +1.45% logical throughput, +2.56% files, -15.76%
+metadata GETs and -3.84% daemon CPU time, but +0.73% CLI CPU time and slightly
+higher peak memory. This single baseline-then-candidate pair has uncontrolled
+metadata cache warmth, host activity and processed work mix. It establishes
+the removed transaction work, not a repeatable speedup or lower full-backup
+runtime. Logical bytes are not newly uploaded bytes, and logical metadata body
+bytes (1.546/1.570 trillion) are not physical I/O.
+
+Remaining evidence points to per-key metadata lookup cost: the candidate made
+118,553 single-handle size RPCs averaging 18.959 ms, and the 360-second stack
+shows four MultiGet callers with blob-save workers waiting on lookup results.
+Its direct READ mean queue/service times were 0.0083/0.9858 ms, max active four,
+with no connection shortfalls; client-cache peak occupancy was 33.9% with no
+evictions. More NFS sockets or client-cache capacity is not indicated by this
+run. The CLI CPU profile is led by SHA-256 (24.05% flat samples) and chunk split
+calculation (10.14% flat); daemon CPU still averages 7.30 cores and needs its own
+per-key read/decode attribution before another metadata optimization.
+
+Important unresolved observations: direct LOOKUP errors were 50,475/52,722 and
+remain unclassified; close-time reconciliation failures were 1,724/2,924; the
+candidate had three READ cancellations at shutdown. These are not promoted to
+success or claimed resolved by the commit-specific safety gate. Both runs timed
+out, so full completion and restore correctness remain unverified. The installed
+daemon includes the uncommitted finalization patch on `5419edd0b`; no new commit
+or push was made in this approval step, and the installed profile CLI was not
+replaced. Historical sealed artifacts remain untouched.
+
 ## Isolated empty-debt overhead measurement (2026-09-28)
 
 `BenchmarkProcessEmptyCrawlDebtResolution` compares the unchanged

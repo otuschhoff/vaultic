@@ -163,6 +163,23 @@ Finalization is rejected until both local and mirror publication markers are
 present. Only then may VaulticDB remove the stored repository master key and
 mark the migration digest finalized.
 
+Concurrent transaction finalization
+-----------------------------------
+
+Commit and Rollback acquire shared per-transaction finalization ownership after
+request validation and before asynchronous authority checks. Once Commit owns
+finalization, a later Rollback waits for its storage, durability and writer
+accounting work to finish. Unrelated transactions retain independent ownership.
+Inactive lock entries are pruned when subsequent finalization requests arrive.
+
+Client cancellation still returns promptly and does not cancel an accepted
+detached commit. Its outcome may remain uncertain to the client. A later
+Rollback can return ``NotFound`` after Commit consumed the transaction; that
+status alone is not a durability acknowledgement. Use the original idempotency
+key for uncertain-response recovery when available. If Commit never reached the
+daemon, Rollback can still discard the open transaction. This ordering does not
+convert genuinely failed commits into successes or relax benchmark failure gates.
+
 Structured failures and cleanup
 -------------------------------
 

@@ -20,13 +20,13 @@ func TestProcessCancelledCommitFinalizationOrdering(t *testing.T) {
 	binary := failureDaemonBinary(t)
 	for _, testCase := range []struct {
 		name          string
-		rollbackFirst bool
+		beforeRemove  bool
 		mutating      bool
 	}{
-		{"rollback-first-read-only", true, false},
-		{"rollback-first-write", true, true},
-		{"commit-first-read-only", false, false},
-		{"commit-first-write", false, true},
+		{"before-remove-read-only", true, false},
+		{"before-remove-write", true, true},
+		{"before-apply-read-only", false, false},
+		{"before-apply-write", false, true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
@@ -36,7 +36,7 @@ func TestProcessCancelledCommitFinalizationOrdering(t *testing.T) {
 				t.Fatal(err)
 			}
 			barrier := "VAULTICDB_TEST_TRANSACTION_BEFORE_APPLY_BARRIER"
-			if testCase.rollbackFirst {
+			if testCase.beforeRemove {
 				barrier = "VAULTICDB_TEST_TRANSACTION_BEFORE_REMOVE_BARRIER"
 			}
 			directory := t.TempDir()
@@ -85,16 +85,39 @@ func TestProcessCancelledCommitFinalizationOrdering(t *testing.T) {
 			case <-ctx.Done():
 				t.Fatal("cancelled client did not return before detached commit completed")
 			}
-			err = rollbackTransaction(commitCtx, transaction)
-			if testCase.rollbackFirst && err != nil || !testCase.rollbackFirst && status.Code(err) != codes.NotFound {
-				t.Fatalf("rollback: %v", err)
+			rollbackResult := make(chan error, 1)
+			go func() { rollbackResult <- rollbackTransaction(commitCtx, transaction) }()
+			ticker := time.NewTicker(time.Millisecond)
+			defer ticker.Stop()
+			for {
+				during, err := client.WriterStatus(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if during.Attribution.RollbackRequest.Attempts > before.Attribution.RollbackRequest.Attempts {
+					if during.Attribution.RollbackRequest.Completed != before.Attribution.RollbackRequest.Completed {
+						t.Fatal("rollback completed while accepted commit was blocked")
+					}
+					break
+				}
+				select {
+				case <-ctx.Done():
+					t.Fatal("rollback did not reach daemon")
+				case <-ticker.C:
+				}
 			}
 			if _, err := connection.Write([]byte{1}); err != nil {
 				t.Fatal(err)
 			}
+			select {
+			case err := <-rollbackResult:
+				if status.Code(err) != codes.NotFound {
+					t.Fatalf("rollback after accepted commit: %v", err)
+				}
+			case <-ctx.Done():
+				t.Fatal("rollback did not settle after commit")
+			}
 			after, err := client.WriterStatus(ctx)
-			ticker := time.NewTicker(time.Millisecond)
-			defer ticker.Stop()
 			for err == nil {
 				prior, latest := before.Attribution.CommitRequest, after.Attribution.CommitRequest
 				completed := latest.Completed - prior.Completed
@@ -116,12 +139,8 @@ func TestProcessCancelledCommitFinalizationOrdering(t *testing.T) {
 				t.Fatal(err)
 			}
 			prior, latest := before.Attribution.CommitRequest, after.Attribution.CommitRequest
-			failures := uint64(0)
-			if testCase.rollbackFirst {
-				failures = 1
-			}
-			if latest.Attempts-prior.Attempts != 1 || latest.Failures-prior.Failures != failures ||
-				latest.Successes-prior.Successes != 1-failures || latest.Cancellations != prior.Cancellations || latest.Timeouts != prior.Timeouts ||
+			if latest.Attempts-prior.Attempts != 1 || latest.Failures != prior.Failures ||
+				latest.Successes-prior.Successes != 1 || latest.Cancellations != prior.Cancellations || latest.Timeouts != prior.Timeouts ||
 				latest.Active != 0 || after.ActiveTransactions != 0 || after.ActiveWriteIntents != 0 {
 				t.Fatalf("detached commit accounting: before=%+v after=%+v transactions=%d intents=%d",
 					prior, latest, after.ActiveTransactions, after.ActiveWriteIntents)
@@ -134,18 +153,73 @@ func TestProcessCancelledCommitFinalizationOrdering(t *testing.T) {
 				t.Fatal(err)
 			}
 			closed = true
-			assertCommitOrderingDiagnostics(t, daemonStartupError(process), int(failures))
+			assertCommitOrderingDiagnostics(t, daemonStartupError(process), 0)
 			reopened, err := Ensure(ctx, options)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer reopened.Close(context.Background())
 			value, found, err := reopened.Get(ctx, key, "")
-			wantFound := testCase.mutating && !testCase.rollbackFirst
+			wantFound := testCase.mutating
 			if err != nil || found != wantFound || found && string(value) != "value" {
 				t.Fatalf("reopened transaction outcome: found=%t want=%t value=%q error=%v", found, wantFound, value, err)
 			}
 		})
+	}
+}
+
+func TestProcessCancelledCommitBeforeDispatchStillRollsBack(t *testing.T) {
+	options := Options{
+		Socket: testSocket(t), RepositoryID: "cancelled-before-dispatch",
+		DaemonPath: failureDaemonBinary(t), DataDir: t.TempDir(), ObjectStore: "local",
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	client, err := Ensure(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	transaction, err := client.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := []byte("never-committed")
+	if err := transaction.WriteBatch(ctx, []Mutation{{Key: key, Value: []byte("value")}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	before, err := client.WriterStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitCtx, cancelCommit := context.WithCancel(ctx)
+	cancelCommit()
+	if err := transaction.Commit(commitCtx); status.Code(err) != codes.Canceled || transaction.state.Load() != transactionCommitUncertain {
+		t.Fatalf("cancelled commit: error=%v state=%d", err, transaction.state.Load())
+	}
+	if err := rollbackTransaction(commitCtx, transaction); err != nil {
+		t.Fatal(err)
+	}
+	after, err := client.WriterStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Attribution.CommitRequest.Attempts != before.Attribution.CommitRequest.Attempts ||
+		after.Attribution.RollbackRequest.Successes-before.Attribution.RollbackRequest.Successes != 1 ||
+		after.ActiveTransactions != 0 || after.ActiveWriteIntents != 0 ||
+		after.Attribution.EngineWriteOps != before.Attribution.EngineWriteOps {
+		t.Fatalf("unreceived commit cleanup: before=%+v after=%+v", before, after)
+	}
+	if err := client.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	client, err = Ensure(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	if _, found, err := client.Get(ctx, key, ""); err != nil || found {
+		t.Fatalf("rolled-back value after reopen: found=%t error=%v", found, err)
 	}
 }
 

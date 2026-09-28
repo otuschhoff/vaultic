@@ -86,6 +86,7 @@ pub(crate) struct Service {
     pub(crate) state: DaemonState,
     pub(crate) shutdown: watch::Sender<bool>,
     pub(crate) storage: Arc<RwLock<Option<Arc<Storage>>>>,
+    pub(crate) finalization_locks: Arc<transactions::FinalizationLocks>,
 }
 
 impl Service {
@@ -478,6 +479,7 @@ mod lifecycle_tests {
             },
             shutdown,
             storage: Arc::new(RwLock::new(None)),
+            finalization_locks: Arc::default(),
         }
     }
 

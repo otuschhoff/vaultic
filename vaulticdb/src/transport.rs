@@ -497,6 +497,7 @@ fn storage_service(
         state,
         shutdown,
         storage: Arc::new(RwLock::new(None)),
+        finalization_locks: Arc::default(),
     };
     let server = VaulticDbServer::new(service.clone())
         .max_decoding_message_size(MAX_MESSAGE_BYTES as usize)

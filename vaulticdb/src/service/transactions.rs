@@ -1,7 +1,12 @@
 //! Transaction and write-batch gRPC handlers.
 
 use prost::Message;
-use std::time::Instant;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Weak},
+    time::Instant,
+};
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use tonic::{Request, Response, Status};
 
 use crate::{
@@ -15,6 +20,65 @@ use crate::{
 };
 
 use super::{check_storage_request, process_test_barrier, role_error, Service};
+
+#[derive(Default)]
+pub(crate) struct FinalizationLocks {
+    locks: Mutex<HashMap<String, Weak<Mutex<()>>>>,
+}
+
+impl FinalizationLocks {
+    async fn lock(&self, transaction_id: &str) -> OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.locks.lock().await;
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            match locks.get(transaction_id).and_then(Weak::upgrade) {
+                Some(lock) => lock,
+                None => {
+                    let lock = Arc::new(Mutex::new(()));
+                    locks.insert(transaction_id.to_owned(), Arc::downgrade(&lock));
+                    lock
+                }
+            }
+        };
+        lock.lock_owned().await
+    }
+}
+
+#[cfg(test)]
+mod finalization_tests {
+    use super::FinalizationLocks;
+    use std::{sync::Arc, time::Duration};
+
+    #[tokio::test]
+    async fn finalization_locks_isolate_transactions_and_prune_cancelled_waiters() {
+        let locks = Arc::new(FinalizationLocks::default());
+        let first = locks.lock("first").await;
+        let independent = tokio::time::timeout(Duration::from_secs(1), locks.lock("second"))
+            .await
+            .expect("unrelated transaction must not wait");
+        let waiting_locks = locks.clone();
+        let waiter = tokio::spawn(async move { waiting_locks.lock("first").await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if locks.locks.lock().await["first"].strong_count() == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("waiter must reach the existing lock");
+        assert!(!waiter.is_finished());
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        drop(first);
+        drop(independent);
+        let _next = locks.lock("next").await;
+        let entries = locks.locks.lock().await;
+        assert_eq!(entries.len(), 1);
+        assert!(entries.contains_key("next"));
+    }
+}
 
 pub(crate) fn validate_write_batch(request: &WriteBatchRequest) -> Result<(), Status> {
     let item_count = request
@@ -203,6 +267,10 @@ impl Service {
         let mut transaction_consumed = None;
         let result = async {
             check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
+            let _finalization = self
+                .finalization_locks
+                .lock(&request.get_ref().transaction_id)
+                .await;
             let fence = request.get_ref().publication_fence.as_ref();
             let _transition = if fence.is_some() {
                 Some(self.state.writer_transition.lock().await)
@@ -303,6 +371,10 @@ impl Service {
         let mut timer = self.state.attribution.rollback_request.timer();
         let result = async {
             check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
+            let _finalization = self
+                .finalization_locks
+                .lock(&request.get_ref().transaction_id)
+                .await;
             let _admission = self.mutation_admission().await?;
             let storage = self.storage().await?;
             self.ensure_writer_authority().await?;
