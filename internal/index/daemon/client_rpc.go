@@ -866,11 +866,26 @@ func (t *Transaction) commitFenced(ctx context.Context, idempotencyKey string, d
 	t.idempotencyKey = idempotencyKey
 	ctx, cancel := withDefaultRPCDeadline(ctx)
 	defer cancel()
+	t.client.commitRPC.attempts.Add(1)
+	t.client.commitRPC.active.Add(1)
 	response, err := t.client.rpc.Commit(ctx, &vaulticdbv1.TransactionRequest{
 		Context: requestContext(ctx), TransactionId: t.id, IdempotencyKey: idempotencyKey,
 		DeferDurability: deferDurability, RequireDurabilityToken: requireToken,
 		PublicationFence: fence,
 	})
+	t.client.commitRPC.active.Add(^uint64(0))
+	switch status.Code(err) {
+	case codes.OK:
+		t.client.commitRPC.successes.Add(1)
+	case codes.Aborted:
+		t.client.commitRPC.aborted.Add(1)
+	case codes.Canceled:
+		t.client.commitRPC.cancellations.Add(1)
+	case codes.DeadlineExceeded:
+		t.client.commitRPC.timeouts.Add(1)
+	default:
+		t.client.commitRPC.otherFailures.Add(1)
+	}
 	if err != nil {
 		t.client.auditRPCError(ctx, "commit", err)
 		if fence != nil && (status.Code(err) == codes.FailedPrecondition || status.Code(err) == codes.NotFound || status.Code(err) == codes.InvalidArgument) {

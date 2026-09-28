@@ -446,6 +446,11 @@ func TestSchemaStoreRevisionAllocationContention(t *testing.T) {
 			if recoveredAborts != failures {
 				t.Fatalf("recovered allocation aborts=%d, failed commits=%d", recoveredAborts, failures)
 			}
+			commits := client.CommitRPCStats()
+			if commits.Attempts != attempts || commits.Successes != successes || commits.Aborted != failures ||
+				commits.Cancellations != 0 || commits.Timeouts != 0 || commits.OtherFailures != 0 || commits.Active != 0 {
+				t.Fatalf("client commit RPCs=%+v, daemon before=%+v after=%+v", commits, prior, latest)
+			}
 			durable := after.Attribution.DurableWait
 			durableBefore := before.Attribution.DurableWait
 			if durable.Failures != durableBefore.Failures || durable.Successes-durableBefore.Successes != uint64(count/allocationSize) {
@@ -1265,6 +1270,10 @@ func TestSchemaStoreConcurrentReconciledSharedContent(t *testing.T) {
 	failures := after.Attribution.CommitRequest.Failures - before.Attribution.CommitRequest.Failures
 	if recoveredCommitAborts != failures || recoveredAborts < recoveredCommitAborts {
 		t.Fatalf("recovered publication aborts=%d, commit aborts=%d, failed commits=%d", recoveredAborts, recoveredCommitAborts, failures)
+	}
+	commits := client.CommitRPCStats()
+	if commits.Aborted != failures || commits.Cancellations != 0 || commits.Timeouts != 0 || commits.OtherFailures != 0 || commits.Active != 0 {
+		t.Fatalf("client commit RPCs=%+v, daemon before=%+v after=%+v", commits, before.Attribution.CommitRequest, after.Attribution.CommitRequest)
 	}
 	value, found, err := store.Get(ctx, schema.ReferenceCountKey(content[0]))
 	if err != nil || !found {

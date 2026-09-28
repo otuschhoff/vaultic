@@ -146,6 +146,26 @@ func TestBackupReportsReconciliationStats(t *testing.T) {
 	}
 }
 
+func TestBackupReportsCommitRPCStats(t *testing.T) {
+	term := &ui.MockTerminal{}
+	run := &backupRun{term: term, globalOptions: global.Options{JSON: true}}
+	stats := daemon.CommitRPCStats{Attempts: 7, Successes: 4, Aborted: 2, OtherFailures: 1}
+	run.reportCommitRPCStats(stats)
+	if len(term.Output) != 1 {
+		t.Fatalf("output=%v", term.Output)
+	}
+	var record struct {
+		MessageType string `json:"message_type"`
+		daemon.CommitRPCStats
+	}
+	if err := json.Unmarshal([]byte(term.Output[0]), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.MessageType != "commit_rpc_stats" || record.CommitRPCStats != stats {
+		t.Fatalf("invalid commit RPC stats: %+v", record)
+	}
+}
+
 func TestBackupCloseReportsNFSStatsAfterCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()

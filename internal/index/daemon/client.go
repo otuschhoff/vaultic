@@ -168,6 +168,36 @@ type Client struct {
 	limits     Limits
 	encryption EncryptionInfo
 	wal        WALInfo
+	commitRPC  commitRPCCounters
+}
+
+type CommitRPCStats struct {
+	Attempts      uint64 `json:"attempts"`
+	Successes     uint64 `json:"successes"`
+	Aborted       uint64 `json:"aborted"`
+	Cancellations uint64 `json:"cancellations"`
+	Timeouts      uint64 `json:"timeouts"`
+	OtherFailures uint64 `json:"other_failures"`
+	Active        uint64 `json:"active"`
+}
+
+type commitRPCCounters struct {
+	attempts      atomic.Uint64
+	successes     atomic.Uint64
+	aborted       atomic.Uint64
+	cancellations atomic.Uint64
+	timeouts      atomic.Uint64
+	otherFailures atomic.Uint64
+	active        atomic.Uint64
+}
+
+func (c *Client) CommitRPCStats() CommitRPCStats {
+	return CommitRPCStats{
+		Attempts: c.commitRPC.attempts.Load(), Successes: c.commitRPC.successes.Load(),
+		Aborted: c.commitRPC.aborted.Load(), Cancellations: c.commitRPC.cancellations.Load(),
+		Timeouts: c.commitRPC.timeouts.Load(), OtherFailures: c.commitRPC.otherFailures.Load(),
+		Active: c.commitRPC.active.Load(),
+	}
 }
 
 // EncryptionInfo describes the validated daemon metadata-encryption state.

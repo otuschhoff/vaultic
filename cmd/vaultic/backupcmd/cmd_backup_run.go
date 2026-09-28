@@ -29,6 +29,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/global"
 	enginepkg "github.com/otuschhoff/vaultic/internal/index"
 	"github.com/otuschhoff/vaultic/internal/index/analytics"
+	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/maintenance"
 	"github.com/otuschhoff/vaultic/internal/index/reconcile"
 	"github.com/otuschhoff/vaultic/internal/observability"
@@ -207,6 +208,21 @@ func (run *backupRun) close() {
 				run.reportMetadataLookupStats(stats)
 			}
 		}
+	}
+	if run.authoritativeEngine != nil && run.authoritativeEngine.Client() != nil {
+		run.reportCommitRPCStats(run.authoritativeEngine.Client().CommitRPCStats())
+	}
+}
+
+func (run *backupRun) reportCommitRPCStats(stats daemon.CommitRPCStats) {
+	if run.globalOptions.JSON {
+		run.term.Print(ui.ToJSONString(struct {
+			MessageType string `json:"message_type"`
+			daemon.CommitRPCStats
+		}{MessageType: "commit_rpc_stats", CommitRPCStats: stats}))
+	} else if !run.globalOptions.Quiet {
+		run.printer.V("metadata commit RPCs: %d attempts, %d success, %d aborted, %d canceled, %d timed out, %d other failures\n",
+			stats.Attempts, stats.Successes, stats.Aborted, stats.Cancellations, stats.Timeouts, stats.OtherFailures)
 	}
 }
 

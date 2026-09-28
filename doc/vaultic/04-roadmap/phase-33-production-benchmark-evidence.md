@@ -382,6 +382,42 @@ self-tests and the blocked preflight record. Source telemetry changes remain
 uncommitted; a safe way to restore complete failure attribution (or explicit
 operational review of a daemon restart) is required before a live retry.
 
+## R49 complete client commit accounting and stopped run (2026-09-28)
+
+The approved second path added a per-client ledger at the Go transaction
+`Commit` RPC boundary (normal, idempotent, deferred and fenced calls) and a
+final `commit_rpc_stats` backup JSON record after repository cleanup. Native
+allocation and shared-content publication tests match client RPC abort totals
+against daemon failed-commit deltas in isolated workloads. The private R49
+harness at `/volume2/NASDA2/rustic/db.test/backup-completion-20260928-r49-dhPr1J`
+requires exact final client/daemon attempts and outcomes, and all client
+`Aborted` returns to be explained by successful commit-stage allocation or
+publication retries. Unexplained failures, terminal reconciliation failures,
+nonzero cancellations/timeouts, and snapshot mismatch still reject the run.
+Thirty-six synthetic gate cases and focused native/reconciler/backup races,
+full reconciler and backup tests, vet, and preflight passed before execution.
+The same daemon PID, epoch, binary, settings and 52 sources were retained;
+there was no restart or production binary replacement.
+
+The single capped R49 backup was **stopped and rejected** at about 1,005
+seconds when the predeclared 64-failure live budget was exceeded. At 1,000
+seconds it had processed 86,085 files and 155,524,358,512 logical bytes.
+The settled daemon recorded 4,412 commits: 4,347 successes, 65 failures,
+zero cancellations and zero timeouts. All 65 client `Aborted` responses were
+attributed to recovered inode-publication commit retries, across 61 logical
+calls. The final client ledger recorded 4,346 successes and one cancellation
+instead of the daemon's 4,347 successes: shutdown canceled a client-side
+Commit response while an active daemon request subsequently succeeded.
+The cancellation also produced one terminal revision-allocation call and
+26,451 close-time reconciliation failures. This is **not** an accepted
+full-run result, nor evidence that cancellation was harmless. No snapshot
+was added (143 IDs remain), so no representative restore was possible.
+The daemon remained PID 1617561/epoch 76, read-write, with zero active
+transactions and write intents and an empty metadata scratch directory.
+Do not raise the live conflict budget or repeat the run solely to reach
+completion without reviewing the conflict rate, stop semantics and final
+attribution gate. R47 and R48 remain rejected/blocked respectively.
+
 ## Isolated empty-debt overhead measurement (2026-09-28)
 
 `BenchmarkProcessEmptyCrawlDebtResolution` compares the unchanged
