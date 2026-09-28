@@ -117,8 +117,12 @@ func TestBackupReportsReconciliationStats(t *testing.T) {
 	run := &backupRun{term: term, globalOptions: global.Options{JSON: true}}
 	stats := reconcile.Metrics{
 		PublicationGroups: [4]uint64{1, 2, 3, 4}, RevisionAllocationCalls: 7, RevisionAllocationFailures: 1,
+		RevisionAllocationRecoveredAborts: 3, RevisionAllocationTerminalAborts: 2,
+		RevisionAllocationRecoveredRetryCalls: 2, RevisionAllocationTerminalRetryCalls: 1,
 		RevisionsReserved: 20, InodeRevisionsAssigned: 18, RevisionAllocationNS: 100,
 		InodePublicationCalls: 17, InodePublicationFailures: 2, InodePublicationNS: 200, PublicationGroupNS: 150,
+		InodePublicationRecoveredAborts: 4, InodePublicationTerminalAborts: 1,
+		InodePublicationRecoveredRetryCalls: 3, InodePublicationTerminalRetryCalls: 1,
 	}
 	run.reportReconciliationStats(stats)
 	if len(term.Output) != 1 {
