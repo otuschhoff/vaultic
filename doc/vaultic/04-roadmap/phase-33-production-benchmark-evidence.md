@@ -238,6 +238,59 @@ daemon includes the uncommitted finalization patch on `5419edd0b`; no new commit
 or push was made in this approval step, and the installed profile CLI was not
 replaced. Historical sealed artifacts remain untouched.
 
+## R46 reverse-order matched repeat (2026-09-28)
+
+With fresh approval for the bounded matched comparison, R45's exact CLI
+binaries, 52 sources, adopted daemon and settings were reused without a build,
+restart or configuration change. This time the candidate ran before the
+baseline; each run was capped at 600 seconds plus 45 seconds of termination
+grace. Separate private artifacts, including copied run/analysis scripts,
+per-run status and process samples, CPU profiles, NFS counters and stack
+captures, are at
+`/volume2/NASDA2/rustic/db.test/empty-debt-repeat-20260928-r46-b4P4gE`.
+The copied analyzer's cache-warmth caveat was corrected for this ordering;
+the R45 archive was not modified.
+
+| Metric | R46 baseline (second) | R46 candidate (first) |
+| --- | --- | --- |
+| Runtime / exit | 600.307 s / 124 | 600.299 s / 124 |
+| Files at 599 s | 48,154 | 47,974 |
+| Logical MiB/s | 146.734 | 146.345 |
+| Empty commit attempts / successes | 45,519 / 45,519 | 0 / 0 |
+| Commit failures / cancellations / timeouts | 0 / 0 / 0 | 0 / 0 / 0 |
+| Metadata GETs | 545,522 | 537,253 |
+| Single-handle size RPCs / mean | 117,725 / 18.990 ms | 117,281 / 18.931 ms |
+| CLI CPU seconds | 1,318.40 | 1,262.71 |
+| Daemon CPU seconds | 4,615.63 | 4,329.33 |
+| Engine writes | 0 | 0 |
+
+Both individual safety gates passed: unchanged 143 snapshot IDs, no reported
+source or sampler errors, zero final transactions and write intents, no commit
+failure diagnostics, empty scratch, and unchanged daemon PID 1617561, epoch 76
+and installed binary SHA256
+`6733b8c867f75c86dd73b0f8e85e2d2f641389103eae370c1f8cdd470cbd507e`.
+The earlier R45 baseline-then-candidate pair showed +1.45% candidate logical
+MiB/s and +2.56% files; this reverse-order pair showed -0.27% and -0.37%.
+Removing empty commits is repeatable, as are lower candidate daemon CPU
+(-3.84% in R45, -6.20% in R46), but a throughput or total-runtime gain is
+not established. The candidate's metadata GET advantage also narrowed from
+15.76% in R45 to 1.52% in R46. Sequential order, cache warmth, host activity
+and work mix still confound either pair; logical bytes are not uploaded bytes.
+
+The R46 candidate's 360-second stack again has size lookups waiting in
+`ReadSession.MultiGet`. All size requests remained single-handle and the
+client result cache recorded zero evictions. Its CPU profile had 24.12% flat
+SHA-256, 11.98% syscall and 9.95% chunk split-point samples; these are CLI
+CPU costs, not isolated metadata-server read times. Direct NFS LOOKUP recorded
+52,102/52,256 errors and reconciliation close-time failed counts were
+2,459/2,636 (candidate/baseline). Those outcomes remain unclassified in
+these binaries: the newer NFS error-class attribution was not deployed.
+Candidate/baseline READ cancellation counts of 2/4 at shutdown also remain
+visible, not treated as successful reads. Neither bounded run completed a
+backup or validated restore. Further changes should target read/decode
+attribution and error classification offline; full completion and restore
+need a separately scoped live run.
+
 ## Isolated empty-debt overhead measurement (2026-09-28)
 
 `BenchmarkProcessEmptyCrawlDebtResolution` compares the unchanged
