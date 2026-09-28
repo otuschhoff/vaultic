@@ -331,6 +331,22 @@ func TestNFSStaleMetadata(t *testing.T) {
 					if (err != nil) != failRetry || calls.Load() != 2 {
 						t.Fatalf("fallback calls=%d err=%v", calls.Load(), err)
 					}
+					class := map[uint32]string{
+						client.NFS3ErrStale: "stale_handle", client.NFS3ErrBadHandle: "stale_handle",
+						client.NFS3ErrNotDir: "not_directory", client.NFS3ErrNoEnt: "not_found",
+					}[status]
+					var classified, total uint64
+					for _, operation := range filesystem.Stats().Operations {
+						classified += operation.ErrorClasses[class]
+						total += operation.Errors
+					}
+					want := uint64(1)
+					if failRetry {
+						want = 2
+					}
+					if classified != want || total != want {
+						t.Fatalf("wire error class=%s count=%d total=%d want=%d", class, classified, total, want)
+					}
 					if !failRetry {
 						info, err := metadata.Stat()
 						_ = metadata.Close()

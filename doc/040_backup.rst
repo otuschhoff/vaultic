@@ -193,6 +193,22 @@ nanoseconds, and active/maximum concurrent calls. EOF is not an error. Service
 time includes the client call and response decoding, excludes acquisition wait,
 and omits setup RPCs. These timings do not measure server-side execution alone.
 
+Each operation also reports fixed ``error_classes`` counters: ``cancelled``,
+``deadline_exceeded``, ``not_found``, ``permission``, ``stale_handle``,
+``not_directory``, ``nfs_other``, ``transport`` and ``other``. They classify both
+connection-acquisition failures and returned call errors; ``calls`` excludes
+acquisition failures. Context deadlines are distinguished from transport-level
+timeouts, which remain ``transport``. The existing ``cancellations`` total still
+includes both context cancellation and context deadline expiry. No paths,
+handles or raw error messages are recorded in the classification.
+
+After calls settle, the class counts sum to ``errors``. Concurrent snapshots
+can briefly observe partial counter updates. A missing path remains in the error
+total even when the caller expects absence, such as an exclusion-marker probe;
+the category alone does not establish that an error is harmless. Errors in a
+successful stale-handle retry also remain counted. Earlier telemetry without
+these fields cannot be retrospectively classified.
+
 Validation includes native protocol tests, READDIRPLUS reuse without per-entry
 LOOKUP/GETATTR calls, delayed handle consumption with refreshed attributes,
 parallel missing-attribute resolution, bounded stale-handle fallback,

@@ -149,7 +149,8 @@ func TestBackupCloseReportsNFSStatsAfterCancellation(t *testing.T) {
 	stats := fs.NFSStats{Lookups: 1, Getattrs: 2, ReadDirPlus: 3, Reads: 4, ReadBytes: 5, CacheHits: 6,
 		ParentHits: 7, RetainedOpens: 8,
 		Operations: map[string]fs.NFSOperationStats{"read": {
-			Attempts: 4, Calls: 3, Errors: 1, Cancellations: 1, MaxActive: 2, QueueNanoseconds: 10, ServiceNanoseconds: 20}}}
+			Attempts: 4, Calls: 3, Errors: 1, Cancellations: 1, ErrorClasses: map[string]uint64{"cancelled": 1},
+			MaxActive: 2, QueueNanoseconds: 10, ServiceNanoseconds: 20}}}
 	run.closeSource = func() {
 		if ctx.Err() == nil {
 			t.Fatal("source stats emitted before cancellation")

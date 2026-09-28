@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"os"
 	"testing"
 	"time"
 
@@ -92,6 +94,90 @@ func TestNFSPool(t *testing.T) {
 				t.Fatal("scheduler leaked admission or connections")
 			}
 		})
+	}
+}
+
+func TestNFSOperationErrorClasses(t *testing.T) {
+	for _, testCase := range []struct {
+		name  string
+		err   error
+		class string
+	}{
+		{"success", nil, ""},
+		{"eof", io.EOF, ""},
+		{"cancelled", context.Canceled, "cancelled"},
+		{"deadline", context.DeadlineExceeded, "deadline_exceeded"},
+		{"missing", client.NFS3Error(client.NFS3ErrNoEnt), "not_found"},
+		{"typed-missing", &client.Error{ErrorNum: client.NFS3ErrNoEnt}, "not_found"},
+		{"permission", client.NFS3Error(client.NFS3ErrPerm), "permission"},
+		{"access", client.NFS3Error(client.NFS3ErrAcces), "permission"},
+		{"stale", client.NFS3Error(client.NFS3ErrStale), "stale_handle"},
+		{"bad-handle", client.NFS3Error(client.NFS3ErrBadHandle), "stale_handle"},
+		{"not-directory", client.NFS3Error(client.NFS3ErrNotDir), "not_directory"},
+		{"server-io", client.NFS3Error(client.NFS3ErrIO), "nfs_other"},
+		{"closed", net.ErrClosed, "transport"},
+		{"short-response", io.ErrUnexpectedEOF, "transport"},
+		{"network-timeout", &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}, "transport"},
+		{"unknown", errors.New("unclassified"), "other"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			for _, wrapped := range []bool{false, true} {
+				returned := testCase.err
+				if wrapped && returned != nil {
+					returned = fmt.Errorf("private path: %w", returned)
+				}
+				pool := newNFSPool([]*client.Target{new(client.Target)}, newNFSServer(1))
+				var counters nfsOperationCounters
+				if err := pool.call(t.Context(), false, &counters, func(*client.Target) error { return returned }); !errors.Is(err, returned) {
+					t.Fatalf("returned error changed: got=%v want=%v", err, returned)
+				}
+				stats := counters.stats()
+				var total uint64
+				for class, count := range stats.ErrorClasses {
+					var want uint64
+					if class == testCase.class {
+						want = 1
+					}
+					if count != want {
+						t.Fatalf("class=%s count=%d want=%d", class, count, want)
+					}
+					total += count
+				}
+				var cancelled uint64
+				if testCase.class == "cancelled" || testCase.class == "deadline_exceeded" {
+					cancelled = 1
+				}
+				if len(stats.ErrorClasses) != int(nfsErrorClassCount) || stats.Errors != total || stats.Cancellations != cancelled ||
+					stats.Attempts != 1 || stats.Calls != 1 || stats.Active != 0 {
+					t.Fatalf("unexpected outcome accounting: %+v", stats)
+				}
+			}
+		})
+	}
+}
+
+func TestNFSPoolQueuedErrorClasses(t *testing.T) {
+	for _, expired := range []bool{false, true} {
+		ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+		want := "deadline_exceeded"
+		if !expired {
+			cancel()
+			ctx, cancel = context.WithCancel(t.Context())
+			cancel()
+			want = "cancelled"
+		}
+		pool := newNFSPool(nil, newNFSServer(1))
+		var counters nfsOperationCounters
+		err := pool.call(ctx, false, &counters, func(*client.Target) error {
+			t.Fatal("queued failure invoked RPC")
+			return nil
+		})
+		cancel()
+		stats := counters.stats()
+		if !errors.Is(err, ctx.Err()) || stats.Attempts != 1 || stats.Calls != 0 || stats.Errors != 1 ||
+			stats.Cancellations != 1 || stats.ErrorClasses[want] != 1 || stats.Active != 0 {
+			t.Fatalf("queued outcome: error=%v stats=%+v", err, stats)
+		}
 	}
 }
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -188,23 +190,83 @@ func (pool *nfsPool) acquire(ctx context.Context, read bool) (*client.Target, fu
 }
 
 type NFSOperationStats struct {
-	Attempts           uint64 `json:"attempts"`
-	Calls              uint64 `json:"calls"`
-	Errors             uint64 `json:"errors"`
-	Cancellations      uint64 `json:"cancellations"`
-	QueueNanoseconds   uint64 `json:"queue_nanoseconds"`
-	ServiceNanoseconds uint64 `json:"service_nanoseconds"`
-	Active             uint64 `json:"active"`
-	MaxActive          uint64 `json:"max_active"`
+	Attempts           uint64            `json:"attempts"`
+	Calls              uint64            `json:"calls"`
+	Errors             uint64            `json:"errors"`
+	Cancellations      uint64            `json:"cancellations"`
+	ErrorClasses       map[string]uint64 `json:"error_classes"`
+	QueueNanoseconds   uint64            `json:"queue_nanoseconds"`
+	ServiceNanoseconds uint64            `json:"service_nanoseconds"`
+	Active             uint64            `json:"active"`
+	MaxActive          uint64            `json:"max_active"`
 }
 
 type nfsOperationCounters struct {
 	attempts, calls, errors, cancellations, queue, service, active, maximum atomic.Uint64
+	errorClasses                                                            [nfsErrorClassCount]atomic.Uint64
+}
+
+type nfsErrorClass int
+
+const (
+	nfsErrorCancelled nfsErrorClass = iota
+	nfsErrorDeadline
+	nfsErrorNotFound
+	nfsErrorPermission
+	nfsErrorStaleHandle
+	nfsErrorNotDirectory
+	nfsErrorServer
+	nfsErrorTransport
+	nfsErrorOther
+	nfsErrorClassCount
+)
+
+var nfsErrorClassNames = [...]string{
+	"cancelled", "deadline_exceeded", "not_found", "permission", "stale_handle",
+	"not_directory", "nfs_other", "transport", "other",
+}
+
+func (counters *nfsOperationCounters) recordError(err error) {
+	counters.errors.Add(1)
+	class := nfsErrorOther
+	var failure *client.Error
+	var networkError net.Error
+	switch {
+	case errors.Is(err, context.Canceled):
+		class = nfsErrorCancelled
+	case errors.Is(err, context.DeadlineExceeded):
+		class = nfsErrorDeadline
+	case errors.Is(err, os.ErrNotExist):
+		class = nfsErrorNotFound
+	case errors.Is(err, os.ErrPermission):
+		class = nfsErrorPermission
+	case errors.As(err, &failure):
+		switch failure.ErrorNum {
+		case client.NFS3ErrNoEnt:
+			class = nfsErrorNotFound
+		case client.NFS3ErrPerm, client.NFS3ErrAcces:
+			class = nfsErrorPermission
+		case client.NFS3ErrStale, client.NFS3ErrBadHandle:
+			class = nfsErrorStaleHandle
+		case client.NFS3ErrNotDir:
+			class = nfsErrorNotDirectory
+		default:
+			class = nfsErrorServer
+		}
+	case errors.As(err, &networkError), errors.Is(err, net.ErrClosed), errors.Is(err, io.ErrUnexpectedEOF):
+		class = nfsErrorTransport
+	}
+	counters.errorClasses[class].Add(1)
 }
 
 func (counters *nfsOperationCounters) stats() NFSOperationStats {
+	classes := make(map[string]uint64, len(nfsErrorClassNames))
+	for class, name := range nfsErrorClassNames {
+		classes[name] = counters.errorClasses[class].Load()
+	}
 	return NFSOperationStats{Attempts: counters.attempts.Load(), Calls: counters.calls.Load(),
 		Errors: counters.errors.Load(), Cancellations: counters.cancellations.Load(),
+		ErrorClasses:     classes,
 		QueueNanoseconds: counters.queue.Load(), ServiceNanoseconds: counters.service.Load(),
 		Active: counters.active.Load(), MaxActive: counters.maximum.Load()}
 }
@@ -222,7 +284,7 @@ func (pool *nfsPool) call(ctx context.Context, read bool, counters *nfsOperation
 	cancel()
 	counters.queue.Add(uint64(time.Since(start)))
 	if err != nil {
-		counters.errors.Add(1)
+		counters.recordError(err)
 		return err
 	}
 	defer release()
@@ -238,7 +300,7 @@ func (pool *nfsPool) call(ctx context.Context, read bool, counters *nfsOperation
 	counters.service.Add(uint64(time.Since(start)))
 	counters.active.Add(^uint64(0))
 	if err != nil && !errors.Is(err, io.EOF) {
-		counters.errors.Add(1)
+		counters.recordError(err)
 	}
 	return err
 }

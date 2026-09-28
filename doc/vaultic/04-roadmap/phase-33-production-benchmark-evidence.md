@@ -1,5 +1,50 @@
 # Phase 33 Production Benchmark Evidence
 
+## NFS error attribution follow-up (2026-09-28)
+
+The finalization ownership fix, tests, deployment and R45 evidence were
+committed locally as `a047938996331daac2be616c7b0b4e19f136909f` with a detailed
+message. No push was performed. The following attribution work is a separate,
+uncommitted and undeployed continuation.
+
+Inspection of the NFS scheduler confirmed that its existing `errors` counter
+combines missing-path replies with permission, stale-handle, transport and other
+failures. The pinned client converts NFS3ERR_NOENT into `os.ErrNotExist` and
+NFS3ERR_PERM into `os.ErrPermission`, while NFS3ERR_ACCES and stale-handle
+statuses remain typed NFS errors. A breakdown based only on typed NFS errors
+would therefore miss important categories.
+
+Each operation now has fixed `error_classes` counters for `cancelled`,
+`deadline_exceeded`, `not_found`, `permission`, `stale_handle`, `not_directory`,
+`nfs_other`, `transport` and `other`. Classification handles wrapped standard
+and typed errors, and covers failures before connection admission as well as
+returned call failures. The existing aggregate error and cancellation totals,
+EOF exclusion, returned errors, retries and scheduling are unchanged. Context
+deadline expiry is distinct from transport-level timeout; the latter is not
+added to the existing context cancellation/deadline total. No paths, handles or
+raw error strings become telemetry labels.
+
+Focused race tests cover nil/EOF, cancellation/deadline, missing paths,
+permissions, stale/bad handles, not-directory, server I/O, closed/short/timeout
+transport and unknown errors, including wrapped forms. Native wire regressions
+verify classified failures remain counted through successful fallback and
+failed retry, and the existing source-close JSON test verifies propagation.
+The NFS-focused race suite, JSON reporting test and changed-code lint pass.
+Class totals reconcile with aggregate errors after settlement; concurrent
+snapshots can briefly see partial atomic updates.
+
+This is future attribution, not a performance optimization or a retrospective
+classification of R45's 50,475/52,722 LOOKUP errors. Missing paths can arise
+from expected marker probes or from real source changes; caller intent still
+matters. Close-time reconciliation failures also remain unclassified. No
+failure gate was relaxed, no production process or setting was changed, and
+no new live workload was run. Sealed historical archives remain untouched.
+
+Next work is to obtain classified outcomes in a separately approved trial and
+attribute the remaining per-key metadata read/decode cost before selecting a
+performance change. Repeatable throughput, full backup completion and restore
+validation remain outstanding.
+
 ## Finalization ownership and R45 matched pair (2026-09-28)
 
 Following explicit approval, the accepted-commit/rollback race was fixed and
