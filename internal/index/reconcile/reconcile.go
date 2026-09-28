@@ -91,6 +91,8 @@ type Metrics struct {
 	InodePublicationFailures              uint64                         `json:"inode_publication_failures"`
 	InodePublicationRecoveredAborts       uint64                         `json:"inode_publication_recovered_aborts"`
 	InodePublicationTerminalAborts        uint64                         `json:"inode_publication_terminal_aborts"`
+	InodePublicationRecoveredCommitAborts uint64                         `json:"inode_publication_recovered_commit_aborts"`
+	InodePublicationTerminalCommitAborts  uint64                         `json:"inode_publication_terminal_commit_aborts"`
 	InodePublicationRecoveredRetryCalls   uint64                         `json:"inode_publication_recovered_retry_calls"`
 	InodePublicationTerminalRetryCalls    uint64                         `json:"inode_publication_terminal_retry_calls"`
 	InodePublicationNS                    uint64                         `json:"inode_publication_ns"`
@@ -185,6 +187,8 @@ type Reconciler struct {
 	inodePublicationFailures              atomic.Uint64
 	inodePublicationRecoveredAborts       atomic.Uint64
 	inodePublicationTerminalAborts        atomic.Uint64
+	inodePublicationRecoveredCommitAborts atomic.Uint64
+	inodePublicationTerminalCommitAborts  atomic.Uint64
 	inodePublicationRecoveredRetryCalls   atomic.Uint64
 	inodePublicationTerminalRetryCalls    atomic.Uint64
 	inodePublicationNS                    atomic.Uint64
@@ -270,6 +274,8 @@ func (reconciler *Reconciler) Metrics() Metrics {
 		InodePublicationFailures:              reconciler.inodePublicationFailures.Load(),
 		InodePublicationRecoveredAborts:       reconciler.inodePublicationRecoveredAborts.Load(),
 		InodePublicationTerminalAborts:        reconciler.inodePublicationTerminalAborts.Load(),
+		InodePublicationRecoveredCommitAborts: reconciler.inodePublicationRecoveredCommitAborts.Load(),
+		InodePublicationTerminalCommitAborts:  reconciler.inodePublicationTerminalCommitAborts.Load(),
 		InodePublicationRecoveredRetryCalls:   reconciler.inodePublicationRecoveredRetryCalls.Load(),
 		InodePublicationTerminalRetryCalls:    reconciler.inodePublicationTerminalRetryCalls.Load(),
 		InodePublicationNS:                    reconciler.inodePublicationNS.Load(),
@@ -1236,8 +1242,12 @@ func (reconciler *Reconciler) publishRecordWithAllocator(
 		ContentIDs: content, DebtKeys: item.debtKeys, RelatedPuts: pathPuts,
 		HasMultipleParents: item.HasMultipleParents, HardlinkParents: item.HardlinkParents,
 	}
-	var aborted uint64
+	var aborted, commitAborted uint64
 	if store, ok := reconciler.store.(interface {
+		PublishReconciledRevisionWithRetryDetails(context.Context, daemon.ReconciledRevision) (uint64, uint64, error)
+	}); ok {
+		aborted, commitAborted, err = store.PublishReconciledRevisionWithRetryDetails(reconciler.ctx, request)
+	} else if store, ok := reconciler.store.(interface {
 		PublishReconciledRevisionWithRetryCount(context.Context, daemon.ReconciledRevision) (uint64, error)
 	}); ok {
 		aborted, err = store.PublishReconciledRevisionWithRetryCount(reconciler.ctx, request)
@@ -1250,11 +1260,13 @@ func (reconciler *Reconciler) publishRecordWithAllocator(
 		if err != nil {
 			reconciler.inodePublicationFailures.Add(1)
 			reconciler.inodePublicationTerminalAborts.Add(aborted)
+			reconciler.inodePublicationTerminalCommitAborts.Add(commitAborted)
 			if aborted > 0 {
 				reconciler.inodePublicationTerminalRetryCalls.Add(1)
 			}
 		} else {
 			reconciler.inodePublicationRecoveredAborts.Add(aborted)
+			reconciler.inodePublicationRecoveredCommitAborts.Add(commitAborted)
 			if aborted > 0 {
 				reconciler.inodePublicationRecoveredRetryCalls.Add(1)
 			}

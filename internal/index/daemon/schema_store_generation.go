@@ -1479,22 +1479,30 @@ func (store *SchemaStore) PublishReconciledRevision(ctx context.Context, reconci
 }
 
 func (store *SchemaStore) PublishReconciledRevisionWithRetryCount(ctx context.Context, reconciled ReconciledRevision) (uint64, error) {
+	aborted, _, err := store.PublishReconciledRevisionWithRetryDetails(ctx, reconciled)
+	return aborted, err
+}
+
+func (store *SchemaStore) PublishReconciledRevisionWithRetryDetails(ctx context.Context, reconciled ReconciledRevision) (uint64, uint64, error) {
 	backoff := 100 * time.Microsecond
-	var aborted uint64
+	var aborted, commitAborted uint64
 	for range revisionAllocationAttempts {
-		err := store.publishReconciledRevisionOnce(ctx, reconciled)
+		err, fromCommit := store.publishReconciledRevisionOnce(ctx, reconciled)
 		if status.Code(err) != codes.Aborted {
-			return aborted, err
+			return aborted, commitAborted, err
 		}
 		aborted++
+		if fromCommit {
+			commitAborted++
+		}
 		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return aborted, ctx.Err()
+			return aborted, commitAborted, ctx.Err()
 		case <-timer.C:
 		}
 		backoff = min(backoff*2, 25*time.Millisecond)
 	}
-	return aborted, fmt.Errorf("publish reconciled revision: transaction conflict retry limit exceeded")
+	return aborted, commitAborted, fmt.Errorf("publish reconciled revision: transaction conflict retry limit exceeded")
 }

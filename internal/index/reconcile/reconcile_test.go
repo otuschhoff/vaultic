@@ -738,6 +738,11 @@ func (store *retryOutcomeStore) PublishReconciledRevisionWithRetryCount(ctx cont
 	return store.aborted, store.fakeStore.PublishReconciledRevision(ctx, request)
 }
 
+func (store *retryOutcomeStore) PublishReconciledRevisionWithRetryDetails(ctx context.Context, request daemon.ReconciledRevision) (uint64, uint64, error) {
+	aborted, err := store.PublishReconciledRevisionWithRetryCount(ctx, request)
+	return aborted, aborted, err
+}
+
 func TestPublicationRetryOutcomes(t *testing.T) {
 	for _, count := range []int{1, publicationConcurrency} {
 		for _, failPublication := range []bool{false, true} {
@@ -749,6 +754,7 @@ func TestPublicationRetryOutcomes(t *testing.T) {
 					reconciler.publishInodes(publicationTestBatch(0, count), make(map[string]publishedItem))
 					metrics := reconciler.Metrics()
 					if metrics.InodePublicationTerminalAborts != 2*uint64(count) || metrics.InodePublicationRecoveredAborts != 0 ||
+						metrics.InodePublicationTerminalCommitAborts != 2*uint64(count) || metrics.InodePublicationRecoveredCommitAborts != 0 ||
 						metrics.InodePublicationTerminalRetryCalls != uint64(count) || metrics.InodePublicationRecoveredRetryCalls != 0 ||
 						metrics.InodePublicationFailures != uint64(count) || metrics.RevisionAllocationRecoveredAborts != 2 ||
 						metrics.RevisionAllocationRecoveredRetryCalls != 1 {
@@ -762,6 +768,7 @@ func TestPublicationRetryOutcomes(t *testing.T) {
 				if len(published) != count || metrics.RevisionAllocationRecoveredAborts != 2 || metrics.RevisionAllocationTerminalAborts != 0 ||
 					metrics.RevisionAllocationRecoveredRetryCalls != 1 || metrics.RevisionAllocationTerminalRetryCalls != 0 ||
 					metrics.InodePublicationRecoveredAborts != 2*uint64(count) || metrics.InodePublicationTerminalAborts != 0 ||
+					metrics.InodePublicationRecoveredCommitAborts != 2*uint64(count) || metrics.InodePublicationTerminalCommitAborts != 0 ||
 					metrics.InodePublicationRecoveredRetryCalls != uint64(count) || metrics.InodePublicationTerminalRetryCalls != 0 {
 					t.Fatalf("recovered retries: %+v published=%d", metrics, len(published))
 				}

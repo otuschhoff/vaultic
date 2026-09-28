@@ -357,6 +357,31 @@ attempt under the old gate or interpret this as a full-backup runtime result;
 first distinguish retryable write conflicts from unresolved publication
 failures using an offline-validated write-phase safety criterion.
 
+## R48 offline gate and blocked preflight (2026-09-28)
+
+With approval to prepare another bounded completion attempt, an instrumented
+debug CLI and a private R48 harness were built under
+`/volume2/NASDA2/rustic/db.test/backup-completion-20260928-r48-Jd5lex`.
+Native race-checked tests reconcile recovered allocation and publication
+commit retries with failed commits in isolated workloads; the backup JSON test
+covers nonzero commit-stage retry outcomes. The R48 analyzer's synthetic cases
+reject missing diagnostics, unmatched recovered counts, terminal reconciler
+failures, cancellations and timeouts. This does not prove that every kind of
+production commit failure originates in those two operations.
+
+Read-only preflight confirmed the same PID 1617561, epoch 76, daemon binary,
+configuration, idle transaction state, 52 sources and 143 snapshot IDs.
+It then **blocked before starting a backup**: R47 had already consumed the
+first eight `storage_commit / Aborted` diagnostics in that daemon process.
+The daemon emits subsequent occurrences only at powers of two, so a new run
+could not require complete diagnostics for failures 9 through 15. The R48
+preflight fails closed on an exhausted diagnostic window; no daemon restart,
+CLI deployment, backup or restore occurred. The previous R47 rejection stands.
+The private R48 artifact contains source patch and binary hashes, analyzer
+self-tests and the blocked preflight record. Source telemetry changes remain
+uncommitted; a safe way to restore complete failure attribution (or explicit
+operational review of a daemon restart) is required before a live retry.
+
 ## Isolated empty-debt overhead measurement (2026-09-28)
 
 `BenchmarkProcessEmptyCrawlDebtResolution` compares the unchanged

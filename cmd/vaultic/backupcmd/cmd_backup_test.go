@@ -122,6 +122,7 @@ func TestBackupReportsReconciliationStats(t *testing.T) {
 		RevisionsReserved: 20, InodeRevisionsAssigned: 18, RevisionAllocationNS: 100,
 		InodePublicationCalls: 17, InodePublicationFailures: 2, InodePublicationNS: 200, PublicationGroupNS: 150,
 		InodePublicationRecoveredAborts: 4, InodePublicationTerminalAborts: 1,
+		InodePublicationRecoveredCommitAborts: 3, InodePublicationTerminalCommitAborts: 1,
 		InodePublicationRecoveredRetryCalls: 3, InodePublicationTerminalRetryCalls: 1,
 	}
 	run.reportReconciliationStats(stats)

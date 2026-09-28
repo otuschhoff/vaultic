@@ -37,34 +37,34 @@ type reconciledRevisionPlan struct {
 	newUnique  []schema.ID
 }
 
-func (store *SchemaStore) publishReconciledRevisionOnce(ctx context.Context, reconciled ReconciledRevision) error {
+func (store *SchemaStore) publishReconciledRevisionOnce(ctx context.Context, reconciled ReconciledRevision) (error, bool) {
 	input, err := prepareReconciledRevision(reconciled)
 	if err != nil {
-		return err
+		return err, false
 	}
 	transaction, err := store.client.Begin(ctx)
 	if err != nil {
-		return err
+		return err, false
 	}
-	fail := func(err error) error {
+	fail := func(err error) (error, bool) {
 		rollbackTransaction(ctx, transaction)
-		return err
+		return err, false
 	}
 	plan, noop, err := store.planReconciledRevision(ctx, transaction, input)
 	if err != nil {
 		return fail(err)
 	}
 	if noop {
-		return transaction.Rollback(ctx)
+		return transaction.Rollback(ctx), false
 	}
 	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), sortedReconciledMutations(plan), nil); err != nil {
 		return fail(err)
 	}
 	if err := transaction.Commit(ctx); err != nil {
 		rollbackTransaction(ctx, transaction)
-		return err
+		return err, true
 	}
-	return nil
+	return nil, false
 }
 
 func (store *SchemaStore) PublishAllocatedReconciledRevision(

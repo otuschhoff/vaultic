@@ -389,13 +389,15 @@ func TestSchemaStoreRevisionAllocationContention(t *testing.T) {
 			}
 			revisions := make([]uint64, count)
 			allocationErrors := make([]error, count)
+			allocationAborts := make([]uint64, count)
 			var workers sync.WaitGroup
 			start := make(chan struct{})
 			for worker := range concurrency {
 				workers.Go(func() {
 					<-start
 					for index := worker * allocationSize; index < count; index += concurrency * allocationSize {
-						first, err := store.AllocateRevisionBlock(ctx, uint64(allocationSize))
+						first, aborted, err := store.AllocateRevisionBlockWithRetryCount(ctx, uint64(allocationSize))
+						allocationAborts[index] = aborted
 						for offset := range allocationSize {
 							revisions[index+offset], allocationErrors[index+offset] = first+uint64(offset), err
 						}
@@ -436,6 +438,13 @@ func TestSchemaStoreRevisionAllocationContention(t *testing.T) {
 			}
 			if mode != "concurrent" && failures != 0 {
 				t.Fatalf("uncontended allocation had %d failed commits", failures)
+			}
+			var recoveredAborts uint64
+			for index := 0; index < count; index += allocationSize {
+				recoveredAborts += allocationAborts[index]
+			}
+			if recoveredAborts != failures {
+				t.Fatalf("recovered allocation aborts=%d, failed commits=%d", recoveredAborts, failures)
 			}
 			durable := after.Attribution.DurableWait
 			durableBefore := before.Attribution.DurableWait
@@ -1197,7 +1206,12 @@ func TestSchemaStoreConcurrentReconciledSharedContent(t *testing.T) {
 	store := NewSchemaStore(client)
 	content := []schema.ID{daemonTestID(1)}
 	start := make(chan struct{})
-	results := make(chan error, 4)
+	type result struct {
+		aborted       uint64
+		commitAborted uint64
+		err           error
+	}
+	results := make(chan result, 4)
 	for index := range 4 {
 		inode := uint64(index + 10)
 		revision, err := store.AllocateRevision(ctx)
@@ -1217,21 +1231,40 @@ func TestSchemaStoreConcurrentReconciledSharedContent(t *testing.T) {
 			select {
 			case <-start:
 			case <-ctx.Done():
-				results <- ctx.Err()
+				results <- result{err: ctx.Err()}
 				return
 			}
-			err := store.PublishReconciledRevision(ctx, reconciled)
+			aborted, commitAborted, err := store.PublishReconciledRevisionWithRetryDetails(ctx, reconciled)
 			if err == nil {
-				err = store.PublishReconciledRevision(ctx, reconciled)
+				var repeated, repeatedCommit uint64
+				repeated, repeatedCommit, err = store.PublishReconciledRevisionWithRetryDetails(ctx, reconciled)
+				aborted += repeated
+				commitAborted += repeatedCommit
 			}
-			results <- err
+			results <- result{aborted: aborted, commitAborted: commitAborted, err: err}
 		}()
 	}
+	before, err := client.WriterStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	close(start)
+	var recoveredAborts, recoveredCommitAborts uint64
 	for range 4 {
-		if err := <-results; err != nil {
-			t.Fatal(err)
+		outcome := <-results
+		if outcome.err != nil {
+			t.Fatal(outcome.err)
 		}
+		recoveredAborts += outcome.aborted
+		recoveredCommitAborts += outcome.commitAborted
+	}
+	after, err := client.WriterStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failures := after.Attribution.CommitRequest.Failures - before.Attribution.CommitRequest.Failures
+	if recoveredCommitAborts != failures || recoveredAborts < recoveredCommitAborts {
+		t.Fatalf("recovered publication aborts=%d, commit aborts=%d, failed commits=%d", recoveredAborts, recoveredCommitAborts, failures)
 	}
 	value, found, err := store.Get(ctx, schema.ReferenceCountKey(content[0]))
 	if err != nil || !found {
