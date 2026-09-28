@@ -872,58 +872,65 @@ func (store *SchemaStore) AllocateRevision(ctx context.Context) (uint64, error) 
 // AllocateRevisionBlock atomically reserves count monotonically increasing
 // repository revisions and returns the first reserved revision.
 func (store *SchemaStore) AllocateRevisionBlock(ctx context.Context, count uint64) (uint64, error) {
+	first, _, err := store.AllocateRevisionBlockWithRetryCount(ctx, count)
+	return first, err
+}
+
+func (store *SchemaStore) AllocateRevisionBlockWithRetryCount(ctx context.Context, count uint64) (uint64, uint64, error) {
 	if count == 0 {
-		return 0, fmt.Errorf("revision block size must be positive")
+		return 0, 0, fmt.Errorf("revision block size must be positive")
 	}
 	key := schema.NextRevisionKey()
 	backoff := 100 * time.Microsecond
+	var aborted uint64
 	for range revisionAllocationAttempts {
 		transaction, err := store.client.Begin(ctx)
 		if err != nil {
-			return 0, err
+			return 0, aborted, err
 		}
 		encoded, found, err := transaction.Get(ctx, key)
 		if err != nil {
 			rollbackTransaction(ctx, transaction)
-			return 0, err
+			return 0, aborted, err
 		}
 		next := uint64(1)
 		if found {
 			next, err = schema.UnmarshalNextRevision(encoded)
 			if err != nil {
 				rollbackTransaction(ctx, transaction)
-				return 0, err
+				return 0, aborted, err
 			}
 		}
 		if next > math.MaxUint64-count {
 			rollbackTransaction(ctx, transaction)
-			return 0, fmt.Errorf("repository revision sequence exhausted")
+			return 0, aborted, fmt.Errorf("repository revision sequence exhausted")
 		}
 		encodedNext, err := schema.MarshalNextRevision(next + count)
 		if err != nil {
 			rollbackTransaction(ctx, transaction)
-			return 0, err
+			return 0, aborted, err
 		}
 		if err := transaction.WriteBatch(ctx, []Mutation{{Key: key, Value: encodedNext}}, nil); err != nil {
 			rollbackTransaction(ctx, transaction)
-			return 0, err
+			return 0, aborted, err
 		}
 		if err := transaction.Commit(ctx); err != nil {
 			rollbackTransaction(ctx, transaction)
 			if status.Code(err) == codes.Aborted {
+				aborted++
 				timer := time.NewTimer(backoff)
 				select {
 				case <-ctx.Done():
 					timer.Stop()
-					return 0, ctx.Err()
+					return 0, aborted, ctx.Err()
 				case <-timer.C:
 				}
 				backoff = min(backoff*2, 25*time.Millisecond)
 				continue
 			}
-			return 0, err
+			return 0, aborted, err
 		}
-		return next, nil
+		return next, aborted, nil
 	}
-	return 0, fmt.Errorf("allocate repository revision: %w", errors.New("transaction conflict retry limit exceeded"))
+	return 0, aborted, fmt.Errorf("allocate repository revision: %w", errors.New("transaction conflict retry limit exceeded"))
 }

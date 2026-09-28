@@ -708,6 +708,77 @@ func (store *blockAllocationStore) AllocateRevisionBlock(ctx context.Context, co
 	return start, nil
 }
 
+type retryOutcomeStore struct {
+	*fakeStore
+	aborted            uint64
+	allocationFailure  error
+	publicationFailure error
+}
+
+func (store *retryOutcomeStore) AllocateRevisionBlockWithRetryCount(ctx context.Context, count uint64) (uint64, uint64, error) {
+	if store.allocationFailure != nil {
+		return 0, store.aborted, store.allocationFailure
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	first := store.next + 1
+	store.next += count
+	return first, store.aborted, nil
+}
+
+func (store *retryOutcomeStore) AllocateRevisionBlock(ctx context.Context, count uint64) (uint64, error) {
+	first, _, err := store.AllocateRevisionBlockWithRetryCount(ctx, count)
+	return first, err
+}
+
+func (store *retryOutcomeStore) PublishReconciledRevisionWithRetryCount(ctx context.Context, request daemon.ReconciledRevision) (uint64, error) {
+	if store.publicationFailure != nil {
+		return store.aborted, store.publicationFailure
+	}
+	return store.aborted, store.fakeStore.PublishReconciledRevision(ctx, request)
+}
+
+func TestPublicationRetryOutcomes(t *testing.T) {
+	for _, count := range []int{1, publicationConcurrency} {
+		for _, failPublication := range []bool{false, true} {
+			t.Run(fmt.Sprintf("count=%d/failPublication=%t", count, failPublication), func(t *testing.T) {
+				store := &retryOutcomeStore{fakeStore: newFakeStore(), aborted: 2}
+				reconciler := &Reconciler{ctx: context.Background(), filesystem: testFilesystem(), store: store}
+				if failPublication {
+					store.publicationFailure = errors.New("publication failed")
+					reconciler.publishInodes(publicationTestBatch(0, count), make(map[string]publishedItem))
+					metrics := reconciler.Metrics()
+					if metrics.InodePublicationTerminalAborts != 2*uint64(count) || metrics.InodePublicationRecoveredAborts != 0 ||
+						metrics.InodePublicationTerminalRetryCalls != uint64(count) || metrics.InodePublicationRecoveredRetryCalls != 0 ||
+						metrics.InodePublicationFailures != uint64(count) || metrics.RevisionAllocationRecoveredAborts != 2 ||
+						metrics.RevisionAllocationRecoveredRetryCalls != 1 {
+						t.Fatalf("terminal publication: %+v", metrics)
+					}
+					return
+				}
+				published := make(map[string]publishedItem)
+				reconciler.publishInodes(publicationTestBatch(0, count), published)
+				metrics := reconciler.Metrics()
+				if len(published) != count || metrics.RevisionAllocationRecoveredAborts != 2 || metrics.RevisionAllocationTerminalAborts != 0 ||
+					metrics.RevisionAllocationRecoveredRetryCalls != 1 || metrics.RevisionAllocationTerminalRetryCalls != 0 ||
+					metrics.InodePublicationRecoveredAborts != 2*uint64(count) || metrics.InodePublicationTerminalAborts != 0 ||
+					metrics.InodePublicationRecoveredRetryCalls != uint64(count) || metrics.InodePublicationTerminalRetryCalls != 0 {
+					t.Fatalf("recovered retries: %+v published=%d", metrics, len(published))
+				}
+			})
+		}
+	}
+	store := &retryOutcomeStore{fakeStore: newFakeStore(), aborted: 3, allocationFailure: errors.New("allocation failed")}
+	reconciler := &Reconciler{ctx: context.Background(), filesystem: testFilesystem(), store: store}
+	reconciler.publishInodes(publicationTestBatch(0, publicationConcurrency), make(map[string]publishedItem))
+	metrics := reconciler.Metrics()
+	if metrics.RevisionAllocationTerminalAborts != 3*publicationConcurrency || metrics.RevisionAllocationRecoveredAborts != 0 ||
+		metrics.RevisionAllocationTerminalRetryCalls != publicationConcurrency || metrics.RevisionAllocationRecoveredRetryCalls != 0 ||
+		metrics.RevisionAllocationFailures != publicationConcurrency || metrics.InodePublicationCalls != 0 {
+		t.Fatalf("terminal allocation: %+v", metrics)
+	}
+}
+
 func publicationTestBatch(first, count int) []preparedItem {
 	batch := make([]preparedItem, count)
 	for index := range batch {

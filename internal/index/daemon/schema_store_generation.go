@@ -1474,20 +1474,27 @@ func (store *SchemaStore) publishRevisionBatch(
 // content manifests, reverse references, reference counters, and debt
 // resolution. Serializable conflicts retry the complete read/modify/write.
 func (store *SchemaStore) PublishReconciledRevision(ctx context.Context, reconciled ReconciledRevision) error {
+	_, err := store.PublishReconciledRevisionWithRetryCount(ctx, reconciled)
+	return err
+}
+
+func (store *SchemaStore) PublishReconciledRevisionWithRetryCount(ctx context.Context, reconciled ReconciledRevision) (uint64, error) {
 	backoff := 100 * time.Microsecond
+	var aborted uint64
 	for range revisionAllocationAttempts {
 		err := store.publishReconciledRevisionOnce(ctx, reconciled)
 		if status.Code(err) != codes.Aborted {
-			return err
+			return aborted, err
 		}
+		aborted++
 		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return ctx.Err()
+			return aborted, ctx.Err()
 		case <-timer.C:
 		}
 		backoff = min(backoff*2, 25*time.Millisecond)
 	}
-	return fmt.Errorf("publish reconciled revision: transaction conflict retry limit exceeded")
+	return aborted, fmt.Errorf("publish reconciled revision: transaction conflict retry limit exceeded")
 }
