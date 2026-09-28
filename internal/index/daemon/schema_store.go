@@ -963,6 +963,7 @@ type ReconciledRevision struct {
 	RevisionValue      []byte
 	Revision           uint64
 	ContentIDs         []schema.ID
+	PriorContentIDs    []schema.ID
 	DebtKeys           [][]byte
 	RelatedPuts        []Mutation
 	HasMultipleParents bool

@@ -418,6 +418,32 @@ Do not raise the live conflict budget or repeat the run solely to reach
 completion without reviewing the conflict rate, stop semantics and final
 attribution gate. R47 and R48 remain rejected/blocked respectively.
 
+## Isolated publication admission candidate (2026-09-28)
+
+The candidate adds `BeginPublication` to reserve unique content IDs in the
+daemon before opening a serializable transaction. Permits are held through
+storage Commit or Rollback and released on expiry; canceled admission releases
+partial acquisitions. The Go inode planner and overflow checks remain unchanged.
+An older daemon returns `Unimplemented`, so the client falls back to normal
+Begin and its existing retry behavior. Requests with more than 4096 distinct
+content IDs also use normal Begin. Changed inodes reserve both new and previously
+observed content IDs. If the prior inode changes between that observation and
+admission, or if another writer bypasses this RPC, conflicts can still occur;
+concurrent revision-block reservations can also conflict. Existing `Aborted`
+retries remain required.
+
+On disposable databases using the development daemon, three repetitions of
+32-inode, one-content-ID grouped publication had zero failed commits with
+distinct content and zero with shared content; the unchanged deployed binary
+had 48 recovered failures for the shared case. With four independent streams
+and two IDs per inode, publication-specific recovered Commit aborts remained
+zero, while revision-allocation conflicts still occurred. Four concurrent
+updates retiring the same old content ID also produced zero failed commits and
+correct new inode content in two repetitions. The native
+reservation lifecycle test and affected Go daemon/reconciler/backup suites
+passed. The development daemon was not deployed and no production backup was
+performed; the R49 conflicting keys remain unproven.
+
 ## Isolated empty-debt overhead measurement (2026-09-28)
 
 `BenchmarkProcessEmptyCrawlDebtResolution` compares the unchanged

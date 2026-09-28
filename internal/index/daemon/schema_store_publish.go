@@ -42,7 +42,8 @@ func (store *SchemaStore) publishReconciledRevisionOnce(ctx context.Context, rec
 	if err != nil {
 		return err, false
 	}
-	transaction, err := store.client.Begin(ctx)
+	contentIDs := append(append([]schema.ID(nil), reconciled.ContentIDs...), reconciled.PriorContentIDs...)
+	transaction, err := store.client.beginPublication(ctx, contentIDs)
 	if err != nil {
 		return err, false
 	}

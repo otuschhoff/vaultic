@@ -25,18 +25,18 @@ use crate::{
     proto::{
         self, vaultic_db_server::VaulticDb, ActivateGenerationRequest, AddCloudKeySlotRequest,
         AddLocalKeySlotRequest, AwaitDurableThroughRequest, AwaitDurableThroughResponse,
-        BeginResponse, CapabilitiesRequest, CapabilitiesResponse, CommitResponse,
-        DemoteWriterRequest, Empty, EncryptionAuditResponse, EscrowMasterKeyRequest,
-        EscrowMasterKeyResponse, ExportKeyEnvelopeResponse, FinalizeCapsuleMigrationRequest,
-        GenerationStatusRequest, GenerationStatusResponse, GetRequest, GetResponse, HealthRequest,
-        HealthResponse, KeySlotInfo, KeyStatusRequest, KeyStatusResponse, MasterKeyRequest,
-        MasterKeyResponse, MultiGetRequest, MultiGetResponse, PrepareCapsuleMigrationRequest,
-        PrepareCapsuleMigrationResponse, PromoteWriterRequest, PublishCapsuleMutationRequest,
-        PublishCapsuleMutationResponse, QuarantineGenerationRequest, ReadCacheStatusRequest,
-        ReadCacheStatusResponse, RecoverEscrowRequest, RemoveKeySlotRequest,
-        RetireGenerationRequest, RewriteDekRequest, RewriteDekResponse, RollbackGenerationRequest,
-        RotateDekRequest, RotateLocalKeySlotRequest, ScanRequest, ScanResponse,
-        StoreMasterKeyRequest, TransactionRequest, UpdateReadCachePolicyRequest,
+        BeginPublicationRequest, BeginResponse, CapabilitiesRequest, CapabilitiesResponse,
+        CommitResponse, DemoteWriterRequest, Empty, EncryptionAuditResponse,
+        EscrowMasterKeyRequest, EscrowMasterKeyResponse, ExportKeyEnvelopeResponse,
+        FinalizeCapsuleMigrationRequest, GenerationStatusRequest, GenerationStatusResponse,
+        GetRequest, GetResponse, HealthRequest, HealthResponse, KeySlotInfo, KeyStatusRequest,
+        KeyStatusResponse, MasterKeyRequest, MasterKeyResponse, MultiGetRequest, MultiGetResponse,
+        PrepareCapsuleMigrationRequest, PrepareCapsuleMigrationResponse, PromoteWriterRequest,
+        PublishCapsuleMutationRequest, PublishCapsuleMutationResponse, QuarantineGenerationRequest,
+        ReadCacheStatusRequest, ReadCacheStatusResponse, RecoverEscrowRequest,
+        RemoveKeySlotRequest, RetireGenerationRequest, RewriteDekRequest, RewriteDekResponse,
+        RollbackGenerationRequest, RotateDekRequest, RotateLocalKeySlotRequest, ScanRequest,
+        ScanResponse, StoreMasterKeyRequest, TransactionRequest, UpdateReadCachePolicyRequest,
         VerifyGenerationRequest, WriteBatchRequest, WriteBatchResponse, WriterStatusRequest,
         WriterStatusResponse,
     },
@@ -423,6 +423,13 @@ impl VaulticDb for Service {
 
     async fn begin(&self, request: Request<Empty>) -> Result<Response<BeginResponse>, Status> {
         self.handle_begin(request).await
+    }
+
+    async fn begin_publication(
+        &self,
+        request: Request<BeginPublicationRequest>,
+    ) -> Result<Response<BeginResponse>, Status> {
+        self.begin_publication_inner(request).await
     }
 
     async fn commit(

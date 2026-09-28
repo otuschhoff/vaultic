@@ -878,7 +878,7 @@ func (reconciler *Reconciler) prepareGroupMember(item preparedItem) (daemon.Reco
 	if !found[0] {
 		return request, true, nil, nil
 	}
-	key, binding, reused, err := reconciler.reuseExistingRecord(item, values[0].Value, value, false, content)
+	key, binding, reused, err := reconciler.reuseExistingRecord(item, values[0].Value, value, false, content, nil)
 	if !reused {
 		key = nil
 	}
@@ -1202,8 +1202,13 @@ func (reconciler *Reconciler) publishRecordWithAllocator(
 		return nil, false, err
 	}
 	writePathBinding := !found[0]
+	var priorContent []schema.ID
 	if found[0] {
-		reusedKey, pathChanged, reused, err := reconciler.reuseExistingRecord(item, values[0].Value, value, directory, content)
+		var priorIDs *[]schema.ID
+		if !directory && !reconciler.options.AtomicInodePublication {
+			priorIDs = &priorContent
+		}
+		reusedKey, pathChanged, reused, err := reconciler.reuseExistingRecord(item, values[0].Value, value, directory, content, priorIDs)
 		if err != nil {
 			return nil, false, err
 		}
@@ -1239,7 +1244,7 @@ func (reconciler *Reconciler) publishRecordWithAllocator(
 	started := time.Now()
 	request := daemon.ReconciledRevision{
 		CurrentKey: currentKey, RevisionKey: revisionKey, RevisionValue: value, Revision: revision,
-		ContentIDs: content, DebtKeys: item.debtKeys, RelatedPuts: pathPuts,
+		ContentIDs: content, PriorContentIDs: priorContent, DebtKeys: item.debtKeys, RelatedPuts: pathPuts,
 		HasMultipleParents: item.HasMultipleParents, HardlinkParents: item.HardlinkParents,
 	}
 	var aborted, commitAborted uint64
@@ -1315,6 +1320,7 @@ func (reconciler *Reconciler) reuseExistingRecord(
 	pointerValue, value []byte,
 	directory bool,
 	content []schema.ID,
+	priorContent *[]schema.ID,
 ) ([]byte, bool, bool, error) {
 	pointer, err := schema.UnmarshalCurrentPointer(pointerValue)
 	if err != nil {
@@ -1333,7 +1339,16 @@ func (reconciler *Reconciler) reuseExistingRecord(
 		previousPath = previous.SourcePath
 	}
 	pathChanged := previousPath != "" && normalizeSnapshotPath(previousPath) != normalizeSnapshotPath(item.snapshotPath)
+	capturePriorContent := func() {
+		if priorContent == nil {
+			return
+		}
+		if previous, err := schema.UnmarshalInodeRevision(existing[0].Value); err == nil {
+			*priorContent, _ = reconciler.contentIDs(previous)
+		}
+	}
 	if !bytes.Equal(existing[0].Value, value) {
+		capturePriorContent()
 		return nil, pathChanged, false, nil
 	}
 	reusable := directory
@@ -1345,6 +1360,7 @@ func (reconciler *Reconciler) reuseExistingRecord(
 		}
 	}
 	if !reusable {
+		capturePriorContent()
 		return nil, pathChanged, false, nil
 	}
 	if err := reconciler.store.ResolveCrawlDebt(reconciler.ctx, item.debtKeys); err != nil {

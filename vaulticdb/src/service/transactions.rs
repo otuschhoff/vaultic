@@ -13,8 +13,9 @@ use crate::{
     attribution::CommitStage,
     error::VaulticDbError,
     proto::{
-        AwaitDurableThroughRequest, AwaitDurableThroughResponse, BeginResponse, CommitResponse,
-        DurabilityToken, Empty, TransactionRequest, WriteBatchRequest, WriteBatchResponse,
+        AwaitDurableThroughRequest, AwaitDurableThroughResponse, BeginPublicationRequest,
+        BeginResponse, CommitResponse, DurabilityToken, Empty, TransactionRequest,
+        WriteBatchRequest, WriteBatchResponse,
     },
     MAX_BATCH_ITEMS, MAX_MESSAGE_BYTES,
 };
@@ -215,37 +216,81 @@ impl Service {
             let _admission = self.mutation_admission().await?;
             let storage = self.storage().await?;
             self.ensure_writer_authority().await?;
-            self.state
-                .writer_role
-                .lock()
+            self.begin_with_publication_permits(storage, Vec::new())
                 .await
-                .transaction_opened()
-                .map_err(role_error)?;
-            let outcome = match storage.begin().await {
-                Ok(outcome) => outcome,
-                Err(failure) => {
-                    let mut role = self.state.writer_role.lock().await;
-                    role.transaction_closed();
-                    for _ in 0..failure.expired {
-                        role.transaction_closed();
-                    }
-                    drop(role);
-                    self.ensure_writer_authority().await?;
-                    return Err(failure.status);
-                }
-            };
-            for _ in 0..outcome.expired {
-                self.state.writer_role.lock().await.transaction_closed();
-            }
-            *self.state.last_writer_activity.lock().await = Instant::now();
-            Ok(Response::new(BeginResponse {
-                transaction_id: outcome.transaction_id,
-                idle_timeout_ms: storage.transaction_idle_timeout_ms(),
-            }))
         }
         .await;
         timer.record_result(&result);
         result
+    }
+
+    pub(super) async fn begin_publication_inner(
+        &self,
+        request: Request<BeginPublicationRequest>,
+    ) -> Result<Response<BeginResponse>, Status> {
+        let mut timer = self.state.attribution.begin_request.timer();
+        let result = async {
+            check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
+            let storage = self.storage().await?;
+            let permits = loop {
+                if let Some(permits) = storage
+                    .acquire_publication_permits(&request.get_ref().content_ids)
+                    .await?
+                {
+                    break permits;
+                }
+                let (_, expired) = storage.prune_expired_transactions().await;
+                let mut role = self.state.writer_role.lock().await;
+                for _ in 0..expired {
+                    role.transaction_closed();
+                }
+            };
+            let _admission = self.mutation_admission().await?;
+            self.ensure_writer_authority().await?;
+            self.begin_with_publication_permits(storage, permits).await
+        }
+        .await;
+        timer.record_result(&result);
+        result
+    }
+
+    async fn begin_with_publication_permits(
+        &self,
+        storage: std::sync::Arc<crate::storage::Storage>,
+        permits: Vec<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Result<Response<BeginResponse>, Status> {
+        self.state
+            .writer_role
+            .lock()
+            .await
+            .transaction_opened()
+            .map_err(role_error)?;
+        let begin = if permits.is_empty() {
+            storage.begin().await
+        } else {
+            storage.begin_with_publication_permits(permits).await
+        };
+        let outcome = match begin {
+            Ok(outcome) => outcome,
+            Err(failure) => {
+                let mut role = self.state.writer_role.lock().await;
+                role.transaction_closed();
+                for _ in 0..failure.expired {
+                    role.transaction_closed();
+                }
+                drop(role);
+                self.ensure_writer_authority().await?;
+                return Err(failure.status);
+            }
+        };
+        for _ in 0..outcome.expired {
+            self.state.writer_role.lock().await.transaction_closed();
+        }
+        *self.state.last_writer_activity.lock().await = Instant::now();
+        Ok(Response::new(BeginResponse {
+            transaction_id: outcome.transaction_id,
+            idle_timeout_ms: storage.transaction_idle_timeout_ms(),
+        }))
     }
 
     pub(super) async fn handle_commit(

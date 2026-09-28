@@ -918,6 +918,7 @@ mod tests {
             key_manager: None,
             capsule_migration: Mutex::new(()),
             transactions: RwLock::new(HashMap::new()),
+            publication_locks: Mutex::new(HashMap::new()),
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
             last_applied_engine_sequence: AtomicU64::new(0),
@@ -1015,6 +1016,45 @@ mod tests {
         release_writer_claim(object_store.as_ref(), 1)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn publication_reservations_follow_transaction_lifecycle() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        assert_eq!(claim_writer_epoch(object_store.as_ref(), None).await.unwrap(), Some(1));
+        let path = format!("publication-reservations-{}", rand::random::<u64>());
+        let writer = open_writer(&path, object_store.clone(), None, &SlateDbTuning::default())
+            .await
+            .unwrap();
+        let storage = transition_storage(Database::Writer(writer), path, object_store, 1);
+        let ids = vec![vec![7; 32]];
+
+        let permits = storage.acquire_publication_permits(&ids).await.unwrap().unwrap();
+        let first = storage.begin_with_publication_permits(permits).await.unwrap();
+        assert!(storage.acquire_publication_permits(&ids).await.unwrap().is_none());
+        storage.rollback(&first.transaction_id).await.unwrap();
+
+        let permits = storage.acquire_publication_permits(&ids).await.unwrap().unwrap();
+        let second = storage.begin_with_publication_permits(permits).await.unwrap();
+        assert!(storage.acquire_publication_permits(&ids).await.unwrap().is_none());
+        storage.commit(&second.transaction_id, "", false, false).await.unwrap();
+
+        let permits = storage.acquire_publication_permits(&ids).await.unwrap().unwrap();
+        let third = storage.begin_with_publication_permits(permits).await.unwrap();
+        storage.transactions.read().await[&third.transaction_id]
+            .last_touched_ms.store(0, Ordering::Relaxed);
+        assert_eq!(storage.prune_expired_transactions().await, (0, 1));
+        assert!(storage.acquire_publication_permits(&ids).await.unwrap().is_some());
+
+        let held = storage.acquire_publication_permits(&[vec![9; 32]]).await.unwrap().unwrap();
+        let waiting = vec![vec![8; 32], vec![9; 32]];
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            storage.acquire_publication_permits(&waiting),
+        ).await.is_err());
+        assert!(storage.acquire_publication_permits(&[vec![8; 32]]).await.unwrap().is_some());
+        drop(held);
+        storage.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -2744,6 +2784,7 @@ mod tests {
             key_manager: None,
             capsule_migration: Mutex::new(()),
             transactions: RwLock::new(HashMap::new()),
+            publication_locks: Mutex::new(HashMap::new()),
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
             last_applied_engine_sequence: AtomicU64::new(0),
@@ -2969,6 +3010,7 @@ mod tests {
             key_manager: None,
             capsule_migration: Mutex::new(()),
             transactions: RwLock::new(HashMap::new()),
+            publication_locks: Mutex::new(HashMap::new()),
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
             last_applied_engine_sequence: AtomicU64::new(0),
@@ -3037,6 +3079,7 @@ mod tests {
             key_manager: None,
             capsule_migration: Mutex::new(()),
             transactions: RwLock::new(HashMap::new()),
+            publication_locks: Mutex::new(HashMap::new()),
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
             last_applied_engine_sequence: AtomicU64::new(0),
@@ -3128,6 +3171,7 @@ mod tests {
             key_manager: None,
             capsule_migration: Mutex::new(()),
             transactions: RwLock::new(HashMap::new()),
+            publication_locks: Mutex::new(HashMap::new()),
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
             last_applied_engine_sequence: AtomicU64::new(0),

@@ -9,7 +9,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Weak,
     },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -45,7 +45,7 @@ use slatedb::{
 use slatedb_common::metrics::{
     DefaultMetricsRecorder, Metric, MetricValue, Metrics, MetricsRecorder, NoopMetricsRecorder,
 };
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
 use tonic::Status;
 use zeroize::Zeroizing;
 
@@ -202,6 +202,7 @@ pub(crate) struct GenerationAuthority {
 struct TransactionSlot {
     transaction: RwLock<Option<DbTransaction>>,
     last_touched_ms: AtomicU64,
+    _publication_permits: Vec<OwnedSemaphorePermit>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,6 +252,7 @@ pub(crate) struct Storage {
     key_manager: Option<Arc<KeyManager>>,
     capsule_migration: Mutex<()>,
     transactions: RwLock<HashMap<String, Arc<TransactionSlot>>>,
+    publication_locks: Mutex<HashMap<Vec<u8>, Weak<Semaphore>>>,
     next_transaction: AtomicU64,
     last_durable_sequence: AtomicU64,
     last_applied_engine_sequence: AtomicU64,
@@ -1946,6 +1948,7 @@ impl Storage {
             key_manager,
             capsule_migration: Mutex::new(()),
             transactions: RwLock::new(HashMap::new()),
+            publication_locks: Mutex::new(HashMap::new()),
             next_transaction: AtomicU64::new(1),
             last_durable_sequence: AtomicU64::new(0),
             last_applied_engine_sequence: AtomicU64::new(0),
@@ -3737,7 +3740,55 @@ impl Storage {
         })
     }
 
+    pub(crate) async fn acquire_publication_permits(
+        &self,
+        content_ids: &[Vec<u8>],
+    ) -> Result<Option<Vec<OwnedSemaphorePermit>>, Status> {
+        if content_ids.len() > 4096 || content_ids.iter().any(|id| id.len() != 32) {
+            return Err(Status::invalid_argument(
+                "publication content IDs must be 32 bytes, with at most 4096 IDs",
+            ));
+        }
+        let mut ids = content_ids.to_vec();
+        ids.sort();
+        ids.dedup();
+        let locks = {
+            let mut registry = self.publication_locks.lock().await;
+            if registry.len() > 4096 {
+                registry.retain(|_, semaphore| semaphore.strong_count() > 0);
+            }
+            ids.into_iter()
+                .map(|id| {
+                    let lock = registry
+                        .get(&id)
+                        .and_then(Weak::upgrade)
+                        .unwrap_or_else(|| Arc::new(Semaphore::new(1)));
+                    registry.insert(id, Arc::downgrade(&lock));
+                    lock
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut permits = Vec::with_capacity(locks.len());
+        for lock in locks {
+            match tokio::time::timeout(std::time::Duration::from_millis(250), lock.acquire_owned())
+                .await
+            {
+                Ok(Ok(permit)) => permits.push(permit),
+                Ok(Err(_)) => return Err(Status::unavailable("publication admission closed")),
+                Err(_) => return Ok(None),
+            }
+        }
+        Ok(Some(permits))
+    }
+
     pub(crate) async fn begin(&self) -> Result<BeginTransactionOutcome, BeginTransactionFailure> {
+        self.begin_with_publication_permits(Vec::new()).await
+    }
+
+    pub(crate) async fn begin_with_publication_permits(
+        &self,
+        permits: Vec<OwnedSemaphorePermit>,
+    ) -> Result<BeginTransactionOutcome, BeginTransactionFailure> {
         self.assert_current_writer_epoch()
             .await
             .map_err(|status| BeginTransactionFailure { expired: 0, status })?;
@@ -3795,6 +3846,7 @@ impl Storage {
                 Arc::new(TransactionSlot {
                     transaction: RwLock::new(Some(transaction)),
                     last_touched_ms: AtomicU64::new(now),
+                    _publication_permits: permits,
                 }),
             );
             Ok(BeginTransactionOutcome {
@@ -3865,21 +3917,14 @@ impl Storage {
         crate::service::process_test_barrier("VAULTICDB_TEST_TRANSACTION_BEFORE_REMOVE_BARRIER")
             .await
             .map_err(TransactionFailure::before_consumption)?;
-        let transaction = self
+        let slot = self
             .remove_transaction(transaction_id)
             .await
             .map_err(TransactionFailure::before_consumption)?;
         let mut lock_timer = self.attribution.transaction_slot_lock_wait.timer();
-        let transaction = transaction
-            .transaction
-            .write()
-            .await
-            .take()
-            .ok_or_else(|| {
-                TransactionFailure::after_consumption(transaction_not_found(
-                    "transaction was closed",
-                ))
-            })?;
+        let transaction = slot.transaction.write().await.take().ok_or_else(|| {
+            TransactionFailure::after_consumption(transaction_not_found("transaction was closed"))
+        })?;
         lock_timer.succeeded();
         drop(lock_timer);
         if let Some(key) = record_key {
@@ -3920,6 +3965,7 @@ impl Storage {
             .await
             .map_err(storage_error)
             .map_err(TransactionFailure::after_consumption);
+        drop(slot);
         let handle = match commit {
             Ok(handle) => {
                 submit_timer.succeeded();
@@ -3986,21 +4032,14 @@ impl Storage {
         &self,
         transaction_id: &str,
     ) -> Result<TransactionOutcome, TransactionFailure> {
-        let transaction = self
+        let slot = self
             .remove_transaction(transaction_id)
             .await
             .map_err(TransactionFailure::before_consumption)?;
         let mut lock_timer = self.attribution.transaction_slot_lock_wait.timer();
-        let transaction = transaction
-            .transaction
-            .write()
-            .await
-            .take()
-            .ok_or_else(|| {
-                TransactionFailure::after_consumption(transaction_not_found(
-                    "transaction was closed",
-                ))
-            })?;
+        let transaction = slot.transaction.write().await.take().ok_or_else(|| {
+            TransactionFailure::after_consumption(transaction_not_found("transaction was closed"))
+        })?;
         lock_timer.succeeded();
         drop(lock_timer);
         transaction.rollback();

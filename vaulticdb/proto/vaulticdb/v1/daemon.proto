@@ -119,6 +119,11 @@ message BeginResponse {
   uint64 idle_timeout_ms = 2;
 }
 
+message BeginPublicationRequest {
+  RequestContext context = 1;
+  repeated bytes content_ids = 2;
+}
+
 message CommitResponse {
   bool durable = 1;
   DurabilityToken durability_token = 2;
@@ -702,6 +707,7 @@ service VaulticDB {
   rpc WriteBatch(WriteBatchRequest) returns (WriteBatchResponse);
   rpc AwaitDurableThrough(AwaitDurableThroughRequest) returns (AwaitDurableThroughResponse);
   rpc Begin(Empty) returns (BeginResponse);
+  rpc BeginPublication(BeginPublicationRequest) returns (BeginResponse);
   rpc Commit(TransactionRequest) returns (CommitResponse);
   rpc Rollback(TransactionRequest) returns (Empty);
   rpc GetMasterKey(MasterKeyRequest) returns (MasterKeyResponse);

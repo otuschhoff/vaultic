@@ -1475,11 +1475,13 @@ func publicationTestMetrics(reconcilers []*Reconciler) Metrics {
 		total.Reused += metrics.Reused
 		total.RevisionAllocationCalls += metrics.RevisionAllocationCalls
 		total.RevisionAllocationFailures += metrics.RevisionAllocationFailures
+		total.RevisionAllocationRecoveredAborts += metrics.RevisionAllocationRecoveredAborts
 		total.RevisionAllocationNS += metrics.RevisionAllocationNS
 		total.RevisionsReserved += metrics.RevisionsReserved
 		total.InodeRevisionsAssigned += metrics.InodeRevisionsAssigned
 		total.InodePublicationCalls += metrics.InodePublicationCalls
 		total.InodePublicationFailures += metrics.InodePublicationFailures
+		total.InodePublicationRecoveredCommitAborts += metrics.InodePublicationRecoveredCommitAborts
 		total.InodePublicationNS += metrics.InodePublicationNS
 		total.AtomicGroupCalls += metrics.AtomicGroupCalls
 		total.AtomicGroupFailures += metrics.AtomicGroupFailures
@@ -1584,6 +1586,10 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 					}
 				}
 				metrics := publicationTestMetrics(reconcilers)
+				if os.Getenv("VAULTICDB_TEST_PUBLICATION_ADMISSION") == "1" && mode == "grouped" &&
+					metrics.InodePublicationRecoveredCommitAborts != 0 {
+					t.Fatalf("content admission left publication commit conflicts: %+v", metrics)
+				}
 				allocationCalls := uint64(count / groupSize)
 				publicationCalls, groupCalls := uint64(count), uint64(0)
 				if mode == "atomic" || mode == "atomic-group" {
@@ -1729,6 +1735,43 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 				}
 				if next, err := store.AllocateRevision(ctx); err != nil || next != uint64(count+1) {
 					t.Fatalf("reopened next revision=%d err=%v", next, err)
+				}
+				if os.Getenv("VAULTICDB_TEST_PUBLICATION_ADMISSION") == "1" && shared && mode == "grouped" &&
+					contentCount == 1 && streams == 1 {
+					updated := append([]preparedItem(nil), batch[:publicationConcurrency]...)
+					for index := range updated {
+						updated[index].node.Content = []vaultic.ID{vaultic.ID(sha256.Sum256(fmt.Appendf(nil, "updated:%d", index)))}
+					}
+					before, err := reopened.WriterStatus(ctx)
+					if err != nil {
+						t.Fatal(err)
+					}
+					reconciler := &Reconciler{ctx: ctx, filesystem: testFilesystem(), store: store, options: reconciler.options}
+					reconciler.publishInodes(updated, published)
+					after, err := reopened.WriterStatus(ctx)
+					if err != nil || len(reconciler.errors) != 0 || reconciler.Metrics().InodePublicationRecoveredCommitAborts != 0 ||
+						after.Attribution.CommitRequest.Failures != before.Attribution.CommitRequest.Failures {
+						t.Fatalf("updated shared content: errors=%v metrics=%+v before=%+v after=%+v err=%v",
+							reconciler.errors, reconciler.Metrics(), before.Attribution.CommitRequest, after.Attribution.CommitRequest, err)
+					}
+					for _, item := range updated {
+						value, found, err := store.Get(ctx, schema.CurrentInodeKey(item.identity.fsid, item.identity.inode))
+						if err != nil || !found {
+							t.Fatalf("updated inode: found=%t err=%v", found, err)
+						}
+						pointer, err := schema.UnmarshalCurrentPointer(value)
+						if err != nil {
+							t.Fatal(err)
+						}
+						value, found, err = store.Get(ctx, pointer.RecordKey)
+						if err != nil || !found {
+							t.Fatalf("updated revision: found=%t err=%v", found, err)
+						}
+						record, err := schema.UnmarshalInodeRevision(value)
+						if err != nil || len(record.ContentIDs) != 1 || record.ContentIDs[0] != schema.ID(item.node.Content[0]) {
+							t.Fatalf("updated content=%+v err=%v", record, err)
+						}
+					}
 				}
 			})
 		}

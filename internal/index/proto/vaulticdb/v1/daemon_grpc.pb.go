@@ -41,6 +41,7 @@ const (
 	VaulticDB_WriteBatch_FullMethodName               = "/vaulticdb.v1.VaulticDB/WriteBatch"
 	VaulticDB_AwaitDurableThrough_FullMethodName      = "/vaulticdb.v1.VaulticDB/AwaitDurableThrough"
 	VaulticDB_Begin_FullMethodName                    = "/vaulticdb.v1.VaulticDB/Begin"
+	VaulticDB_BeginPublication_FullMethodName         = "/vaulticdb.v1.VaulticDB/BeginPublication"
 	VaulticDB_Commit_FullMethodName                   = "/vaulticdb.v1.VaulticDB/Commit"
 	VaulticDB_Rollback_FullMethodName                 = "/vaulticdb.v1.VaulticDB/Rollback"
 	VaulticDB_GetMasterKey_FullMethodName             = "/vaulticdb.v1.VaulticDB/GetMasterKey"
@@ -87,6 +88,7 @@ type VaulticDBClient interface {
 	WriteBatch(ctx context.Context, in *WriteBatchRequest, opts ...grpc.CallOption) (*WriteBatchResponse, error)
 	AwaitDurableThrough(ctx context.Context, in *AwaitDurableThroughRequest, opts ...grpc.CallOption) (*AwaitDurableThroughResponse, error)
 	Begin(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*BeginResponse, error)
+	BeginPublication(ctx context.Context, in *BeginPublicationRequest, opts ...grpc.CallOption) (*BeginResponse, error)
 	Commit(ctx context.Context, in *TransactionRequest, opts ...grpc.CallOption) (*CommitResponse, error)
 	Rollback(ctx context.Context, in *TransactionRequest, opts ...grpc.CallOption) (*Empty, error)
 	GetMasterKey(ctx context.Context, in *MasterKeyRequest, opts ...grpc.CallOption) (*MasterKeyResponse, error)
@@ -344,6 +346,16 @@ func (c *vaulticDBClient) Begin(ctx context.Context, in *Empty, opts ...grpc.Cal
 	return out, nil
 }
 
+func (c *vaulticDBClient) BeginPublication(ctx context.Context, in *BeginPublicationRequest, opts ...grpc.CallOption) (*BeginResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BeginResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_BeginPublication_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *vaulticDBClient) Commit(ctx context.Context, in *TransactionRequest, opts ...grpc.CallOption) (*CommitResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CommitResponse)
@@ -550,6 +562,7 @@ type VaulticDBServer interface {
 	WriteBatch(context.Context, *WriteBatchRequest) (*WriteBatchResponse, error)
 	AwaitDurableThrough(context.Context, *AwaitDurableThroughRequest) (*AwaitDurableThroughResponse, error)
 	Begin(context.Context, *Empty) (*BeginResponse, error)
+	BeginPublication(context.Context, *BeginPublicationRequest) (*BeginResponse, error)
 	Commit(context.Context, *TransactionRequest) (*CommitResponse, error)
 	Rollback(context.Context, *TransactionRequest) (*Empty, error)
 	GetMasterKey(context.Context, *MasterKeyRequest) (*MasterKeyResponse, error)
@@ -643,6 +656,9 @@ func (UnimplementedVaulticDBServer) AwaitDurableThrough(context.Context, *AwaitD
 }
 func (UnimplementedVaulticDBServer) Begin(context.Context, *Empty) (*BeginResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Begin not implemented")
+}
+func (UnimplementedVaulticDBServer) BeginPublication(context.Context, *BeginPublicationRequest) (*BeginResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method BeginPublication not implemented")
 }
 func (UnimplementedVaulticDBServer) Commit(context.Context, *TransactionRequest) (*CommitResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Commit not implemented")
@@ -1108,6 +1124,24 @@ func _VaulticDB_Begin_Handler(srv interface{}, ctx context.Context, dec func(int
 	return interceptor(ctx, in, info, handler)
 }
 
+func _VaulticDB_BeginPublication_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BeginPublicationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).BeginPublication(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_BeginPublication_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).BeginPublication(ctx, req.(*BeginPublicationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _VaulticDB_Commit_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(TransactionRequest)
 	if err := dec(in); err != nil {
@@ -1522,6 +1556,10 @@ var VaulticDB_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Begin",
 			Handler:    _VaulticDB_Begin_Handler,
+		},
+		{
+			MethodName: "BeginPublication",
+			Handler:    _VaulticDB_BeginPublication_Handler,
 		},
 		{
 			MethodName: "Commit",

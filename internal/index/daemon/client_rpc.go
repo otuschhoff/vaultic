@@ -16,6 +16,7 @@ import (
 
 	vaulticerrors "github.com/otuschhoff/vaultic/internal/errors"
 	vaulticdbv1 "github.com/otuschhoff/vaultic/internal/index/proto/vaulticdb/v1"
+	"github.com/otuschhoff/vaultic/internal/index/schema"
 	"github.com/otuschhoff/vaultic/internal/observability"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -678,6 +679,38 @@ func (c *Client) begin(ctx context.Context) (*Transaction, error) {
 		c.auditRPCError(ctx, "begin", err)
 		return nil, err
 	}
+	return c.transactionFromBegin(response)
+}
+
+func (c *Client) beginPublication(ctx context.Context, contentIDs []schema.ID) (*Transaction, error) {
+	ids := make([][]byte, 0, min(len(contentIDs), 4096))
+	seen := make(map[schema.ID]struct{}, min(len(contentIDs), 4096))
+	for _, id := range contentIDs {
+		if _, found := seen[id]; found {
+			continue
+		}
+		if len(ids) == 4096 {
+			return c.begin(ctx)
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id[:])
+	}
+	ctx, cancel := withDefaultRPCDeadline(ctx)
+	defer cancel()
+	response, err := c.rpc.BeginPublication(ctx, &vaulticdbv1.BeginPublicationRequest{
+		Context: requestContext(ctx), ContentIds: ids,
+	})
+	if status.Code(err) == codes.Unimplemented {
+		return c.begin(ctx)
+	}
+	if err != nil {
+		c.auditRPCError(ctx, "begin_publication", err)
+		return nil, err
+	}
+	return c.transactionFromBegin(response)
+}
+
+func (c *Client) transactionFromBegin(response *vaulticdbv1.BeginResponse) (*Transaction, error) {
 	if response.GetTransactionId() == "" {
 		return nil, fmt.Errorf("vaulticdb returned an empty transaction ID")
 	}
