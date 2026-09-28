@@ -18,6 +18,67 @@ import (
 	"google.golang.org/grpc"
 )
 
+func TestReadSessionBlobSizeMultiGetModes(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
+			ctx := t.Context()
+			client, err := Ensure(ctx, Options{
+				Socket: testSocket(t), RepositoryID: "blob-size-multiget",
+				DaemonPath: daemonBinary(t), DataDir: t.TempDir(), ObjectStore: "memory",
+				testEnvironment: []string{fmt.Sprintf("VAULTICDB_SLATEDB_MULTIGET=%t", enabled)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = client.Close(context.Background()) })
+			store := NewSchemaStore(client)
+			firstPack, firstBlob := daemonTestID(231), daemonTestID(232)
+			secondPack, secondBlob := daemonTestID(233), daemonTestID(234)
+			for _, pack := range []PublishedPack{readSessionTestPack(firstPack, firstBlob), readSessionTestPack(secondPack, secondBlob)} {
+				if err := store.PublishPack(ctx, pack); err != nil {
+					t.Fatal(err)
+				}
+			}
+			session, err := store.BeginReadSession(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer session.Close(context.Background())
+			if err := store.PublishPack(ctx, readSessionTestPack(daemonTestID(236), daemonTestID(235))); err != nil {
+				t.Fatal(err)
+			}
+			before, err := client.WriterStatus(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			handles := []vaultic.BlobHandle{{ID: vaultic.ID(firstBlob), Type: vaultic.DataBlob},
+				{ID: vaultic.ID(secondBlob), Type: vaultic.DataBlob},
+				{ID: vaultic.ID(daemonTestID(235)), Type: vaultic.DataBlob}}
+			sizes, err := session.LookupBlobSizesContext(ctx, handles)
+			if err != nil || len(sizes) != len(handles) || sizes[0] != (vaultic.BlobSize{Size: 7, Found: true}) ||
+				sizes[1] != (vaultic.BlobSize{Size: 7, Found: true}) || sizes[2].Found {
+				t.Fatalf("blob sizes=%+v error=%v", sizes, err)
+			}
+			after, err := client.WriterStatus(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !after.Attribution.EngineMultiGetMetricsAvailable ||
+				after.Attribution.EngineGetKeys-before.Attribution.EngineGetKeys != uint64(len(handles)) {
+				t.Fatalf("engine read accounting: before=%+v after=%+v", before.Attribution, after.Attribution)
+			}
+			calls := after.Attribution.EngineMultiGetCalls - before.Attribution.EngineMultiGetCalls
+			var want uint64
+			if enabled {
+				want = 1
+			}
+			if calls != want {
+				t.Fatalf("engine multi-get calls=%d want=%d", calls, want)
+			}
+		})
+	}
+}
+
 func TestReadSessionPinsSnapshotAndClosesTransaction(t *testing.T) {
 	ctx := context.Background()
 	client, err := Ensure(ctx, Options{

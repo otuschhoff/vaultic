@@ -1,11 +1,105 @@
 # Phase 33 Production Benchmark Evidence
 
+## Offline blob-size read-path discrimination (2026-09-28)
+
+The NFS error-class attribution below was committed locally as
+`527f97a6f018e9189592a1abbecfe7c2a0ce1a15`; no push or deployment followed.
+The subsequent lookup investigation is a separate offline test; it did not
+change the production daemon or its settings.
+
+The R45 candidate emitted 118,553 single-handle size RPCs (18.959 ms mean),
+209,914 engine key reads and 544,979 object-store GETs. The archived daemon
+startup journal explicitly reports `slatedb_multiget_configured: false`, and
+its engine MultiGet counter stayed at zero despite the client using the
+`ReadSession.MultiGet` gRPC path. `Storage::multi_get` falls back to individual
+transaction gets when this switch is off. Aggregate engine reads and object
+GETs also include other work; their ratios are not exclusively attributable to
+blob-size lookups or proof that enabling the switch reduces total cost.
+
+An isolated memory-store process test now calls `LookupBlobSizesContext` for
+two present and one missing blob in a pinned read session, once each with the
+default-off and explicitly-on daemon configuration. Both modes return identical
+sizes and record three engine key reads; only the enabled mode records one
+engine MultiGet call. The missing blob is published after the session opens, so
+its continued absence also checks snapshot isolation in both modes. The test
+passes three race-detector repetitions and uses temporary daemon sockets and
+stores, not the production repository. Existing Rust storage tests separately
+cover ordering and response limits in both modes.
+
+An isolated benchmark of repeated warm reads in the same session excludes
+daemon startup, record seeding, session creation, status sampling and shutdown
+from its timer. Five non-race repetitions of 1,000 calls per case passed exact
+engine key-read/MultiGet and no-write gates:
+
+| Handles per call | Mode off median (range) | Mode on median (range) | Engine MultiGets per call |
+| --- | --- | --- | --- |
+| 1 | 534.723 us (513.645-542.619) | 516.829 us (503.072-525.423) | 0 / 1 |
+| 8 | 953.464 us (937.793-960.935) | 694.494 us (683.397-723.402) | 0 / 1 |
+
+Go allocations were 117 per one-handle call and 161 per eight-handle call
+in both modes. The eight-handle median is 27.2% lower when enabled, while the
+one-handle median is only 3.3% lower in this run. The timer includes client
+validation, gRPC, server reads, response transfer and decoding; it does not isolate
+server-side read or decode cost. Memory-store warm reads cannot predict
+object-store-backed performance or concurrent backup throughput, especially
+since R45 mostly made single-handle requests. This switch is not recommended
+for production on the basis of this microbenchmark.
+
+Raw output is retained at `/run/vaultic-multiget-offline-URpxMc/benchmark.txt`
+(ephemeral across reboot), SHA256
+`bc3e423772c1697f2e54924ab542237ca8c60b33c2bf9345763b5d6028f60ac6`.
+The test daemon SHA256 is
+`2847e1e97defefbf9089723935022704026f9eae7eb436ce35f9973be5fb2cb9`.
+Reproduce with `VAULTICDB_TEST_BINARY` set to that isolated test daemon and
+`go test ./internal/index/daemon -run '^$' -bench
+'^BenchmarkProcessBlobSizeMultiGetModes$' -benchtime=1000x -count=5`.
+
+A second offline run repeats the decoded lookup alongside a raw pinned-session
+`MultiGet` with the same keys, omitting Go blob-size decoding and result
+reordering. Both still include gRPC and server response construction; each
+case again passed exact read/MultiGet and no-write gates over five 1,000-call
+repetitions:
+
+| Path, keys | Mode off median (range) | Mode on median (range) |
+| --- | --- | --- |
+| Decoded, 1 | 522.837 us (510.796-531.676) | 526.869 us (517.424-534.714) |
+| Raw, 1 | 520.919 us (514.344-538.344) | 516.786 us (510.066-527.872) |
+| Decoded, 8 | 952.338 us (940.954-970.294) | 703.982 us (687.070-747.590) |
+| Raw, 8 | 963.422 us (938.499-993.147) | 688.967 us (673.932-694.665) |
+
+The eight-key mode difference persists without Go blob-size decoding; its
+median is 26.1% lower for decoded and 28.5% lower for raw reads. One-key
+distributions overlap and their median direction differs between runs and
+paths. The raw path allocated 103 objects per one-key call and 126 per
+eight-key call versus roughly 117 and 161 for the decoded path. Differences
+between path medians cannot be subtracted into a reliable decode time: cases
+ran sequentially in separate processes, with no paired request or server-only
+timer. This does not distinguish engine read time from service and transport
+cost, and still says nothing about production object-store reads or throughput.
+
+Second raw output: `/run/vaultic-multiget-raw-JJ1K6g/benchmark.txt`
+(ephemeral across reboot), SHA256
+`b9ba9d19dad12e4a80a4cbcf381a244c04a32c0f52fedc99d33a816b256f56a0`;
+the test daemon SHA256 remained
+`2847e1e97defefbf9089723935022704026f9eae7eb436ce35f9973be5fb2cb9`.
+Reproduce with `-bench '^BenchmarkProcess(Raw|BlobSize)MultiGetModes$'
+-benchtime=1000x -count=5` and the same isolated daemon.
+
+This establishes a concrete offline read-path and latency difference, not a
+production latency or throughput benefit. Cross-caller batching was already
+rejected in R43; enabling the SlateDB switch is a separate candidate requiring
+isolated read/decode profiling, safety checks and fresh approval before
+production comparison. The
+daemon setting, installed binaries, previous acceptance gates and sealed trial
+artifacts were not changed.
+
 ## NFS error attribution follow-up (2026-09-28)
 
 The finalization ownership fix, tests, deployment and R45 evidence were
 committed locally as `a047938996331daac2be616c7b0b4e19f136909f` with a detailed
-message. No push was performed. The following attribution work is a separate,
-uncommitted and undeployed continuation.
+message. No push was performed. The attribution work in this section was
+subsequently committed as `527f97a6f018e9189592a1abbecfe7c2a0ce1a15` and
+remains undeployed.
 
 Inspection of the NFS scheduler confirmed that its existing `errors` counter
 combines missing-path replies with permission, stale-handle, transport and other

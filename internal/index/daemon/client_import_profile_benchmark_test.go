@@ -11,7 +11,117 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/otuschhoff/vaultic/internal/index/schema"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
+
+func BenchmarkProcessBlobSizeMultiGetModes(b *testing.B) {
+	benchmarkProcessBlobSizeMultiGetModes(b, false)
+}
+
+func BenchmarkProcessRawMultiGetModes(b *testing.B) {
+	benchmarkProcessBlobSizeMultiGetModes(b, true)
+}
+
+func benchmarkProcessBlobSizeMultiGetModes(b *testing.B, raw bool) {
+	binaryPath := os.Getenv("VAULTICDB_TEST_BINARY")
+	if binaryPath == "" {
+		b.Skip("set VAULTICDB_TEST_BINARY to an attribution-enabled daemon")
+	}
+	for _, count := range []int{1, 8} {
+		for _, enabled := range []bool{false, true} {
+			b.Run(fmt.Sprintf("keys=%d/multiget=%t", count, enabled), func(b *testing.B) {
+				directory, err := os.MkdirTemp("", "vd-size-")
+				if err != nil {
+					b.Fatal(err)
+				}
+				defer os.RemoveAll(directory)
+				ctx := b.Context()
+				client, err := Ensure(ctx, Options{
+					Socket: filepath.Join(directory, "d.sock"), RepositoryID: "blob-size-benchmark",
+					DaemonPath: binaryPath, DataDir: b.TempDir(), ObjectStore: "memory",
+					testEnvironment: []string{fmt.Sprintf("VAULTICDB_SLATEDB_MULTIGET=%t", enabled)},
+				})
+				if err != nil {
+					b.Fatal(err)
+				}
+				defer func() {
+					if err := client.Close(context.Background()); err != nil {
+						b.Error(err)
+					}
+				}()
+				store := NewSchemaStore(client)
+				handles := make([]vaultic.BlobHandle, count)
+				keys := make([][]byte, count)
+				for index := range handles {
+					packID, blobID := daemonTestID(byte(40+index)), daemonTestID(byte(80+index))
+					if err := store.PublishPack(ctx, readSessionTestPack(schema.ID(packID), schema.ID(blobID))); err != nil {
+						b.Fatal(err)
+					}
+					handles[index] = vaultic.BlobHandle{ID: vaultic.ID(blobID), Type: vaultic.DataBlob}
+					keys[index] = schema.BlobKey(blobID)
+				}
+				session, err := store.BeginReadSession(ctx)
+				if err != nil {
+					b.Fatal(err)
+				}
+				defer func() {
+					if err := session.Close(context.Background()); err != nil {
+						b.Error(err)
+					}
+				}()
+				before, err := client.WriterStatus(ctx)
+				if err != nil {
+					b.Fatal(err)
+				}
+				b.ReportAllocs()
+				b.ResetTimer()
+				for range b.N {
+					if raw {
+						values, found, lookupErr := session.MultiGet(ctx, keys)
+						if lookupErr != nil || len(values) != count || len(found) != count {
+							b.Fatalf("raw lookup results=%d found=%d error=%v", len(values), len(found), lookupErr)
+						}
+						for index := range values {
+							if !found[index] || len(values[index].Value) == 0 {
+								b.Fatalf("missing raw blob record at %d", index)
+							}
+						}
+						continue
+					}
+					sizes, lookupErr := session.LookupBlobSizesContext(ctx, handles)
+					if lookupErr != nil || len(sizes) != count {
+						b.Fatalf("lookup sizes=%d error=%v", len(sizes), lookupErr)
+					}
+					for _, size := range sizes {
+						if size != (vaultic.BlobSize{Size: 7, Found: true}) {
+							b.Fatalf("unexpected blob size: %+v", size)
+						}
+					}
+				}
+				b.StopTimer()
+				after, err := client.WriterStatus(ctx)
+				if err != nil {
+					b.Fatal(err)
+				}
+				calls := after.Attribution.EngineMultiGetCalls - before.Attribution.EngineMultiGetCalls
+				reads := after.Attribution.EngineGetKeys - before.Attribution.EngineGetKeys
+				var wantCalls uint64
+				if enabled {
+					wantCalls = uint64(b.N)
+				}
+				if !after.Attribution.EngineMultiGetMetricsAvailable || calls != wantCalls ||
+					reads != uint64(b.N*count) || after.Attribution.EngineWriteOps != before.Attribution.EngineWriteOps ||
+					after.Attribution.CommitRequest.Attempts != before.Attribution.CommitRequest.Attempts {
+					b.Fatalf("unexpected read work: calls=%d want=%d keys=%d want=%d", calls, wantCalls, reads, b.N*count)
+				}
+				b.ReportMetric(float64(calls)/float64(b.N), "engine-multiget/op")
+				b.ReportMetric(float64(reads)/float64(b.N), "engine-keys/op")
+			})
+		}
+	}
+}
 
 func BenchmarkProcessEmptyCrawlDebtResolution(b *testing.B) {
 	binaryPath := os.Getenv("VAULTICDB_TEST_BINARY")
