@@ -21,6 +21,80 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+func TestResolveCrawlDebtEmptyDoesNotUseDaemon(t *testing.T) {
+	store := &SchemaStore{}
+	for _, keys := range [][][]byte{nil, {}} {
+		if err := store.ResolveCrawlDebt(t.Context(), keys); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := store.ResolveCrawlDebt(ctx, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled empty resolution: %v", err)
+	}
+}
+
+func TestResolveCrawlDebtNonEmpty(t *testing.T) {
+	client, err := Ensure(t.Context(), Options{
+		Socket: testSocket(t), RepositoryID: "resolve-crawl-debt",
+		DaemonPath: daemonBinary(t), DataDir: t.TempDir(), ObjectStore: "memory",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	store := NewSchemaStore(client)
+	pendingKey := schema.CrawlDebtKey(daemonTestID(1), daemonTestID(2))
+	resolvedKey := schema.CrawlDebtKey(daemonTestID(1), daemonTestID(3))
+	missingKey := schema.CrawlDebtKey(daemonTestID(1), daemonTestID(4))
+	pending := encodeSchemaRecord(t, schema.CrawlDebtRecord{
+		PathOrTree: []byte("file"), Reason: schema.DebtUnknownFreshness, Status: schema.DebtPending,
+		ErrorClass: "read-failure", RetryCount: 2,
+	})
+	resolved := encodeSchemaRecord(t, schema.CrawlDebtRecord{
+		PathOrTree: []byte("resolved"), Reason: schema.DebtUnknownFreshness, Status: schema.DebtResolved,
+		LastAttemptUnixNano: 1,
+	})
+	for _, item := range []Mutation{{Key: pendingKey, Value: pending}, {Key: resolvedKey, Value: resolved}} {
+		if err := store.Put(t.Context(), item.Key, item.Value, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keys := [][]byte{pendingKey, resolvedKey, missingKey}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := store.ResolveCrawlDebt(ctx, keys); !errors.Is(err, context.Canceled) && status.Code(err) != codes.Canceled {
+		t.Fatalf("cancelled debt resolution: %v", err)
+	}
+	value, found, err := store.Get(t.Context(), pendingKey)
+	if err != nil || !found || !bytes.Equal(value, pending) {
+		t.Fatalf("cancelled resolution changed pending debt: found=%t error=%v", found, err)
+	}
+	if err := store.ResolveCrawlDebt(t.Context(), keys); err != nil {
+		t.Fatal(err)
+	}
+	value, found, err = store.Get(t.Context(), pendingKey)
+	if err != nil || !found {
+		t.Fatalf("resolved debt missing: found=%t error=%v", found, err)
+	}
+	record, err := schema.UnmarshalCrawlDebtRecord(value)
+	if err != nil || record.Status != schema.DebtResolved || record.ErrorClass != "" || record.RetryCount != 2 || record.LastAttemptUnixNano == 0 {
+		t.Fatalf("resolved debt=%+v error=%v", record, err)
+	}
+	value, found, err = store.Get(t.Context(), resolvedKey)
+	if err != nil || !found || !bytes.Equal(value, resolved) {
+		t.Fatalf("already-resolved debt changed: found=%t error=%v", found, err)
+	}
+	if _, found, err := store.Get(t.Context(), missingKey); err != nil || found {
+		t.Fatalf("missing debt created: found=%t error=%v", found, err)
+	}
+	state, err := client.WriterStatus(t.Context())
+	if err != nil || state.ActiveTransactions != 0 || state.ActiveWriteIntents != 0 {
+		t.Fatalf("debt cleanup: transactions=%d intents=%d error=%v", state.ActiveTransactions, state.ActiveWriteIntents, err)
+	}
+}
+
 func TestCommitFailureAttribution(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()

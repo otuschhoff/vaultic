@@ -13,6 +13,80 @@ import (
 	"time"
 )
 
+func BenchmarkProcessEmptyCrawlDebtResolution(b *testing.B) {
+	binaryPath := os.Getenv("VAULTICDB_TEST_BINARY")
+	if binaryPath == "" {
+		b.Skip("set VAULTICDB_TEST_BINARY to an attribution-enabled daemon")
+	}
+	for _, transactional := range []bool{true, false} {
+		b.Run(fmt.Sprintf("transactional=%t", transactional), func(b *testing.B) {
+			socketDirectory, err := os.MkdirTemp("", "vd-debt-")
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer os.RemoveAll(socketDirectory)
+			ctx := b.Context()
+			client, err := Ensure(ctx, Options{
+				Socket: filepath.Join(socketDirectory, "d.sock"), RepositoryID: "empty-debt-benchmark",
+				DaemonPath: binaryPath, DataDir: b.TempDir(), ObjectStore: "memory",
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer func() {
+				if err := client.Close(context.Background()); err != nil {
+					b.Error(err)
+				}
+			}()
+			store := NewSchemaStore(client)
+			resolve := store.ResolveCrawlDebt
+			var expectedTransactions uint64
+			if transactional {
+				resolve = store.resolveCrawlDebtOnce
+				expectedTransactions = uint64(b.N)
+			}
+			before, err := client.WriterStatus(ctx)
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				if err := resolve(ctx, nil); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.StopTimer()
+			after, err := client.WriterStatus(ctx)
+			if err != nil {
+				b.Fatal(err)
+			}
+			beginBefore, beginAfter := before.Attribution.BeginRequest, after.Attribution.BeginRequest
+			commitBefore, commitAfter := before.Attribution.CommitRequest, after.Attribution.CommitRequest
+			if beginAfter.Attempts-beginBefore.Attempts != expectedTransactions ||
+				beginAfter.Completed-beginBefore.Completed != expectedTransactions ||
+				beginAfter.Successes-beginBefore.Successes != expectedTransactions ||
+				beginAfter.Failures != beginBefore.Failures || beginAfter.Cancellations != beginBefore.Cancellations ||
+				beginAfter.Timeouts != beginBefore.Timeouts || beginAfter.Active != 0 ||
+				commitAfter.Attempts-commitBefore.Attempts != expectedTransactions ||
+				commitAfter.Completed-commitBefore.Completed != expectedTransactions ||
+				commitAfter.Successes-commitBefore.Successes != expectedTransactions ||
+				commitAfter.Failures != commitBefore.Failures || commitAfter.Cancellations != commitBefore.Cancellations ||
+				commitAfter.Timeouts != commitBefore.Timeouts || commitAfter.Active != 0 {
+				b.Fatalf("unexpected transaction outcomes: begin=%+v -> %+v commit=%+v -> %+v", beginBefore, beginAfter, commitBefore, commitAfter)
+			}
+			if after.Attribution.RollbackRequest.Attempts != before.Attribution.RollbackRequest.Attempts ||
+				after.Attribution.EngineWriteOps != before.Attribution.EngineWriteOps ||
+				after.ActiveTransactions != 0 || after.ActiveWriteIntents != 0 {
+				b.Fatalf("unexpected writes or cleanup: before=%+v after=%+v", before, after)
+			}
+			b.ReportMetric(float64(beginAfter.Attempts-beginBefore.Attempts)/float64(b.N), "begin/op")
+			b.ReportMetric(float64(commitAfter.Attempts-commitBefore.Attempts)/float64(b.N), "commit/op")
+			b.ReportMetric(float64(commitAfter.TotalUS-commitBefore.TotalUS)/float64(b.N), "commit-service-us/op")
+		})
+	}
+}
+
 func BenchmarkProcessDurableCommitWALLatency(b *testing.B) {
 	binaryPath := os.Getenv("VAULTICDB_FAILURE_TEST_BINARY")
 	if binaryPath == "" {

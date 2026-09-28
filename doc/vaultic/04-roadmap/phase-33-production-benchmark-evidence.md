@@ -1,5 +1,91 @@
 # Phase 33 Production Benchmark Evidence
 
+## Isolated empty-debt overhead measurement (2026-09-28)
+
+`BenchmarkProcessEmptyCrawlDebtResolution` compares the unchanged
+`resolveCrawlDebtOnce(ctx, nil)` transaction helper with the new
+`ResolveCrawlDebt(ctx, nil)` fast path. The helper represents the former
+successful empty-input path; this is not a comparison of entire old/new backup
+binaries or of conflict retries. Each case starts a private memory-store daemon
+and uses a temporary Unix socket. Startup, shutdown and status sampling are
+excluded from timing; no production endpoint is used.
+
+Five non-race repetitions of 10,000 calls per case produced:
+
+| Metric Per Call | Transaction Helper | Empty Fast Path |
+| --- | --- | --- |
+| Median elapsed time | 1.107940 ms | 6.312 ns |
+| Elapsed range | 1.104130-1.128058 ms | 6.279-7.360 ns |
+| Begin RPCs | 1 | 0 |
+| Commit RPCs | 1 | 0 |
+| Median Go allocated bytes | 12,589 | 0 |
+| Median Go allocations | 195 | 0 |
+| Server commit service range | 127.0-129.1 us | No calls |
+
+Every measured case checks exact Begin/Commit attempt, completion and success
+deltas, zero new failures/cancellations/timeouts, no rollback or engine-write
+increments, and zero active transactions/write intents. All checks passed.
+Allocation figures cover the Go benchmark process, not daemon allocations.
+The nanosecond result measures only the local empty-input/context check; it
+does not represent metadata lookup or file-processing throughput.
+
+Reproduction command (with the existing RAM-backed TMPDIR/GOCACHE):
+
+```sh
+VAULTICDB_TEST_BINARY=/root/proj/vaultic/vaulticdb/target/process-tests/debug/vaulticdb \
+  go test ./internal/index/daemon -run '^$' \
+  -bench '^BenchmarkProcessEmptyCrawlDebtResolution$' -benchtime=10000x -count=5
+```
+
+Raw output is retained at
+`/run/vaultic-empty-debt-benchmark-hUPbKb/benchmark.txt` (ephemeral across reboot),
+SHA256 `5457f273d55afec54252522b1c7f3c3b3927d718663deb99775ea96a552267f9`.
+The debug test-failpoint daemon SHA256 is
+`ba323af363398bc54694fd848751a4acbb2c48df6d07be76f8f58a07513bc610`.
+The source base is `2429269d253bb624010eb346e4e2ef433e88f71b` plus the
+uncommitted fast path, tests and evidence. The host reports Linux/amd64,
+Xeon Gold 5217 and benchmark GOMAXPROCS 32. No concurrent builds or tests were
+launched during measurement; unrelated host activity was not controlled.
+
+This quantifies an avoidable transaction cost in isolation, not a live backup
+speedup. Memory-store/debug-daemon timing is not a production estimate, and
+remaining per-key metadata lookup costs were not measured again. No new
+production code was added in this measurement step. The generic finalization
+race and R43/R44 rejection decisions remain unchanged. No commit, push,
+deployment, production restart, tuning change or live trial was performed.
+
+## Empty debt resolution fast path (2026-09-27)
+
+The diagnostics, ordering reproduction and preceding evidence were committed
+locally as `2429269d2` with a detailed message; no push was performed. Follow-up
+inspection of the actual reuse path found a narrower optimization than changing
+transaction cancellation semantics: `Reconciler::reuseExistingRecord` always
+calls `SchemaStore::ResolveCrawlDebt`, even when its debt-key slice is empty.
+The latter previously opened and committed a transaction for that no-op.
+
+`ResolveCrawlDebt` now returns the context error immediately for an empty key
+slice, or nil when the context is live. It issues no Begin, Commit or Rollback
+RPC. Non-empty input retains the existing transaction, validation, retry and
+cleanup behavior. No public transaction finalization semantics, deadline policy
+or benchmark failure classification were changed. The generic commit/rollback
+ordering characterized below still exists; this change removes unnecessary
+transaction work from debt-free inode reuse rather than hiding its errors.
+
+A regression with no daemon client reproduced the old attempt to call Begin
+and now passes for nil and empty input while preserving cancellation. An
+isolated-daemon test verifies pending debt resolves, already-resolved records
+remain byte-identical, absent debt is not created and cancelled non-empty work
+leaves pending debt unchanged. All eight publication/reuse fixtures now assert
+that republishing their 32 identical inodes starts no transactions and performs
+no additional engine writes. These checks and the full reconciliation suite
+pass with the race detector; changed-code lint passes.
+
+This removes one unnecessary Begin/Commit pair per empty resolution call, but
+the historical diagnostics did not record each call's debt-key count. No exact
+R44 savings, live throughput improvement or resolution of its specific failure
+is claimed. The follow-up remains uncommitted and undeployed pending evaluation;
+no new live workload, daemon restart or settings change was performed.
+
 ## Offline cancellation-ordering reproduction (2026-09-27)
 
 The cancellation/rollback ordering hypothesized after R44 is now reproducible

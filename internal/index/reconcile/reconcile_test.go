@@ -1568,6 +1568,18 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 					reused.InodePublicationCalls != metrics.InodePublicationCalls || reused.RevisionAllocationCalls != metrics.RevisionAllocationCalls {
 					t.Fatalf("reuse attribution: %+v", reused)
 				}
+				afterReuse, err := client.WriterStatus(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if afterReuse.Attribution.BeginRequest.Attempts != after.Attribution.BeginRequest.Attempts ||
+					afterReuse.Attribution.CommitRequest.Attempts != after.Attribution.CommitRequest.Attempts ||
+					afterReuse.Attribution.RollbackRequest.Attempts != after.Attribution.RollbackRequest.Attempts ||
+					afterReuse.Attribution.EngineWriteOps != after.Attribution.EngineWriteOps ||
+					afterReuse.ActiveTransactions != 0 || afterReuse.ActiveWriteIntents != 0 {
+					t.Fatalf("debt-free reuse performed transaction work: before=%+v after=%+v",
+						after.Attribution.CommitRequest, afterReuse.Attribution.CommitRequest)
+				}
 				if err := client.Close(ctx); err != nil {
 					t.Fatal(err)
 				}

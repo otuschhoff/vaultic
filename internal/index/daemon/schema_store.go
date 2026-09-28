@@ -1061,6 +1061,9 @@ func (store *SchemaStore) RecordCrawlDebtFailure(ctx context.Context, keys [][]b
 // ResolveCrawlDebt atomically marks existing debt records resolved without
 // creating an otherwise identical metadata revision.
 func (store *SchemaStore) ResolveCrawlDebt(ctx context.Context, keys [][]byte) error {
+	if len(keys) == 0 {
+		return ctx.Err()
+	}
 	backoff := 100 * time.Microsecond
 	for range revisionAllocationAttempts {
 		err := store.resolveCrawlDebtOnce(ctx, keys)
