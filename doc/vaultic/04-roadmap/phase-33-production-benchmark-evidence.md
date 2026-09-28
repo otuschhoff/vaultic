@@ -312,6 +312,51 @@ microsecond-scale client-side path does make a large *local* blob-size decode
 cost unlikely in this fixture; server-side read and transport attribution
 remain open.
 
+## R47 one-hour completion attempt stopped at write-phase gate (2026-09-28)
+
+The user authorized a single production completion attempt capped at one hour
+with representative-file restore if it finished. R46's exact candidate CLI,
+52 sources, adopted PID 1617561/epoch 76 daemon, settings and direct-NFS
+options were retained. A private copy of the harness at
+`/volume2/NASDA2/rustic/db.test/backup-completion-20260928-r47-5RPMbd`
+used a 3,600-second hard cap plus 45 seconds of cleanup grace; its analyzer
+self-tested successful-publication and timeout snapshot gates. The earlier
+archives, installed binary and unit were not changed.
+
+After the run entered publication work, the inherited zero-commit-failure
+gate triggered at 786 seconds, so the CLI was stopped with exit 130 instead
+of waiting
+for the one-hour cap. It had processed 57,909 files and 134,749,470,374
+logical bytes at 785 seconds. Writer status recorded 116 commit attempts:
+108 successes and eight failures, all diagnosed as `Aborted` at
+`storage_commit` with consumed transactions; no cancellations or timeouts.
+There were 409 engine writes and 79 acknowledged inode publications, with one
+revision-allocation failure reported. Go publication and allocation code
+retries `Aborted` conflicts, but the aggregate counters do not establish that
+each failed attempt later succeeded. The analyzer therefore **rejected** the
+run; its commit-non-success and early-stop gates were not waived.
+
+An offline-only classifier in the private R47 analyzer now distinguishes
+zero failures, up to eight fully observed `storage_commit / Aborted / consumed`
+diagnostics, and unclassified outcomes. Its synthetic self-tests reject
+missing diagnostics, other statuses and counts beyond the complete diagnostic
+window. R45/R46 have zero failures and diagnostics; R47's eight are all
+observed `Aborted`, but R47 remains rejected because the classifier cannot
+link each failed commit to a successfully retried logical operation. The
+copied live harness was not changed or rerun after this analysis.
+
+The process exited after cancellation with no reported source errors, no
+active transactions or write intents, an empty metadata scratch directory,
+and the same 143 snapshot IDs. The daemon stayed read-write on PID 1617561,
+epoch 76, with the unchanged installed binary SHA256
+`6733b8c867f75c86dd73b0f8e85e2d2f641389103eae370c1f8cdd470cbd507e`.
+No new snapshot exists to restore, so representative-file restore was not
+possible. These checks do not prove the already-written metadata is free of
+pending export work or validate backup completion. Do not repeat this live
+attempt under the old gate or interpret this as a full-backup runtime result;
+first distinguish retryable write conflicts from unresolved publication
+failures using an offline-validated write-phase safety criterion.
+
 ## Isolated empty-debt overhead measurement (2026-09-28)
 
 `BenchmarkProcessEmptyCrawlDebtResolution` compares the unchanged
