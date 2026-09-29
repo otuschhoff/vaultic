@@ -444,6 +444,57 @@ reservation lifecycle test and affected Go daemon/reconciler/backup suites
 passed. The development daemon was not deployed and no production backup was
 performed; the R49 conflicting keys remain unproven.
 
+## R50 bounded backup on publication-admission daemon (2026-09-28)
+
+The committed `37325adb2` daemon was built and deployed as SHA256
+`1348a1af915cec718cb0f8f461eff9d6a35df5370f13b170ce59b39c832e547a`.
+The prior executable and exact candidate are preserved under
+`/volume2/NASDA2/rustic/db.test/vaulticdb-admission-20260928-c0PjDG`.
+After a graceful stop, the service reopened read-write at epoch 77 on
+PID 1832232; unit and environment hashes were unchanged and all 143 snapshot
+IDs remained present. A matching debug CLI and an R49-derived, private
+600-second harness with 45 seconds of cleanup grace are under
+`/volume2/NASDA2/rustic/db.test/backup-admission-20260928-r50-zyIwnt`.
+Its 36 analyzer self-tests and live identity, source and idle-writer preflight
+passed. The old R49 evidence and harness were not modified.
+
+The single trial ended at 600.232 seconds with wrapper exit 124 and completed
+cleanup. At 599 seconds it had processed 45,705 files and 87,207,269,602
+logical source bytes. The daemon recorded zero Commit attempts, failures,
+cancellations or timeouts; the CLI's final Commit RPC counters agree. There
+were no engine writes or compactions, source error records, sampler errors,
+active transactions or write intents; scratch was empty and snapshot IDs
+remained unchanged. However, the final reconciler reported 462 failed items,
+and the canceled CLI logged a terminal metadata-admission error. The
+predeclared safety analyzer therefore **rejected** the trial for terminal
+reconciliation failure. This is not a completed-backup, restore, or successful
+publication-admission acceptance result; no inode publication reached Commit.
+Do not reclassify the close-time failures after the run merely to make it pass.
+
+Source-side direct NFS completed 1,446,069 READ calls with mean service
+1.011 ms and mean queue 0.009 ms, delivering 87,212,540,760 bytes; four
+READs were canceled at shutdown, with no transport, timeout, stale-handle or
+permission errors. The 48,159 LOOKUP not-found replies were classified as
+not-found, not transport failures. Metadata lookups instead made 111,507
+one-handle size RPCs averaging 20.176 ms, for 2,249.74 seconds of overlapping
+RPC time across four slots (3.75 concurrent on average). The 550-second CLI
+stack shows four workers waiting in `ReadSession.MultiGet`; client result
+cache recorded zero evictions. These signals make the metadata read path a
+stronger bottleneck candidate than slow source NFS responses, but overlapping
+work prevents a definitive per-file critical-path attribution.
+
+VaulticDB used 4,331.23 CPU seconds (7.22 cores average, including 3,243.15
+user and 1,088.08 system seconds), served 617,897 main-store GETs, and
+reported 1,481,552,832,719 logical delivered body bytes, 16.99 times the
+source READ bytes. This is logical object-store delivery, not physical disk or
+network traffic. It indicates substantial metadata read amplification under
+the current 128 MiB metadata cache and non-native MultiGet mode; the daemon
+CPU was read-side workload, not publication or compaction. The captured CPU
+profile is **CLI only** (SHA-256 and chunking lead); no daemon CPU profile
+was captured, so precise Rust hot functions and decryption share remain
+unproven. An instrumented daemon profile or controlled metadata-read probe is
+needed before changing source concurrency, cache budgets or durability policy.
+
 ## Isolated empty-debt overhead measurement (2026-09-28)
 
 `BenchmarkProcessEmptyCrawlDebtResolution` compares the unchanged
