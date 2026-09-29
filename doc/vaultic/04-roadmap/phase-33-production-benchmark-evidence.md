@@ -694,6 +694,239 @@ that the next production run will publish a snapshot or satisfy a restore
 gate. No new live backup, daemon restart, installation or production setting
 change was made in this follow-up.
 
+The prospective R54 directory now also contains a private `run.cjs` and
+`candidate/` with the pinned CLI, unchanged 52-source manifest and source
+identity. It retains R53's 1,200-second TERM cap, 45-second kill grace,
+64-failure stop budget, sampling, writer checks and strict post-run analyzer.
+The runner additionally rejects source-list drift (SHA256
+`01b2d4b2ea54ca86e67649dd71cdf95cae5b401211f4f0b484ce431ab99173d6`)
+or snapshot-membership drift from the 143-ID R53 baseline (sorted-ID SHA256
+`c81d1eb3b233286835c2b0f8ba004d6739d5116deea548bcd0cca0774c16d0e6`).
+Read-only `--preflight` passed with eight NFS connections, four readers,
+52 accessible source directories, the pinned CLI and daemon binaries, epoch
+77, read-write idle writer, unchanged deployment settings and exact snapshot
+membership. Scratch and result mounts have free space. The runner has not
+been started at preparation time and `candidate/started.json` did not exist.
+Repeat preflight
+immediately before a separately authorized single capped trial; evaluate its
+artifacts with the R54 analyzer, and preserve fail-closed Commit parity and
+snapshot/restore gates.
+
+### R54 bounded publication and throughput trial (2026-09-29)
+
+The approved run first failed at CLI flag parsing after about three seconds:
+the untagged candidate lacked `--cpu-profile`. Its log recorded no backup
+events, no Commit delta and no snapshot changes; the daemon remained idle.
+That failed startup and its artifacts remain under the original R54 prospective
+directory. The previous R53 CLI had been built with the Go `debug` tag. A
+fresh R54 CLI was built from committed source `04c39789d` with the same tag
+(SHA256 `55d7d92d9bc27c1da65201de641aa3b2b7f114dcedd2aa0cd4cc60ea17c46ab2`),
+DWARF debug information and both profiling flags. The unchanged deployed
+daemon (PID 1832232, epoch 77, SHA256
+`1348a1af915cec718cb0f8f461eff9d6a35df5370f13b170ce59b39c832e547a`)
+also has debug information. The corrected runner and analyzer are under
+`/volume2/NASDA2/rustic/db.test/backup-publication-20260929-r54-debug-cap1200`.
+The runner pinned the debug CLI and repeated source, snapshot, identity,
+writer and port preflight; the analyzer's 49 self-tests passed. No daemon
+installation, restart, configuration change or cache reset occurred.
+
+The corrected single trial used the same 52 sources, eight direct NFS
+connections, four source readers, 1,200-second TERM cap, 45-second kill grace,
+64-Commit-failure live stop budget and safety sampling. It timed out normally
+at 1,200.697 seconds (wrapper cleanup 1,203.641 seconds). The strict R54
+analyzer **accepts only its bounded publication safety gate**: 4,857 daemon
+Commit attempts/completions/successes exactly match 4,857 successful client
+responses, with zero Commit failures, cancellations, timeouts, active
+transactions and write intents. There was no early stop, source error or
+sampler error; 3,676 inode-publication calls and 1,181 revision-allocation
+calls had zero terminal failures. All 23,533 final failed reconciliations
+were explicitly canceled at shutdown; revision-allocation failures were zero.
+Scratch drained, the daemon stayed read-write and idle with the same identity,
+and the original 143 snapshot IDs remained unchanged. The CLI exited with
+the expected canceled metadata-admission message at the cap. **No new
+snapshot or representative restore exists; this is not a completed backup.**
+
+At 1,199 seconds the CLI reported 92,971 files and 164,253,020,843 logical
+source bytes, or 77.5 reported files/s and 130.6 MiB/s over elapsed time.
+These are progress rates, not unique-inode or newly uploaded byte rates. The
+direct NFS adapter recorded 2,747,668 READs and 164,256,483,129 source bytes:
+about 59,780 bytes/read, 1.15 ms mean READ service and only 23.9 seconds
+aggregate READ queue wait. Service durations overlap across readers; their
+sum is not elapsed time. The daemon recorded 1,174,372 main-store GETs,
+2,794,361,067,564 logical body bytes (about 2.38 MB/GET and 17.0 times
+direct source-read bytes), and 4,840.9 seconds aggregate GET service (4.12
+ms/GET). These are delivered logical bytes, **not physical NFS or disk
+traffic**. The CLI issued 208,809 metadata size RPCs for 208,809 handles,
+averaging 19.94 ms each, with 271,585 positive cache hits, 53,975 negative
+hits, 857,731 misses and zero evictions. The lookup cache peaked at 59.7%
+of capacity; simply enlarging it is not supported by these counters. Daemon
+CPU totaled 7,871.7 seconds (6.55 mean cores) versus CLI CPU 2,327.0
+seconds (1.94 mean cores). Both processes had about 1.1-1.3 GB peak RSS;
+no memory-limit stop occurred.
+
+Commits began around minute 16: about 4,800 occurred over the last four
+minutes, approximately 20/s. All-run average Commit service was 75.2 ms,
+with 18,517 engine writes. The CLI CPU profile (2,300.6 sampled CPU seconds)
+attributes 23.4% flat to SHA-256, 12.5% cumulative to chunk-boundary
+scanning, 11.3% flat to syscall6, 8.0% flat to memory clearing and 28.4%
+cumulative to direct-NFS file reads; cumulative and flat shares must not be
+added. The daemon's 30-second perf sample was collected early in the **read
+phase**: 11K cycle samples, zero lost, with 25.3% flat in memmove, 15.8%
+in AES-GCM/CTR, 11.9% in kernel page copying, 8.5% in memset and 5.4%
+in CRC. It cannot diagnose publication-phase CPU on its own. The CLI
+profile includes both phases; neither profile proves a single-resource
+throughput ceiling.
+
+The strongest measured candidate for limiting more MiB/s and files/s is
+metadata read amplification and its associated daemon CPU work, not a
+Commit failure or lookup-cache eviction. Source NFS service, chunking, SHA
+and per-handle metadata size RPC latency are concurrent costs. Four source
+readers reached at most four active READs, but low aggregate READ queue wait
+does not establish that raising concurrency will improve progress. One R54
+observation cannot attribute the difference from R53's 106,466 files and
+182.6 GB at its cap to the shutdown fix, caching, source mix or contention.
+Next discriminate offline on representative encrypted point reads: measure
+repeated access to the same authenticated chunk with fixed cache/read-ahead
+and exact result/GET/CPU counters, then test amortizing proven redundant
+decrypt/copy work. Do not blindly increase worker counts, enable native
+MultiGet, change the daemon or weaken Commit/snapshot/restore gates on this
+evidence. A longer completion/restore run needs a separate decision.
+
+Raw logs, both symbolized profiles, writer samples and analysis are retained
+in the corrected R54 `candidate/` directory. SHA256 of `analysis.json` is
+`de32bb96ef24ded539fe9abfa945052bb0db802d249369e0fdefedf4d3a091ce`,
+of `decision.json` is
+`ea197cde340bc510f65abba7eb128b7065675d1c0b0eb8c801f802eacac168cb`,
+of `cpu/cpu.pprof` is
+`27fb094e1ac2becd70579e954a953134fc8a7164f6960668f2b251c1a1e550ab`,
+and of `daemon-perf.data` is
+`cbe5f47c0014aa1d552b2756c590e1d066cb1afb51df72a26bef77c9d89064f4`.
+
+An offline-only release-mode follow-up retained an ignored, correctness-checked
+encrypted point-read probe in `vaulticdb/src/encryption/tests.rs`. It reads
+16 distinct 64-byte ranges from one authenticated 256 KiB chunk, for 100
+groups in both orders. Independent `get_range` calls took 138-139 ms per
+100 groups; one full-chunk request and local slicing took 8 ms, while the
+existing `ObjectStore::get_ranges` API took 10 ms and returned the same bytes.
+Each individual request fetches/authenticates the entire chunk. From the
+requested ciphertext ranges, these modes imply respectively 1,600 and 100
+requests and 419,456,000 versus 26,216,000 logical ciphertext bytes; those
+are **modeled request bytes**, not measured host traffic. The focused debug
+probe, release probe, 16 other encryption tests and the existing SlateDB
+MultiGet amplification test pass. Build and test artifacts stayed under
+`/run/vaultic-phase33-attribution`.
+
+A second ignored release-mode fixture uses a 4,096-record persisted encrypted
+SlateDB SST with the DB cache disabled and a test-only object-store observer.
+It reopens the DB before each 16-nearby-key lookup and measures actual returned
+ciphertext bytes by object class and response size. Individual GETs returned
+53-54 SST responses and 11,369,360-11,369,398 SST bytes; native MultiGet
+returned three SST responses and 628,660 SST bytes in both orders. Of the
+individual SST responses, 32 were 183,250-byte reads and 21 were
+262,160-byte reads (plus one 38-byte header in the 54-read case); MultiGet
+used two 183,250-byte reads and one 262,160-byte read. One replay also had
+23 unrelated small WAL/other header responses from background work; the SST
+figures exclude them. All 16 returned values matched. Observed in-memory
+elapsed times were about 6.3-7.7 ms for individual GETs and 0.55-0.66 ms
+for MultiGet. These measured SST response bytes corroborate the earlier
+removed probe, but do not measure physical I/O, production latency or the
+distribution of nearby handles during the live backup.
+
+This discriminates against a second request-scoped coalescer: `get_ranges`
+already performs that reuse. R54's 208,809 size RPCs each had exactly one
+handle, so the controlled 16-nearby-key workload is not representative of
+the live request boundary. Cross-caller batching previously lowered RPCs
+without improving progress, and a shared decrypted-chunk cache would require
+immutable-object/version and memory-lifetime evidence. No runtime cache,
+batching, daemon binary or production setting was changed. Before proposing
+a live speedup, establish the real key/range locality and bounded group
+formation without introducing latency or extra memory, then check actual
+GETs, CPU, exact results, cancellation and publication parity in a matched
+workload. The R54 safety verdict remains bounded-only.
+
+### R55 capped completion attempt (2026-09-29)
+
+After explicit approval, a fresh single-use copy of the R54 debug runner and
+analyzer was staged at
+`/volume2/NASDA2/rustic/db.test/backup-publication-20260929-r55-cap2400`.
+It pinned the same 52-source manifest, CLI SHA256
+`55d7d92d9bc27c1da65201de641aa3b2b7f114dcedd2aa0cd4cc60ea17c46ab2`
+and deployed daemon PID 1832232 / epoch 77 / SHA256
+`1348a1af915cec718cb0f8f461eff9d6a35df5370f13b170ce59b39c832e547a`.
+Read-only preflight reconfirmed source access, 143 unchanged snapshot IDs,
+an idle read-write writer and no competing Vaultic client. The cap was
+raised to 2,400 seconds with the same 45-second kill grace, eight NFS
+connections, four readers and 64-Commit-failure live stop budget. The
+copied analyzer's 49 synthetic safety tests passed. Neither binary nor
+production settings were changed.
+
+The single trial reached the 2,400-second TERM cap (wrapper 2,404.022 s;
+CLI status 2,400 s). It reported 185,440 files and 195,770,358,916 logical
+source bytes; direct NFS reported 3,488,321 READs and 195,770,361,598
+bytes. These are progress counters, not unique inodes or uploaded bytes.
+CLI CPU totaled 2,992.7 s and daemon CPU 12,486.65 s. The daemon delivered
+4,362,080,401,191 logical metadata GET body bytes in 1,871,689 GETs;
+these are not physical storage traffic. Peak CLI RSS was 1,393,756 KiB.
+Around 1,600 seconds the reported source-byte curve nearly flattened,
+while publication continued: Commit attempts grew from 13,900 at 1,617 s
+to 29,555 at 2,397 s, with intermittent later source progress. This is
+evidence of a long publication tail in this run, not a measured completion
+time or proof of a single CPU/I/O bottleneck.
+
+All 29,601 daemon Commit attempts, completions and successes exactly matched
+29,601 successful client responses; there were zero Commit failures,
+cancellations, timeouts, active transactions or write intents at postflight.
+There were no source or sampler errors or early safety stops. The 52,085
+final failed reconciliations were explicitly canceled at shutdown; revision
+allocation and inode publication reported zero terminal failures. Scratch
+drained, the writer remained read-write at the same PID and epoch, and the
+original 143 snapshot IDs remained unchanged. The analyzer accepts only
+the **40-minute bounded publication safety gate**: process exit 124,
+`completed=false`, no summary or new snapshot. The CLI reported the expected
+`unable to save snapshot: context canceled` on TERM. **No backup or payload
+restore acceptance was achieved.** A further cap increase is not justified
+by a completion estimate from these two censored trials; examine the
+publication tail and define a bounded completion criterion before another
+production attempt. Raw runner, samples, profiles, postflight and
+`analysis.json`/`decision.json` remain in the R55 `candidate/` directory.
+
+### R56-R62 publication and pack trials (2026-09-29)
+
+Offline process-backed publication comparisons at 100, 25 and 10 ms WAL
+flush intervals showed that shorter durability waits reduced group wall
+time. On an NFS-backed shared-content fixture with 64 inodes and 64
+content IDs each, grouped publication took 8.07-8.08 s at 100 ms,
+5.84-5.86 s at 25 ms and 5.44-5.76 s at 10 ms. Atomic groups took
+5.55-6.45, 5.09-5.25 and 5.00-5.05 s respectively. These are isolated
+fixtures, not production speedup estimates. Reopen, shared-reference,
+Commit-accounting, cancellation and process crash tests passed. Production
+trials kept the daemon binary unchanged and temporarily used 25 ms.
+R56 needed independent restoration verification after wrapper assertions;
+subsequent wrappers recorded restoration of the original 100 ms setting.
+
+| Trial | Change or diagnostic | CLI result | Snapshots |
+| --- | --- | --- | --- |
+| R56 | 25 ms flush, unchanged CLI | 3,600 s cap; 160,606 matched successful Commits; bounded safety only | 143 |
+| R57 | Bounded parallel directory publication with one revision block per group | Exit 1 at 2,139 s; pack publication deadline | 143 |
+| R58 | Longer bounded pack deadline and stage errors | Exit 1 at 2,135 s; pack import planning deadline | 143 |
+| R59 | Pack lookup progress diagnostics | Exit 1 at 1,858 s; lookup batch 8,000-9,000 of 18,289 blobs timed out | 143 |
+| R60 | Temporary daemon-wide native MultiGet | 3,600 s cap, 376,043 reported files; canceled reconciliation failed the acceptance gate | 143 |
+| R61 | Native MultiGet off, bounded 10-minute pack budget | 3,600 s cap, 417,140 reported files; canceled reconciliation failed the acceptance gate | 143 |
+| R62 | Same candidate as R61, 7,200 s cap | Exit 1 at 2,052 s; metadata lookup deadline while admitting a blob | 143 |
+
+R57's directory change and the pack-stage diagnostics are in the Go diff.
+R62's 34 daemon Commits matched successful client responses, but no
+inode-publication call was observed, so its analyzer rejected completion
+and publication-safety acceptance. It did not reach the longer cap. Its
+final restoration record verifies an idle writer at epoch 91, 100 ms
+flush and unchanged snapshot membership. The R56-R62 raw artifacts and
+decisions are retained under the corresponding
+`/volume2/NASDA2/rustic/db.test/backup-publication-20260929-rXX-*`
+directories. None of these trials completed a backup or enabled a payload
+restore. The next blocker is the R62 blob-admission metadata lookup; it
+must be diagnosed without raising the global RPC deadline or treating
+an elapsed cap as a successful snapshot.
+
 ## Isolated empty-debt overhead measurement (2026-09-28)
 
 `BenchmarkProcessEmptyCrawlDebtResolution` compares the unchanged

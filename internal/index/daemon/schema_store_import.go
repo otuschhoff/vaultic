@@ -29,6 +29,11 @@ type packImportPlan struct {
 // locations, and aggregates. Retries are idempotent and preserve existing
 // duplicate blob locations from other packs.
 func (store *SchemaStore) PublishPack(ctx context.Context, published PublishedPack) error {
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 10*time.Minute)
+		defer cancel()
+	}
 	imported := LegacyPackImport{
 		PackID: published.PackID, Record: published.Record, Blobs: published.Blobs,
 		Placements:         published.Placements,
@@ -69,10 +74,10 @@ func (store *SchemaStore) importPackOnce(
 	}
 	plan, limits, err := store.planPackImport(ctx, transaction, imported)
 	if err != nil {
-		return fail(err)
+		return fail(fmt.Errorf("plan pack import: %w", err))
 	}
 	if err := writeTransactionBatches(ctx, transaction, limits, plan.puts, nil); err != nil {
-		return fail(err)
+		return fail(fmt.Errorf("write pack import: %w", err))
 	}
 	if err := transaction.Commit(ctx); err != nil {
 		rollbackTransaction(ctx, transaction)
@@ -88,23 +93,23 @@ func (store *SchemaStore) planPackImport(
 ) (packImportPlan, Limits, error) {
 	state, err := loadPackImportState(ctx, transaction, &imported)
 	if err != nil {
-		return packImportPlan{}, Limits{}, err
+		return packImportPlan{}, Limits{}, fmt.Errorf("load pack record: %w", err)
 	}
 	sort.Slice(imported.Record.SourceIndexIDs, func(left, right int) bool {
 		return bytes.Compare(imported.Record.SourceIndexIDs[left][:], imported.Record.SourceIndexIDs[right][:]) < 0
 	})
 	plan, err := planImportedBlobs(ctx, transaction, imported)
 	if err != nil {
-		return packImportPlan{}, Limits{}, err
+		return packImportPlan{}, Limits{}, fmt.Errorf("plan %d blobs: %w", len(imported.Blobs), err)
 	}
 	if err := planPackRecord(&imported, state.oldRecord, &plan); err != nil {
 		return packImportPlan{}, Limits{}, err
 	}
 	if err := planPackAggregatesAndDebt(ctx, transaction, imported, state.oldRecord, &plan); err != nil {
-		return packImportPlan{}, Limits{}, err
+		return packImportPlan{}, Limits{}, fmt.Errorf("plan pack aggregates and debt: %w", err)
 	}
 	if err := planPackImportHistory(ctx, transaction, imported, state.oldRecord, &plan); err != nil {
-		return packImportPlan{}, Limits{}, err
+		return packImportPlan{}, Limits{}, fmt.Errorf("plan pack history: %w", err)
 	}
 	limits := store.client.Limits()
 	if imported.BatchSize > 0 && imported.BatchSize < limits.MaxBatchItems {
@@ -183,7 +188,7 @@ func planImportedBlobs(
 		}
 		values, found, err := transaction.MultiGet(ctx, keys[start:end])
 		if err != nil {
-			return packImportPlan{}, err
+			return packImportPlan{}, fmt.Errorf("lookup blobs %d:%d of %d: %w", start, end, len(keys), err)
 		}
 		for offset, blobID := range blobIDs[start:end] {
 			incoming := imported.Blobs[blobID]

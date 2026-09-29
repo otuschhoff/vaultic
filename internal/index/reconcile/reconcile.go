@@ -1010,14 +1010,96 @@ func (reconciler *Reconciler) publishDirectories(directories []preparedItem, pub
 		}
 		return directories[left].sourcePath < directories[right].sourcePath
 	})
+	type pendingDirectory struct {
+		item  preparedItem
+		value []byte
+	}
+	pending := make([]pendingDirectory, 0, publicationConcurrency)
+	flush := func() {
+		if len(pending) == 0 {
+			return
+		}
+		type result struct {
+			key    []byte
+			reused bool
+			err    error
+		}
+		results := make([]result, len(pending))
+		allocate := reconciler.store.AllocateRevision
+		if store, ok := reconciler.store.(interface {
+			AllocateRevisionBlock(context.Context, uint64) (uint64, error)
+		}); ok && len(pending) > 1 {
+			var allocationMu sync.Mutex
+			var next uint64
+			allocate = func(ctx context.Context) (uint64, error) {
+				allocationMu.Lock()
+				defer allocationMu.Unlock()
+				if err := ctx.Err(); err != nil {
+					return 0, err
+				}
+				if next == 0 {
+					start, err := store.AllocateRevisionBlock(ctx, uint64(len(pending)))
+					if err != nil {
+						return 0, err
+					}
+					next = start
+				}
+				revision := next
+				next++
+				return revision, nil
+			}
+		}
+		var workers sync.WaitGroup
+		for index, entry := range pending {
+			workers.Go(func() {
+				results[index].key, results[index].reused, results[index].err =
+					reconciler.publishRecordWithAllocator(entry.item, entry.value, true, nil, allocate)
+			})
+		}
+		workers.Wait()
+		for index, entry := range pending {
+			directory := entry.item
+			result := results[index]
+			if result.err != nil {
+				reconciler.fail(directory.sourcePath, result.err, directory.debtKeys)
+				continue
+			}
+			if result.reused {
+				reconciler.reused.Add(1)
+			} else {
+				reconciler.changed.Add(1)
+				reconciler.reconciled.Add(1)
+			}
+			if _, exists := published[directory.sourcePath]; !exists {
+				parent := reconciler.filesystem.Dir(directory.sourcePath)
+				childrenByParent[parent] = append(childrenByParent[parent], directory.sourcePath)
+			}
+			published[directory.sourcePath] = publishedItem{
+				identity: directory.identity, key: result.key,
+				typeID: schema.NodeDirectory, snapshotPath: directory.snapshotPath,
+			}
+		}
+		pending = pending[:0]
+	}
 	for _, directory := range directories {
 		if err := reconciler.ctx.Err(); err != nil {
+			flush()
 			reconciler.fail(directory.sourcePath, err)
 			return
+		}
+		for _, entry := range pending {
+			if pathDepth(entry.item.sourcePath) != pathDepth(directory.sourcePath) ||
+				entry.item.identity == directory.identity || entry.item.parent == directory.identity ||
+				directory.parent == entry.item.identity || entry.item.sourcePath == directory.sourcePath ||
+				normalizeSnapshotPath(entry.item.snapshotPath) == normalizeSnapshotPath(directory.snapshotPath) {
+				flush()
+				break
+			}
 		}
 		children := make([]schema.DirectoryChild, 0)
 		for _, sourcePath := range childrenByParent[directory.sourcePath] {
 			if err := reconciler.ctx.Err(); err != nil {
+				flush()
 				reconciler.fail(directory.sourcePath, err)
 				return
 			}
@@ -1051,31 +1133,16 @@ func (reconciler *Reconciler) publishDirectories(directories []preparedItem, pub
 		}
 		value, err := record.MarshalBinary()
 		if err != nil {
+			flush()
 			reconciler.fail(directory.sourcePath, err, directory.debtKeys)
 			continue
 		}
-		key, reused, err := reconciler.publishRecord(directory, value, true, nil)
-		if err != nil {
-			reconciler.fail(directory.sourcePath, err, directory.debtKeys)
-			continue
-		}
-		if reused {
-			reconciler.reused.Add(1)
-		} else {
-			reconciler.changed.Add(1)
-			reconciler.reconciled.Add(1)
-		}
-		if _, exists := published[directory.sourcePath]; !exists {
-			parent := reconciler.filesystem.Dir(directory.sourcePath)
-			childrenByParent[parent] = append(childrenByParent[parent], directory.sourcePath)
-		}
-		published[directory.sourcePath] = publishedItem{
-			identity:     directory.identity,
-			key:          key,
-			typeID:       schema.NodeDirectory,
-			snapshotPath: directory.snapshotPath,
+		pending = append(pending, pendingDirectory{item: directory, value: value})
+		if len(pending) == publicationConcurrency {
+			flush()
 		}
 	}
+	flush()
 }
 
 func (reconciler *Reconciler) publishInode(item preparedItem, published map[string]publishedItem) {

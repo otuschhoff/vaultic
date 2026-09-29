@@ -1254,6 +1254,152 @@ func TestPublishDirectoriesIndexesChildren(t *testing.T) {
 	}
 }
 
+type directoryBarrierStore struct {
+	*fakeStore
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (store *directoryBarrierStore) AllocateRevision(ctx context.Context) (uint64, error) {
+	select {
+	case store.entered <- struct{}{}:
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+	select {
+	case <-store.release:
+		return store.fakeStore.AllocateRevision(ctx)
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+}
+
+func TestPublishDirectoriesOverlapsIndependentSiblings(t *testing.T) {
+	store := &directoryBarrierStore{fakeStore: newFakeStore(), entered: make(chan struct{}, 5), release: make(chan struct{})}
+	reconciler := &Reconciler{ctx: context.Background(), filesystem: testFilesystem(), store: store}
+	directories := make([]preparedItem, 0, 5)
+	for index := range publicationConcurrency {
+		inode := uint64(index + 10)
+		directories = append(directories, preparedItem{
+			workItem: workItem{sourcePath: fmt.Sprintf("/source/d%d", index), snapshotPath: fmt.Sprintf("/snapshot/d%d", index)},
+			identity: identity{fsid: 1, inode: inode}, parent: identity{fsid: 1, inode: 1}, stat: dirInfo(1, inode),
+		})
+	}
+	directories = append(directories, preparedItem{
+		workItem: workItem{sourcePath: "/source", snapshotPath: "/snapshot"},
+		identity: identity{fsid: 1, inode: 1}, parent: identity{fsid: 1, inode: 2}, stat: dirInfo(1, 1),
+	})
+	published := make(map[string]publishedItem)
+	done := make(chan struct{})
+	go func() {
+		reconciler.publishDirectories(directories, published)
+		close(done)
+	}()
+	for range publicationConcurrency {
+		select {
+		case <-store.entered:
+		case <-time.After(2 * time.Second):
+			close(store.release)
+			<-done
+			t.Fatal("independent directories did not overlap")
+		}
+	}
+	close(store.release)
+	<-done
+	if len(reconciler.errors) != 0 || len(published) != 5 {
+		t.Fatalf("publication errors=%v published=%d", reconciler.errors, len(published))
+	}
+	root, err := schema.UnmarshalDirectoryRevision(currentValue(t, store.fakeStore, schema.CurrentDirectoryKey(1, 1)))
+	if err != nil || len(root.Children) != publicationConcurrency {
+		t.Fatalf("parent children=%d err=%v", len(root.Children), err)
+	}
+}
+
+func TestDaemonBackedDirectoryPublication(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	socketDirectory := t.TempDir()
+	if err := os.Chmod(socketDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if dataRoot := os.Getenv("VAULTICDB_TEST_DATA_ROOT"); dataRoot != "" {
+		var err error
+		root, err = os.MkdirTemp(dataRoot, "directory-publication-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(root) })
+	}
+	client, err := daemon.Ensure(ctx, daemon.Options{
+		Socket: filepath.Join(socketDirectory, "daemon.sock"), RepositoryID: "directory-publication",
+		DaemonPath: reconciliationDaemonBinary(t), DataDir: root, WALFlushInterval: 25 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	store := daemon.NewSchemaStore(client)
+	reconciler := &Reconciler{ctx: ctx, filesystem: testFilesystem(), store: store}
+	const siblings = 64
+	directories := make([]preparedItem, 0, siblings+1)
+	for index := range siblings {
+		inode := uint64(index + 10)
+		directories = append(directories, preparedItem{
+			workItem: workItem{sourcePath: fmt.Sprintf("/source/d%02d", index), snapshotPath: fmt.Sprintf("/snapshot/d%02d", index)},
+			identity: identity{fsid: 1, inode: inode}, parent: identity{fsid: 1, inode: 1}, stat: dirInfo(1, inode),
+		})
+	}
+	directories = append(directories, preparedItem{
+		workItem: workItem{sourcePath: "/source", snapshotPath: "/snapshot"},
+		identity: identity{fsid: 1, inode: 1}, parent: identity{fsid: 1, inode: 2}, stat: dirInfo(1, 1),
+	})
+	before, err := client.WriterStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	published := make(map[string]publishedItem)
+	started := time.Now()
+	reconciler.publishDirectories(directories, published)
+	elapsed := time.Since(started)
+	after, err := client.WriterStatus(ctx)
+	if err != nil || len(reconciler.errors) != 0 || len(published) != siblings+1 ||
+		after.ActiveTransactions != 0 || after.ActiveWriteIntents != 0 {
+		t.Fatalf("directory publication errors=%v published=%d writer=%+v err=%v", reconciler.errors, len(published), after, err)
+	}
+	t.Logf("directories=%d seconds=%.6f commits=%d failures=%d durable_us=%d", siblings+1, elapsed.Seconds(),
+		after.Attribution.CommitRequest.Attempts-before.Attribution.CommitRequest.Attempts,
+		after.Attribution.CommitRequest.Failures-before.Attribution.CommitRequest.Failures,
+		after.Attribution.DurableWait.TotalUS-before.Attribution.DurableWait.TotalUS)
+	if err := client.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := daemon.Ensure(ctx, daemon.Options{
+		Socket: filepath.Join(socketDirectory, "reopen.sock"), RepositoryID: "directory-publication",
+		DaemonPath: reconciliationDaemonBinary(t), DataDir: root, WALFlushInterval: 25 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close(context.Background())
+	value, found, err := daemon.NewSchemaStore(reopened).Get(ctx, schema.CurrentDirectoryKey(1, 1))
+	if err != nil || !found {
+		t.Fatalf("reopened root found=%t err=%v", found, err)
+	}
+	pointer, err := schema.UnmarshalCurrentPointer(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, found, err = daemon.NewSchemaStore(reopened).Get(ctx, pointer.RecordKey)
+	if err != nil || !found {
+		t.Fatalf("reopened root revision found=%t err=%v", found, err)
+	}
+	record, err := schema.UnmarshalDirectoryRevision(value)
+	if err != nil || len(record.Children) != siblings {
+		t.Fatalf("reopened children=%d err=%v", len(record.Children), err)
+	}
+}
+
 func TestPublishDirectoriesCancelsDuringParentIndex(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1529,6 +1675,7 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 	count := publicationTestLimit(t, "VAULTICDB_TEST_PUBLICATION_INODES", 32, 1024)
 	contentCount := publicationTestLimit(t, "VAULTICDB_TEST_PUBLICATION_CONTENT_IDS", 1, 1024)
 	streams := publicationTestLimit(t, "VAULTICDB_TEST_PUBLICATION_STREAMS", 1, 4)
+	flushIntervalMS := publicationTestLimit(t, "VAULTICDB_TEST_PUBLICATION_FLUSH_MS", 100, 1000)
 	if count%(publicationConcurrency*streams) != 0 {
 		t.Fatal("publication inode count must be divisible by group size times stream count")
 	}
@@ -1557,7 +1704,7 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 				t.Cleanup(func() { _ = os.RemoveAll(socketDirectory) })
 				options := daemon.Options{
 					Socket: filepath.Join(socketDirectory, "daemon.sock"), RepositoryID: "publication-attribution",
-					DaemonPath: reconciliationDaemonBinary(t), DataDir: dataDirectory, WALFlushInterval: 100 * time.Millisecond,
+					DaemonPath: reconciliationDaemonBinary(t), DataDir: dataDirectory, WALFlushInterval: time.Duration(flushIntervalMS) * time.Millisecond,
 				}
 				client, err := daemon.Ensure(ctx, options)
 				if err != nil {
@@ -1570,7 +1717,7 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 					options: Options{AtomicInodePublication: mode == "atomic", AtomicPublicationGroups: mode == "atomic-group"},
 				}
 				before, err := client.WriterStatus(ctx)
-				if err != nil || before.EngineFlushIntervalMS != 100 {
+				if err != nil || before.EngineFlushIntervalMS != uint64(flushIntervalMS) {
 					t.Fatalf("initial writer status=%+v err=%v", before, err)
 				}
 				batch := publicationTestBatch(0, count)
