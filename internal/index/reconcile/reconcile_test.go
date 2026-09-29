@@ -464,6 +464,21 @@ func (store *fakeStore) ResolveCrawlDebt(_ context.Context, keys [][]byte) error
 	return nil
 }
 
+func TestReconciliationFailureCancellationAccounting(t *testing.T) {
+	reconciler := &Reconciler{ctx: context.Background(), debtByPath: make(map[string][][]byte)}
+	for _, err := range []error{
+		fmt.Errorf("wrapped: %w", context.Canceled),
+		status.Error(codes.Canceled, "RPC canceled"),
+		fmt.Errorf("lookup failed"),
+	} {
+		reconciler.fail("/file", err)
+	}
+	metrics := reconciler.Metrics()
+	if metrics.Failed != 3 || metrics.FailedCanceled != 2 || len(reconciler.errors) != 3 {
+		t.Fatalf("failure accounting: metrics=%+v errors=%v", metrics, reconciler.errors)
+	}
+}
+
 func TestImportedFileBecomesVerifiedAndThenReuses(t *testing.T) {
 	ctx := context.Background()
 	store := newFakeStore()

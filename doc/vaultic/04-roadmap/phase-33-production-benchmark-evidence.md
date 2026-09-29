@@ -495,6 +495,66 @@ was captured, so precise Rust hot functions and decryption share remain
 unproven. An instrumented daemon profile or controlled metadata-read probe is
 needed before changing source concurrency, cache budgets or durability policy.
 
+## R51/R52 canceled-work attribution and daemon CPU profile (2026-09-29)
+
+`Reconciler.Metrics` now exposes `failed_canceled` as a subset of the unchanged
+`failed` count. Both wrapped Go `context.Canceled` and gRPC `Canceled` are
+classified, while other errors stay outside the subset. The final backup JSON
+retains the counters after reconciler join. Focused reconciliation/backup tests
+passed three race-detector repetitions; `go vet` passed. Private scripts and
+artifacts reside in `db.test/backup-read-profile-20260929-r51-BxcFRr` and
+`db.test/backup-read-profile-20260929-r52-7wope8`. The diagnostic debug CLI
+has SHA256 `ec4e49f837ed2d93f115adbe53de0bd50e1feb4af13109ab7ef2fe2cf169fe82`;
+the production daemon remains SHA256 `1348a1af915cec718cb0f8f461eff9d6a35df5370f13b170ce59b39c832e547a`.
+
+R51 stopped at about 151 seconds and is **rejected**: its harness mistook the
+intentional SIGINT used to finish a 30-second `perf` capture for a profiler
+failure. The profile was intact (12,930 samples, zero lost samples). All 2,655
+reported reconciliation failures were explicitly canceled, with zero other
+failures or Commit attempts. A new private R52 copy accepted the SIGINT only
+when the runner requested it and a nonempty profile was written. The exit
+shape was reproduced offline; 41 analyzer self-tests still reject missing,
+partial or excessive cancellation classification, Commit mismatches and
+terminal publication failures. R51's decision and the prior R50 evidence were
+not rewritten.
+
+R52 passed its **bounded 600-second safety gate**, not full-backup acceptance.
+It ended with wrapper exit 124, no early stop, source or sampler errors, zero
+Commit attempts, zero engine writes or compactions, empty scratch and unchanged
+143 snapshot IDs. At 599 seconds it had processed 49,180 files and
+94,633,561,722 logical source bytes. All 337 failed reconciliations at close
+were classified as canceled; no non-cancellation failure remained. This
+explains the close-time failure category in this new run, but cannot
+retrospectively classify every R50 failure and does not prove the admission
+candidate under production inode-publication load. The daemon stayed
+read-write at PID 1832232/epoch 77 with zero final active work.
+
+R52 source READ calls averaged 0.914 ms service and 0.008 ms queue across
+1,568,172 calls. Metadata size lookups were still single-handle: 120,431 RPCs
+averaged 18.930 ms. The daemon used 4,424.41 CPU seconds (7.36 cores average)
+and reported 558,993 main-store GETs and 1,595,424,624,864 logical delivered
+body bytes, 16.86 times the direct-NFS source READ bytes. The 30-second
+daemon `perf` profile captured 13,027 cycle samples with zero lost samples.
+Flat samples include libc `memmove` 25.56%, AES-GCM assembly 15.75%, kernel
+`rep_movs_alternative` 12.08%, libc `memset` 8.45%, CRC32 5.52%, and SlateDB
+FlatBuffer index creation/verification. Call stacks place copies in
+`EncryptedObjectStore::decrypt_chunks_sync`, `Bytes::copy_from_slice`, and
+local object-store reads; kernel copies include NFS-backed page-cache reads.
+The separate rejected R51 capture shows similar leading symbols. These are
+sample shares, not additive per-request costs or a proof of physical I/O.
+
+Host-wide NFS mountstats for the metadata database mount
+`/ncl1-1-vs-50/fme_dump` changed by 1,715,384,278,177 normal-read bytes but
+only 22,413,312 server-read bytes during R52. These counters include other
+users of the mount and cannot measure server-side disk access. Together with
+the profile they support repeated client-side processing of cached metadata,
+not an NFS source response bottleneck or 1.6 TB of physical network reads.
+SlateDB reported 218,440 point GET keys and 986,130 filter negatives, but
+native engine MultiGet calls remained zero. Before changing cache budgets or
+concurrency, isolate unnecessary SST/object copying and decrypted-range work
+with an offline, representative point-read comparison; a longer separately
+approved run is needed to reach inode Commit and restore acceptance.
+
 ## Isolated empty-debt overhead measurement (2026-09-28)
 
 `BenchmarkProcessEmptyCrawlDebtResolution` compares the unchanged

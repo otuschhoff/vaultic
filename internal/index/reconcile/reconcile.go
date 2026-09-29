@@ -15,6 +15,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/fs"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
@@ -75,6 +78,7 @@ type Metrics struct {
 	Changed                               uint64                         `json:"changed"`
 	Deferred                              uint64                         `json:"deferred"`
 	Failed                                uint64                         `json:"failed"`
+	FailedCanceled                        uint64                         `json:"failed_canceled"`
 	Reconciled                            uint64                         `json:"reconciled"`
 	PublicationGroups                     [publicationConcurrency]uint64 `json:"publication_groups_by_size"`
 	PublicationGroupNS                    uint64                         `json:"publication_group_ns"`
@@ -171,6 +175,7 @@ type Reconciler struct {
 	changed                               atomic.Uint64
 	deferred                              atomic.Uint64
 	failed                                atomic.Uint64
+	failedCanceled                        atomic.Uint64
 	reconciled                            atomic.Uint64
 	publicationGroups                     [publicationConcurrency]atomic.Uint64
 	publicationGroupNS                    atomic.Uint64
@@ -259,7 +264,8 @@ func (reconciler *Reconciler) Close() error {
 func (reconciler *Reconciler) Metrics() Metrics {
 	metrics := Metrics{
 		Scanned: reconciler.scanned.Load(), Reused: reconciler.reused.Load(), Changed: reconciler.changed.Load(),
-		Deferred: reconciler.deferred.Load(), Failed: reconciler.failed.Load(), Reconciled: reconciler.reconciled.Load(),
+		Deferred: reconciler.deferred.Load(), Failed: reconciler.failed.Load(),
+		FailedCanceled: reconciler.failedCanceled.Load(), Reconciled: reconciler.reconciled.Load(),
 		PublicationGroupNS:                    reconciler.publicationGroupNS.Load(),
 		RevisionAllocationCalls:               reconciler.revisionAllocationCalls.Load(),
 		RevisionAllocationFailures:            reconciler.revisionAllocationFailures.Load(),
@@ -1496,6 +1502,9 @@ func (reconciler *Reconciler) release(item *workItem) {
 
 func (reconciler *Reconciler) fail(path string, err error, matchedDebt ...[][]byte) {
 	reconciler.failed.Add(1)
+	if errors.Is(err, context.Canceled) || status.Code(err) == codes.Canceled {
+		reconciler.failedCanceled.Add(1)
+	}
 	debtKeys := reconciler.debtByPath[normalizeSnapshotPath(path)]
 	if len(matchedDebt) > 0 {
 		debtKeys = matchedDebt[0]

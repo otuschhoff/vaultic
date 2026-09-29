@@ -107,7 +107,8 @@ func TestBackupCloseJoinsReconciliationAfterCancellation(t *testing.T) {
 	if err := json.Unmarshal([]byte(term.Output[0]), &record); err != nil {
 		t.Fatal(err)
 	}
-	if record.MessageType != "reconciliation_stats" || record.Metrics != reconciler.Metrics() || record.Failed == 0 {
+	if record.MessageType != "reconciliation_stats" || record.Metrics != reconciler.Metrics() ||
+		record.Failed == 0 || record.FailedCanceled == 0 {
 		t.Fatalf("incomplete final reconciliation stats: %+v", record)
 	}
 }
@@ -117,6 +118,7 @@ func TestBackupReportsReconciliationStats(t *testing.T) {
 	run := &backupRun{term: term, globalOptions: global.Options{JSON: true}}
 	stats := reconcile.Metrics{
 		PublicationGroups: [4]uint64{1, 2, 3, 4}, RevisionAllocationCalls: 7, RevisionAllocationFailures: 1,
+		Failed: 3, FailedCanceled: 2,
 		RevisionAllocationRecoveredAborts: 3, RevisionAllocationTerminalAborts: 2,
 		RevisionAllocationRecoveredRetryCalls: 2, RevisionAllocationTerminalRetryCalls: 1,
 		RevisionsReserved: 20, InodeRevisionsAssigned: 18, RevisionAllocationNS: 100,
