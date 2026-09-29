@@ -555,6 +555,145 @@ concurrency, isolate unnecessary SST/object copying and decrypted-range work
 with an offline, representative point-read comparison; a longer separately
 approved run is needed to reach inode Commit and restore acceptance.
 
+An isolated release-mode probe of the encrypted object-store wrapper used its
+default 256 KiB authenticated chunk size, a warmed header cache, an in-memory
+backing store and 500 sequential reads per stage in each of two runs. Raw
+64-byte and full-chunk ciphertext range fetches took 0.3-0.6 us/read. Direct
+256 KiB authenticated decryption took 70-76 us/read (including output allocation
+or an input copy); decrypting through the crypto executor took 95-99 us/read.
+Complete encrypted point reads took 89-95 us/read for both a 64-byte range and
+a 256 KiB range. This supports full-chunk decryption as the dominant local cost
+of small requests; a copy of the returned 64 bytes is not the leading cost.
+The probe used synthetic data, omitted NFS and SlateDB index/filter work, and
+was removed after measurement. These numbers cannot be scaled to production
+throughput or used to justify a cache, concurrency or crypto change.
+
+A second offline probe reused the persisted-SST scan fixture with 4,096
+one-KiB records, SlateDB's DB cache disabled, and encryption between SlateDB
+and an instrumented in-memory object store. Two release-mode runs returned
+identical records and identical underlying GET counts. A full-prefix scan made
+1,369 GETs with the default transaction scan options, versus 7 with the
+retained stream's existing 1 MiB read-ahead. Mid-scan cursors made 1,028 or
+1,027 default GETs versus 6 streaming GETs; an end cursor made 3 in either
+case. These counts include other object-store reads and are not a per-SST
+physical-byte or latency comparison. The encrypted fixture change was removed
+after the runs and the original regression test passed. This confirms a large
+fetch-count reduction in that local SST-backed workload, but the retained
+production stream already enables 1 MiB read-ahead. It does not explain all
+of R52's read-side CPU or prove a faster production backup. A next bounded
+offline check should target repeated accesses within the same encrypted chunk
+on a non-streaming point-read path, with cache and read-ahead held explicit.
+
+That offline follow-up compared 16 distinct 64-byte ranges within one 256 KiB
+chunk: individual encrypted requests took 1,347-1,367 us per group, versus
+85-87 us when one full-chunk request supplied all 16 slices. An encrypted
+SlateDB SST fixture with 4,096 one-KiB records then compared 16 nearby key
+lookups against native MultiGet. With the DB cache disabled, individual
+lookups made 53-54 underlying GETs and delivered about 11.4 MB of logical
+body data versus 3 GETs and 0.63 MB for MultiGet. With normal caching, a
+freshly written fixture made no GETs at all; after reopening separately for
+each cold case, individual gets made 8-9 GETs and about 1.94 MB versus 3 GETs
+and 0.63 MB for native MultiGet. Both cold orders returned identical values.
+All probes used an in-memory object store and synthetic data, were removed,
+and the original encryption-range and native MultiGet regressions passed.
+These results establish a local repeated-read opportunity, not a production
+throughput benefit: R52 size RPCs were still single-handle, and prior R43
+cross-caller batching lowered RPC count without improving progress and had
+unclassified Commit failures. Do not enable native MultiGet, introduce a
+shared decrypted-chunk cache or change production budgets on this evidence.
+The R52 bounded-timeout analyzer's 41 offline self-tests and focused Go
+reconciliation cancellation/publication tests pass. A run that reaches inode
+Commit still needs exact client/daemon outcome attribution and a separate
+completion-plus-restore gate; neither is established by these offline probes.
+
+Read-only preflight on 2026-09-29 confirmed the deployed daemon PID 1832232,
+SHA256 `1348a1af915cec718cb0f8f461eff9d6a35df5370f13b170ce59b39c832e547a`,
+active `vaulticdb-rustic.service`, read-write epoch 77, zero active transactions,
+write intents and Commit attempts, and the same 143 snapshot IDs as R52. The
+isolated Rust publication-reservation lifecycle regression also passed. The
+root filesystem remains full; build/temp space must stay on `/run` and new
+trial artifacts on the HDD-NFS test mount. There is no demonstrated runtime
+read-path change to deploy, and another 600-second run would not by itself
+test publication. A longer publication-reaching run is a separate decision:
+first specify its duration, cleanup grace, resource and failure budgets,
+exact client/daemon Commit accounting and snapshot/restore gates. Do not
+interpret the clean idle preflight as completed-backup authorization.
+
+## R53 capped publication trial (2026-09-29)
+
+The approved single production trial used a private R52-derived harness at
+`/volume2/NASDA2/rustic/db.test/backup-publication-20260929-r53-cap1200`.
+Only the cap changed to 1,200 seconds with 45 seconds of kill grace; the
+64-Commit-failure live stop budget, cancellation/timeout stops, exact identity
+and writer checks, and source/cleanup gates remained. Its analyzer added a
+requirement for both Commit attempts and inode-publication calls, passed 44
+synthetic self-tests, and does not accept early completion without a separate
+restore. Read-only preflight passed with the same 52 sources, daemon PID
+1832232/epoch 77, binary and CLI hashes, settings and 143 snapshots. Neither
+the production daemon nor its configuration was changed.
+
+The wrapper ended at 1,200.847 seconds with exit 124 and no early safety stop.
+At 1,199 seconds the CLI reported 106,466 files and 182,615,550,928 logical
+source bytes. Unlike R52, this run reached 6,128 inode-publication calls and
+8,152 daemon Commit attempts; all 8,152 settled as successes, with zero daemon
+failures, cancellations and timeouts. The daemon recorded 30,576 engine
+writes, 1,227,552 main-store GETs and 3,167,796,256,106 logical delivered
+body bytes. The latter is **not** physical disk or network traffic. The CLI
+reported zero source errors and 40,704 failed reconciliations, all explicitly
+classified as canceled at shutdown. Scratch drained, the writer remained
+read-write and idle, and live rechecks found the same 143 snapshot IDs.
+
+**R53 is rejected by its predeclared publication safety gate.** The final
+client Commit ledger reports 8,152 attempts but 8,151 successes and one
+`Canceled` response while the daemon reports 8,152 successes. The reconciler
+also reports one revision-allocation failure. A canceled client response can
+precede successful detached daemon Commit finalization, as covered by an
+existing isolated ordering test, but these aggregate counters cannot prove
+the affected logical publication was recovered. The CLI also exited with a
+context-canceled metadata-admission error at the cap. No new snapshot was
+published, so no representative-file restore was possible. Do not waive the
+client/daemon mismatch, infer full-backup success, or start another live run
+under this gate. First establish an offline-tested shutdown/finalization
+criterion that distinguishes pre-dispatch cancellation from an accepted
+Commit and links any uncertain outcome to its logical publication.
+
+### R53 shutdown follow-up (offline only)
+
+Schema-store revision reservation and reconciled-revision publication now check
+caller cancellation before dispatching a prepared Commit, then allow an
+already-dispatched Commit up to the existing independent 10-second RPC deadline
+to return its actual result. This covers ordinary inode publication as used in
+R53, allocated publication, publication groups and revision blocks. It does
+not blindly retry an uncertain Commit or extend the daemon's lifetime. A
+Commit with no acknowledged response by that deadline remains unresolved and
+must still fail the client/daemon parity gate.
+
+The reconciler now reports canceled revision-allocation failures separately as
+a subset of total allocation failures; it does not erase or reclassify the
+total. Wrapped Go cancellation and gRPC `Canceled` are both counted. The backup
+JSON test checks that the subset is present in final telemetry. An isolated
+response-delivery barrier test cancels the caller after the daemon accepts a
+Commit and before its response is released, then verifies a successful client
+result, exact client/daemon Commit counters, no leaked writer state, and the
+published revision. It passes three race-detector repetitions for ordinary
+publication, allocated publication and revision-block allocation. Existing
+crash-recovery tests also pass with withheld responses and a killed daemon;
+the independent deadline remains 10 seconds, not an unbounded drain.
+
+Full race suites for `internal/index/daemon`, `internal/index/reconcile` and
+`cmd/vaultic/backupcmd` pass, as do targeted `go vet` and `git diff --check`.
+The private prospective R54 analyzer at
+`/volume2/NASDA2/rustic/db.test/backup-publication-20260929-r54-prospective`
+passes 49 synthetic self-tests. Its timeout exception allows only the
+canceled-allocation subset while continuing to reject any client/daemon
+Commit mismatch. An uninstalled CLI candidate was built in that private
+directory as `vaultic-candidate`, SHA256
+`d2b06c2320dc427d1da6a08ae7fe744751053be4644907aaf293d61c59c4451b`.
+R53 remains rejected; none of these offline checks proves
+that the next production run will publish a snapshot or satisfy a restore
+gate. No new live backup, daemon restart, installation or production setting
+change was made in this follow-up.
+
 ## Isolated empty-debt overhead measurement (2026-09-28)
 
 `BenchmarkProcessEmptyCrawlDebtResolution` compares the unchanged

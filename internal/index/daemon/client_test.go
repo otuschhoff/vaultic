@@ -870,6 +870,114 @@ func TestSchemaStoreAllocatedPublicationSingleCommit(t *testing.T) {
 	}
 }
 
+func TestSchemaStorePreparedCommitDrainsCallerCancellation(t *testing.T) {
+	for _, mode := range []string{"allocation", "ordinary-publication", "allocated-publication"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			committed := make(chan struct{}, 1)
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			defer unblock()
+			client, err := Ensure(ctx, Options{
+				Socket: testSocket(t), RepositoryID: "prepared-commit-drain", DaemonPath: daemonBinary(t), DataDir: t.TempDir(),
+				ResponseDeliveryForTesting: func(responseCtx context.Context, method string) error {
+					if method != "/vaulticdb.v1.VaulticDB/Commit" {
+						return nil
+					}
+					committed <- struct{}{}
+					select {
+					case <-release:
+						return nil
+					case <-responseCtx.Done():
+						return responseCtx.Err()
+					}
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close(context.Background())
+			store := NewSchemaStore(client)
+			before, err := client.WriterStatus(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			canceledCtx, cancelBeforeDispatch := context.WithCancel(ctx)
+			cancelBeforeDispatch()
+			if _, err := store.AllocateRevisionBlock(canceledCtx, 1); status.Code(err) != codes.Canceled && !errors.Is(err, context.Canceled) {
+				t.Fatalf("pre-dispatch cancellation: %v", err)
+			}
+			beforeCanceled, err := client.WriterStatus(ctx)
+			if err != nil || beforeCanceled.Attribution.CommitRequest.Attempts != before.Attribution.CommitRequest.Attempts {
+				t.Fatalf("pre-dispatch cancellation attempted Commit: status=%+v err=%v", beforeCanceled, err)
+			}
+			workCtx, cancelWork := context.WithCancel(ctx)
+			defer cancelWork()
+			type result struct {
+				revision uint64
+				err      error
+			}
+			done := make(chan result, 1)
+			value := encodeSchemaRecord(t, schema.InodeRevision{ParentInode: 7, Known: schema.KnownParent, Freshness: schema.FreshnessVerified})
+			go func() {
+				switch mode {
+				case "allocated-publication":
+					revision, err := store.PublishAllocatedReconciledRevision(workCtx, func(revision uint64) (ReconciledRevision, error) {
+						return ReconciledRevision{
+							CurrentKey: schema.CurrentInodeKey(3, 10), RevisionKey: schema.InodeRevisionKey(3, 10, revision),
+							RevisionValue: value, Revision: revision,
+						}, nil
+					})
+					done <- result{revision, err}
+				case "ordinary-publication":
+					_, _, err := store.PublishReconciledRevisionWithRetryDetails(workCtx, ReconciledRevision{
+						CurrentKey: schema.CurrentInodeKey(3, 10), RevisionKey: schema.InodeRevisionKey(3, 10, 1),
+						RevisionValue: value, Revision: 1,
+					})
+					done <- result{1, err}
+				default:
+					revision, err := store.AllocateRevisionBlock(workCtx, 4)
+					done <- result{revision, err}
+				}
+			}()
+			select {
+			case <-committed:
+			case <-ctx.Done():
+				t.Fatal("commit response did not reach delivery barrier")
+			}
+			cancelWork()
+			select {
+			case outcome := <-done:
+				t.Fatalf("commit returned before response release: %+v", outcome)
+			default:
+			}
+			unblock()
+			select {
+			case outcome := <-done:
+				if outcome.err != nil || outcome.revision != 1 {
+					t.Fatalf("drained commit: %+v", outcome)
+				}
+			case <-ctx.Done():
+				t.Fatal("prepared commit did not drain")
+			}
+			after, err := client.WriterStatus(ctx)
+			if err != nil || after.Attribution.CommitRequest.Attempts-before.Attribution.CommitRequest.Attempts != 1 ||
+				after.Attribution.CommitRequest.Successes-before.Attribution.CommitRequest.Successes != 1 ||
+				client.CommitRPCStats().Cancellations != 0 || after.ActiveTransactions != 0 || after.ActiveWriteIntents != 0 {
+				t.Fatalf("drained commit status=%+v client=%+v err=%v", after, client.CommitRPCStats(), err)
+			}
+			if mode != "allocation" {
+				stored, found, err := store.Get(ctx, schema.InodeRevisionKey(3, 10, 1))
+				if err != nil || !found || !bytes.Equal(stored, value) {
+					t.Fatalf("published revision found=%t err=%v", found, err)
+				}
+			}
+		})
+	}
+}
+
 func TestSchemaStoreAllocatedPublicationRejectsInvalidRequests(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

@@ -479,6 +479,22 @@ func TestReconciliationFailureCancellationAccounting(t *testing.T) {
 	}
 }
 
+func TestRevisionAllocationFailureCancellationAccounting(t *testing.T) {
+	reconciler := &Reconciler{}
+	for _, err := range []error{
+		fmt.Errorf("wrapped: %w", context.Canceled),
+		status.Error(codes.Canceled, "RPC canceled"),
+		fmt.Errorf("allocation failed"),
+	} {
+		reconciler.recordRevisionAllocation(time.Now(), 1, 0, err)
+	}
+	metrics := reconciler.Metrics()
+	if metrics.RevisionAllocationCalls != 3 || metrics.RevisionAllocationFailures != 3 ||
+		metrics.RevisionAllocationFailedCanceled != 2 {
+		t.Fatalf("revision allocation failure accounting: %+v", metrics)
+	}
+}
+
 func TestImportedFileBecomesVerifiedAndThenReuses(t *testing.T) {
 	ctx := context.Background()
 	store := newFakeStore()

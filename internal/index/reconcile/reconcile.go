@@ -84,6 +84,7 @@ type Metrics struct {
 	PublicationGroupNS                    uint64                         `json:"publication_group_ns"`
 	RevisionAllocationCalls               uint64                         `json:"revision_allocation_calls"`
 	RevisionAllocationFailures            uint64                         `json:"revision_allocation_failures"`
+	RevisionAllocationFailedCanceled      uint64                         `json:"revision_allocation_failed_canceled"`
 	RevisionAllocationRecoveredAborts     uint64                         `json:"revision_allocation_recovered_aborts"`
 	RevisionAllocationTerminalAborts      uint64                         `json:"revision_allocation_terminal_aborts"`
 	RevisionAllocationRecoveredRetryCalls uint64                         `json:"revision_allocation_recovered_retry_calls"`
@@ -181,6 +182,7 @@ type Reconciler struct {
 	publicationGroupNS                    atomic.Uint64
 	revisionAllocationCalls               atomic.Uint64
 	revisionAllocationFailures            atomic.Uint64
+	revisionAllocationFailedCanceled      atomic.Uint64
 	revisionAllocationRecoveredAborts     atomic.Uint64
 	revisionAllocationTerminalAborts      atomic.Uint64
 	revisionAllocationRecoveredRetryCalls atomic.Uint64
@@ -269,6 +271,7 @@ func (reconciler *Reconciler) Metrics() Metrics {
 		PublicationGroupNS:                    reconciler.publicationGroupNS.Load(),
 		RevisionAllocationCalls:               reconciler.revisionAllocationCalls.Load(),
 		RevisionAllocationFailures:            reconciler.revisionAllocationFailures.Load(),
+		RevisionAllocationFailedCanceled:      reconciler.revisionAllocationFailedCanceled.Load(),
 		RevisionAllocationRecoveredAborts:     reconciler.revisionAllocationRecoveredAborts.Load(),
 		RevisionAllocationTerminalAborts:      reconciler.revisionAllocationTerminalAborts.Load(),
 		RevisionAllocationRecoveredRetryCalls: reconciler.revisionAllocationRecoveredRetryCalls.Load(),
@@ -906,6 +909,9 @@ func (reconciler *Reconciler) recordRevisionAllocation(started time.Time, count,
 	reconciler.revisionAllocationNS.Add(uint64(time.Since(started)))
 	if err != nil {
 		reconciler.revisionAllocationFailures.Add(1)
+		if errors.Is(err, context.Canceled) || status.Code(err) == codes.Canceled {
+			reconciler.revisionAllocationFailedCanceled.Add(1)
+		}
 		reconciler.revisionAllocationTerminalAborts.Add(aborted)
 		if aborted > 0 {
 			reconciler.revisionAllocationTerminalRetryCalls.Add(1)
