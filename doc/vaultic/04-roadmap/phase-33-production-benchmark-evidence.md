@@ -1,5 +1,97 @@
 # Phase 33 Production Benchmark Evidence
 
+## Offline roadmap gates after writer recovery (2026-09-30)
+
+No production trial, deployment, configuration change, or production snapshot
+was performed. The recovered writer stayed at PID 717448, epoch 92; its
+installed daemon SHA256 is
+`1348a1af915cec718cb0f8f461eff9d6a35df5370f13b170ce59b39c832e547a`.
+Build targets, Go caches, and test sockets were on RAM-backed `/run`, not the
+slow VM vDisk. Disposable publication and allocated-publication crash databases
+were outside the live database, on the same NFS metadata mount.
+
+Raw output is retained under
+`/volume2/NASDA2/rustic/db.test/offline-durability-20260930-qB8sIO`.
+The isolated debug crash-test daemon used `test-failpoints`, SHA256
+`95644ce1413ffbaf23ce6c5dbafb36a83d6815ba705d217198c2f7740e4fe22b`.
+The installed release daemon does not activate these test barriers and cannot
+substitute for that binary. Publication measurements used the unchanged release
+daemon, not the debug build.
+
+### Scheduling and per-group attribution
+
+Two repetitions per mode/interval used 64 inodes, each with 64 shared content
+IDs, in one stream with four records per group. Timers excluded startup, reuse,
+snapshot construction, reopen validation, and shutdown.
+
+| Flush interval | Ordinary grouped seconds | Atomic-group seconds | Successful Commits, grouped / atomic | WAL PUT attempts, grouped / atomic |
+| --- | --- | --- | --- | --- |
+| 100 ms | 4.834-4.839 | 3.023-3.223 | 80 / 16 | 96 / 32 |
+| 25 ms | 2.826-2.920 | 2.119-2.226 | 80 / 16 | 160 / 32 |
+| 10 ms | 2.718-2.736 | 2.046-2.159 | 80 / 16 | 160 / 32 |
+
+All these runs had zero failed, canceled, or timed-out Commits and idle writer
+cleanup. Grouped daemon CPU was 1.37-1.48 s, 1.45-1.50 s, and 1.57-1.62 s,
+respectively; atomic-group CPU was 1.01-1.09 s, 1.12-1.19 s, and 1.16-1.28 s.
+End-of-measurement RSS was about 22-26 MiB, not a peak-memory measurement.
+Shorter cadence increased ordinary grouped WAL activity; 10 ms gave relatively
+little further wall-time benefit over 25 ms.
+
+The existing attribution fixture now accepts
+`VAULTICDB_TEST_PUBLICATION_PROGRESS=1` for single-stream per-group traces.
+It records existing-record lookup, revision reservation, planning, Commit,
+worker-join wait, group wall time, queued fixture inodes, groups remaining, and
+changed/reused counts. Planning/Commit histograms reuse bounded, thread-safe
+duration buckets. Commit timing includes separate revision-reservation Commits.
+Allocation timing includes its Commit and worker-join wait overlaps worker
+execution; these counters must not be added as disjoint wall-time phases.
+
+In `stages-nfs-25ms.txt`, mean grouped group wall time was 180.63 ms, allocation
+24.99 ms, existing-record lookup 3.75 ms, summed planning 111.49 ms, and summed
+Commit 98.18 ms. Atomic groups averaged 129.02 ms wall time, 1.35 ms existing
+lookup, 95.92 ms planning, and 19.38 ms Commit. Both backlogs drained from 64
+inodes to zero. Reuse groups recorded no allocation, planning, or Commit work.
+This is a fixed synthetic backlog, not evidence about production queue growth
+or encrypted reads over the complete imported metadata keyspace.
+
+### Correctness and contention
+
+`VAULTICDB_TEST_DURABILITY_FLUSH_MS` now controls existing test fixtures without
+changing their defaults. Crash-before-apply, applied-withheld-response,
+before/after durable fence, final-publication restart, accepted-Commit
+cancellation ordering, canceled-before-dispatch rollback, and lost-response
+recovery passed at 100, 25, and 10 ms. Allocated single/group publication also
+passed intervening-fence retries, cancellation, and buffered/durable/acknowledged
+crash/reopen checks at every interval. Focused race checks passed shared-content
+read-your-writes, bounded-input/partial-publication rejection, and mixed reuse
+and failure cases.
+
+The attribution fixture now builds and reopens an immutable snapshot root.
+Canonical logical root and inode metadata bytes agree across scalar, ordinary
+grouped, individually atomic, and atomic-group modes for shared and nonshared
+content. Revision-key identities are excluded from this logical comparison.
+This is metadata-tree equivalence, not a production snapshot/restore acceptance.
+
+The four-stream, 256-inode shared-content check at 25 ms rejected broad atomic
+group adoption: ordinary grouping took 8.864 s with 320 successful and 6 failed
+Commits; atomic grouping took 10.560 s with 64 successful and 139 failed Commits.
+Retries recovered, both writers settled idle, and logical snapshot hashes
+matched, but atomic-group daemon CPU rose from 6.17 s to 17.64 s. A smaller
+nonshared-content fixture also favored ordinary grouping. Fewer durable
+transactions alone are not a throughput win under allocation contention.
+
+### Decision
+
+Keep ordinary grouped publication and the production 100 ms interval unchanged.
+25 ms is an offline scheduling candidate that passed the tested correctness
+gates, not a remedy for R62's blob-admission deadline. These small sequential
+fixtures do not establish production read-tail behavior or a safe trial cap.
+A separately approved matched trial still needs pinned identities, exact
+client/daemon Commit parity, measured live backlog/rate, exit 0, exactly one new
+snapshot, and representative byte-for-byte restores. No new trial is authorized
+by this offline work, and neither a longer cap nor these metadata fixtures
+substitutes for those acceptance gates.
+
 ## Offline blob-size read-path discrimination (2026-09-28)
 
 The NFS error-class attribution below was committed locally as

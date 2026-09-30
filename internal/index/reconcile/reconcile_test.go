@@ -1676,10 +1676,15 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 	contentCount := publicationTestLimit(t, "VAULTICDB_TEST_PUBLICATION_CONTENT_IDS", 1, 1024)
 	streams := publicationTestLimit(t, "VAULTICDB_TEST_PUBLICATION_STREAMS", 1, 4)
 	flushIntervalMS := publicationTestLimit(t, "VAULTICDB_TEST_PUBLICATION_FLUSH_MS", 100, 1000)
+	traceGroups := os.Getenv("VAULTICDB_TEST_PUBLICATION_PROGRESS") == "1"
+	if traceGroups && streams != 1 {
+		t.Fatal("per-group stage attribution requires one stream")
+	}
 	if count%(publicationConcurrency*streams) != 0 {
 		t.Fatal("publication inode count must be divisible by group size times stream count")
 	}
 	for _, shared := range []bool{false, true} {
+		var expectedSnapshot []byte
 		for _, mode := range []string{"scalar", "grouped", "atomic", "atomic-group"} {
 			groupSize := publicationConcurrency
 			if mode == "scalar" {
@@ -1741,11 +1746,34 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 					publications[stream] = make(map[string]publishedItem)
 				}
 				publish := func() {
+					passStarted := time.Now()
 					var workers sync.WaitGroup
 					for stream := range streams {
 						workers.Go(func() {
 							for offset := stream * count / streams; offset < (stream+1)*count/streams; offset += groupSize {
+								var prior Metrics
+								var priorStages daemon.PublicationMetrics
+								if traceGroups {
+									prior = reconcilers[stream].Metrics()
+									priorStages = store.PublicationMetrics()
+								}
+								groupStarted := time.Now()
 								reconcilers[stream].publishInodes(batch[offset:offset+groupSize], publications[stream])
+								if traceGroups {
+									latest := reconcilers[stream].Metrics()
+									stages := store.PublicationMetrics()
+									remaining := (stream+1)*count/streams - offset - groupSize
+									t.Logf("group_progress stream=%d elapsed_ns=%d group_ns=%d allocation_ns=%d publication_ns=%d atomic_group_ns=%d "+
+										"existing_record_lookup_ns=%d worker_join_wait_ns=%d planning_ns=%d publication_commit_ns=%d planning_calls=%d publication_commit_calls=%d "+
+										"fixture_queued_inodes=%d stream_groups_remaining=%d changed=%d reused=%d",
+										stream, time.Since(passStarted).Nanoseconds(), time.Since(groupStarted).Nanoseconds(),
+										latest.RevisionAllocationNS-prior.RevisionAllocationNS, latest.InodePublicationNS-prior.InodePublicationNS,
+										latest.AtomicGroupNS-prior.AtomicGroupNS, latest.ExistingRecordLookupNS-prior.ExistingRecordLookupNS,
+										latest.PublicationWorkerWaitNS-prior.PublicationWorkerWaitNS, stages.Planning.Sum-priorStages.Planning.Sum,
+										stages.Commit.Sum-priorStages.Commit.Sum, stages.Planning.Count-priorStages.Planning.Count,
+										stages.Commit.Count-priorStages.Commit.Count, remaining, remaining/groupSize,
+										latest.Changed-prior.Changed, latest.Reused-prior.Reused)
+								}
 							}
 						})
 					}
@@ -1842,6 +1870,10 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 					t.Fatalf("debt-free reuse performed transaction work: before=%+v after=%+v",
 						after.Attribution.CommitRequest, afterReuse.Attribution.CommitRequest)
 				}
+				if err := reconcilers[0].publishSnapshotRoot(published); err != nil {
+					t.Fatal(err)
+				}
+				rootKey := reconcilers[0].RootKey()
 				if err := client.Close(ctx); err != nil {
 					t.Fatal(err)
 				}
@@ -1852,6 +1884,40 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 				defer reopened.Close(context.Background())
 				store = daemon.NewSchemaStore(reopened)
 				reader := &Reconciler{ctx: ctx, store: store}
+				rootValue, rootFound, err := store.Get(ctx, rootKey)
+				if err != nil || !rootFound {
+					t.Fatalf("reopened snapshot root: found=%t err=%v", rootFound, err)
+				}
+				rootRecord, err := schema.UnmarshalDirectoryRevision(rootValue)
+				if err != nil || len(rootRecord.Children) != count {
+					t.Fatalf("reopened snapshot children=%d want=%d err=%v", len(rootRecord.Children), count, err)
+				}
+				canonical := struct {
+					Root    schema.DirectoryRevision
+					Records [][]byte
+				}{Root: rootRecord}
+				for childIndex, child := range rootRecord.Children {
+					item, found := published["/root/"+child.Name]
+					if !found || child.Inode != item.identity.inode || child.Type != schema.NodeFile || !bytes.Equal(child.MetadataKey, item.key) {
+						t.Fatalf("unexpected snapshot child=%+v", child)
+					}
+					value, found, err := store.Get(ctx, child.MetadataKey)
+					if err != nil || !found {
+						t.Fatalf("snapshot child metadata: found=%t err=%v", found, err)
+					}
+					canonical.Records = append(canonical.Records, value)
+					canonical.Root.Children[childIndex].MetadataKey = nil
+				}
+				canonicalBytes, err := json.Marshal(canonical)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if expectedSnapshot == nil {
+					expectedSnapshot = canonicalBytes
+				} else if !bytes.Equal(expectedSnapshot, canonicalBytes) {
+					t.Fatal("publication modes produced different logical snapshot roots or inode metadata")
+				}
+				t.Logf("logical_snapshot_sha256=%x", sha256.Sum256(canonicalBytes))
 				for _, item := range batch {
 					value, found, err := store.Get(ctx, schema.CurrentInodeKey(item.identity.fsid, item.identity.inode))
 					if err != nil || !found {
@@ -1911,7 +1977,7 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 						}
 					}
 				}
-				if next, err := store.AllocateRevision(ctx); err != nil || next != uint64(count+1) {
+				if next, err := store.AllocateRevision(ctx); err != nil || next != uint64(count+2) {
 					t.Fatalf("reopened next revision=%d err=%v", next, err)
 				}
 				if os.Getenv("VAULTICDB_TEST_PUBLICATION_ADMISSION") == "1" && shared && mode == "grouped" &&

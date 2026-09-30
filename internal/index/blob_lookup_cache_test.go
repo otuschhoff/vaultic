@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -97,6 +98,30 @@ func (session *testBlobLookupSession) Context() context.Context { return session
 
 func (session *testBlobLookupSession) LookupBlobSizesContext(ctx context.Context, handles []vaultic.BlobHandle) ([]vaultic.BlobSize, error) {
 	return session.query(ctx, handles)
+}
+
+func TestCachedBlobLookupRPCDeadlineAttribution(t *testing.T) {
+	session := &testBlobLookupSession{ctx: t.Context(), query: func(context.Context, []vaultic.BlobHandle) ([]vaultic.BlobSize, error) {
+		return nil, context.DeadlineExceeded
+	}}
+	local := NewLegacyEngine()
+	lookup, err := NewCachedBlobLookup(session, local, blobLookupCacheEntryBytes, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lookup.Close()
+	handle := vaultic.NewRandomBlobHandle()
+	added, err := lookup.AddPendingContext(t.Context(), handle, 99)
+	if added || !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "blob size lookup RPC for 1 handles after ") {
+		t.Fatalf("admission added=%v error=%v", added, err)
+	}
+	local.AddPending(handle, 99)
+	if _, _, subsequent := lookup.LookupSizeContext(t.Context(), handle); subsequent != err {
+		t.Fatalf("shared failure lost attribution: first=%v subsequent=%v", err, subsequent)
+	}
+	if stats := lookup.Stats(); stats.SizeRPCs != 1 || stats.NegativeHits != 0 {
+		t.Fatalf("failed RPC retried or cached as missing: %+v", stats)
+	}
 }
 
 func TestCachedBlobLookupStats(t *testing.T) {

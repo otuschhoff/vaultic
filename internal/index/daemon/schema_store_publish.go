@@ -37,7 +37,9 @@ type reconciledRevisionPlan struct {
 	newUnique  []schema.ID
 }
 
-func commitPreparedPublication(ctx context.Context, transaction *Transaction) error {
+func (store *SchemaStore) commitPreparedPublication(ctx context.Context, transaction *Transaction) error {
+	started := time.Now()
+	defer func() { store.publicationCommit.observe(time.Since(started)) }()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -60,7 +62,9 @@ func (store *SchemaStore) publishReconciledRevisionOnce(ctx context.Context, rec
 		rollbackTransaction(ctx, transaction)
 		return err, false
 	}
+	planningStarted := time.Now()
 	plan, noop, err := store.planReconciledRevision(ctx, transaction, input)
+	store.publicationPlanning.observe(time.Since(planningStarted))
 	if err != nil {
 		return fail(err)
 	}
@@ -70,7 +74,7 @@ func (store *SchemaStore) publishReconciledRevisionOnce(ctx context.Context, rec
 	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), sortedReconciledMutations(plan), nil); err != nil {
 		return fail(err)
 	}
-	if err := commitPreparedPublication(ctx, transaction); err != nil {
+	if err := store.commitPreparedPublication(ctx, transaction); err != nil {
 		rollbackTransaction(ctx, transaction)
 		return err, true
 	}
@@ -137,7 +141,9 @@ func (store *SchemaStore) publishAllocatedReconciledRevisionOnce(
 	if err != nil {
 		return 0, err
 	}
+	planningStarted := time.Now()
 	plan, noop, err := store.planReconciledRevision(ctx, transaction, input)
+	store.publicationPlanning.observe(time.Since(planningStarted))
 	if err != nil {
 		return 0, err
 	}
@@ -155,7 +161,7 @@ func (store *SchemaStore) publishAllocatedReconciledRevisionOnce(
 	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), sortedReconciledMutations(plan), nil); err != nil {
 		return 0, err
 	}
-	if err := commitPreparedPublication(ctx, transaction); err != nil {
+	if err := store.commitPreparedPublication(ctx, transaction); err != nil {
 		return 0, err
 	}
 	return revision, nil
@@ -223,7 +229,9 @@ func (store *SchemaStore) publishAllocatedReconciledRevisionGroupOnce(
 		if err != nil {
 			return 0, err
 		}
+		planningStarted := time.Now()
 		plan, noop, err := store.planReconciledRevision(ctx, transaction, input)
+		store.publicationPlanning.observe(time.Since(planningStarted))
 		if err != nil {
 			return 0, err
 		}
@@ -244,7 +252,7 @@ func (store *SchemaStore) publishAllocatedReconciledRevisionGroupOnce(
 	if err := transaction.WriteBatch(ctx, []Mutation{{Key: counterKey, Value: encodedNext}}, nil); err != nil {
 		return 0, err
 	}
-	if err := commitPreparedPublication(ctx, transaction); err != nil {
+	if err := store.commitPreparedPublication(ctx, transaction); err != nil {
 		return 0, err
 	}
 	return first, nil
@@ -924,7 +932,7 @@ func (store *SchemaStore) AllocateRevisionBlockWithRetryCount(ctx context.Contex
 			rollbackTransaction(ctx, transaction)
 			return 0, aborted, err
 		}
-		if err := commitPreparedPublication(ctx, transaction); err != nil {
+		if err := store.commitPreparedPublication(ctx, transaction); err != nil {
 			rollbackTransaction(ctx, transaction)
 			if status.Code(err) == codes.Aborted {
 				aborted++

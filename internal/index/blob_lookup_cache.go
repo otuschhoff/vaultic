@@ -424,7 +424,11 @@ func (lookup *CachedBlobLookup) fetch(handles []vaultic.BlobHandle, batch *blobL
 	lookup.stats.sizeRPCs.Add(1)
 	lookup.stats.sizeHandles.Add(uint64(len(handles)))
 	sizes, err := lookup.session.LookupBlobSizesContext(lookup.ctx, handles)
-	lookup.stats.sizeRPCNanoseconds.Add(uint64(time.Since(started)))
+	elapsed := time.Since(started)
+	lookup.stats.sizeRPCNanoseconds.Add(uint64(elapsed))
+	if err != nil {
+		err = fmt.Errorf("blob size lookup RPC for %d handles after %s: %w", len(handles), elapsed, err)
+	}
 	if err == nil && len(sizes) != len(handles) {
 		err = fmt.Errorf("blob lookup returned %d results for %d handles", len(sizes), len(handles))
 	}

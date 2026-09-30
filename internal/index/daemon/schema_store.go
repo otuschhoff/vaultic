@@ -118,14 +118,28 @@ func (metrics *legacyOperationMetrics) snapshots() map[string]DurationDistributi
 // SchemaStore applies the Vaultic schema's immutability and revision rules over
 // the bounded daemon client.
 type SchemaStore struct {
-	client             *Client
-	publicationMu      sync.RWMutex
-	legacyImportGate   chan struct{}
-	freshImportSeen    *idSeenFilter
-	legacySplitMu      sync.Mutex
-	legacySplitAuth    map[schema.ID]struct{}
-	legacyMetrics      legacyImportMetrics
-	deferLegacyCleanup bool
+	client              *Client
+	publicationMu       sync.RWMutex
+	publicationPlanning lockedDurationHistogram
+	publicationCommit   lockedDurationHistogram
+	legacyImportGate    chan struct{}
+	freshImportSeen     *idSeenFilter
+	legacySplitMu       sync.Mutex
+	legacySplitAuth     map[schema.ID]struct{}
+	legacyMetrics       legacyImportMetrics
+	deferLegacyCleanup  bool
+}
+
+type PublicationMetrics struct {
+	Planning DurationDistribution
+	Commit   DurationDistribution
+}
+
+func (store *SchemaStore) PublicationMetrics() PublicationMetrics {
+	return PublicationMetrics{
+		Planning: store.publicationPlanning.snapshot(),
+		Commit:   store.publicationCommit.snapshot(),
+	}
 }
 
 type ReadSessionIdentity struct {

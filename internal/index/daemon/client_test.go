@@ -701,6 +701,10 @@ func TestSchemaStoreAllocatedGroupReadYourWrites(t *testing.T) {
 	if err != nil || first != 1 {
 		t.Fatalf("group first=%d err=%v", first, err)
 	}
+	if metrics := store.PublicationMetrics(); metrics.Planning.Count != 4 || metrics.Commit.Count != 1 ||
+		metrics.Planning.Sum <= 0 || metrics.Commit.Sum <= 0 {
+		t.Fatalf("group stage metrics=%+v", metrics)
+	}
 	for _, id := range content {
 		encoded, found, err := store.Get(ctx, schema.ReferenceCountKey(id))
 		if err != nil || !found {
@@ -1047,6 +1051,7 @@ func TestSchemaStoreAllocatedPublicationFenceAndCancellation(t *testing.T) {
 			defer cancel()
 			client, err := Ensure(ctx, Options{
 				Socket: testSocket(t), RepositoryID: "allocated-fence", DaemonPath: daemonBinary(t), DataDir: t.TempDir(),
+				WALFlushInterval: durabilityTestFlushInterval(t, 100*time.Millisecond),
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -1185,7 +1190,7 @@ func TestSchemaStoreAllocatedPublicationCrashRecovery(t *testing.T) {
 			}
 			options := Options{
 				Socket: testSocket(t), RepositoryID: "allocated-crash", DaemonPath: daemonBinary(t),
-				DataDir: dataDirectory, WALFlushInterval: 100 * time.Millisecond,
+				DataDir: dataDirectory, WALFlushInterval: durabilityTestFlushInterval(t, 100*time.Millisecond),
 			}
 			reached := make(chan struct{}, 1)
 			if point.method != "" {

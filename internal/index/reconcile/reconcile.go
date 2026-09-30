@@ -82,6 +82,8 @@ type Metrics struct {
 	Reconciled                            uint64                         `json:"reconciled"`
 	PublicationGroups                     [publicationConcurrency]uint64 `json:"publication_groups_by_size"`
 	PublicationGroupNS                    uint64                         `json:"publication_group_ns"`
+	ExistingRecordLookupNS                uint64                         `json:"existing_record_lookup_ns"`
+	PublicationWorkerWaitNS               uint64                         `json:"publication_worker_wait_ns"`
 	RevisionAllocationCalls               uint64                         `json:"revision_allocation_calls"`
 	RevisionAllocationFailures            uint64                         `json:"revision_allocation_failures"`
 	RevisionAllocationFailedCanceled      uint64                         `json:"revision_allocation_failed_canceled"`
@@ -180,6 +182,8 @@ type Reconciler struct {
 	reconciled                            atomic.Uint64
 	publicationGroups                     [publicationConcurrency]atomic.Uint64
 	publicationGroupNS                    atomic.Uint64
+	existingRecordLookupNS                atomic.Uint64
+	publicationWorkerWaitNS               atomic.Uint64
 	revisionAllocationCalls               atomic.Uint64
 	revisionAllocationFailures            atomic.Uint64
 	revisionAllocationFailedCanceled      atomic.Uint64
@@ -269,6 +273,8 @@ func (reconciler *Reconciler) Metrics() Metrics {
 		Deferred: reconciler.deferred.Load(), Failed: reconciler.failed.Load(),
 		FailedCanceled: reconciler.failedCanceled.Load(), Reconciled: reconciler.reconciled.Load(),
 		PublicationGroupNS:                    reconciler.publicationGroupNS.Load(),
+		ExistingRecordLookupNS:                reconciler.existingRecordLookupNS.Load(),
+		PublicationWorkerWaitNS:               reconciler.publicationWorkerWaitNS.Load(),
 		RevisionAllocationCalls:               reconciler.revisionAllocationCalls.Load(),
 		RevisionAllocationFailures:            reconciler.revisionAllocationFailures.Load(),
 		RevisionAllocationFailedCanceled:      reconciler.revisionAllocationFailedCanceled.Load(),
@@ -776,7 +782,9 @@ func (reconciler *Reconciler) publishInodes(items []preparedItem, published map[
 			results[index].key, results[index].err = reconciler.publishInodeRecordWithAllocator(item, false, allocate)
 		})
 	}
+	waitStarted := time.Now()
 	workers.Wait()
+	reconciler.publicationWorkerWaitNS.Add(uint64(time.Since(waitStarted)))
 	for index, item := range items {
 		if results[index].err != nil {
 			reconciler.fail(item.sourcePath, results[index].err, item.debtKeys)
@@ -880,18 +888,26 @@ func (reconciler *Reconciler) prepareGroupMember(item preparedItem) (daemon.Reco
 		CurrentKey: schema.CurrentInodeKey(item.identity.fsid, item.identity.inode), RevisionValue: value,
 		ContentIDs: content, DebtKeys: item.debtKeys,
 	}
-	values, found, err := reconciler.store.MultiGet(reconciler.ctx, [][]byte{request.CurrentKey})
-	if err != nil {
-		return daemon.ReconciledRevision{}, false, nil, err
-	}
-	if !found[0] {
-		return request, true, nil, nil
-	}
-	key, binding, reused, err := reconciler.reuseExistingRecord(item, values[0].Value, value, false, content, nil)
+	key, binding, reused, err := reconciler.lookupExistingPublicationRecord(item, request.CurrentKey, value, false, content, nil)
 	if !reused {
 		key = nil
 	}
 	return request, binding, key, err
+}
+
+func (reconciler *Reconciler) lookupExistingPublicationRecord(
+	item preparedItem, currentKey, value []byte, directory bool, content []schema.ID, priorContent *[]schema.ID,
+) ([]byte, bool, bool, error) {
+	started := time.Now()
+	defer func() { reconciler.existingRecordLookupNS.Add(uint64(time.Since(started))) }()
+	values, found, err := reconciler.store.MultiGet(reconciler.ctx, [][]byte{currentKey})
+	if err != nil {
+		return nil, false, false, err
+	}
+	if !found[0] {
+		return nil, true, false, nil
+	}
+	return reconciler.reuseExistingRecord(item, values[0].Value, value, directory, content, priorContent)
 }
 
 func (reconciler *Reconciler) allocateRevisionBlock(ctx context.Context, count uint64, fallback func(context.Context, uint64) (uint64, error)) (uint64, uint64, error) {
@@ -1276,25 +1292,17 @@ func (reconciler *Reconciler) publishRecordWithAllocator(
 	if directory {
 		currentKey = schema.CurrentDirectoryKey(item.identity.fsid, item.identity.inode)
 	}
-	values, found, err := reconciler.store.MultiGet(reconciler.ctx, [][]byte{currentKey})
+	var priorContent []schema.ID
+	var priorIDs *[]schema.ID
+	if !directory && !reconciler.options.AtomicInodePublication {
+		priorIDs = &priorContent
+	}
+	reusedKey, writePathBinding, reused, err := reconciler.lookupExistingPublicationRecord(item, currentKey, value, directory, content, priorIDs)
 	if err != nil {
 		return nil, false, err
 	}
-	writePathBinding := !found[0]
-	var priorContent []schema.ID
-	if found[0] {
-		var priorIDs *[]schema.ID
-		if !directory && !reconciler.options.AtomicInodePublication {
-			priorIDs = &priorContent
-		}
-		reusedKey, pathChanged, reused, err := reconciler.reuseExistingRecord(item, values[0].Value, value, directory, content, priorIDs)
-		if err != nil {
-			return nil, false, err
-		}
-		writePathBinding = pathChanged
-		if reused {
-			return reusedKey, true, nil
-		}
+	if reused {
+		return reusedKey, true, nil
 	}
 	if !directory && reconciler.options.AtomicInodePublication {
 		key, err := reconciler.publishAllocatedInodeRecord(item, currentKey, value, content, writePathBinding)

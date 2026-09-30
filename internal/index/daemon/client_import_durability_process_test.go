@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,9 +21,9 @@ import (
 func TestProcessCancelledCommitFinalizationOrdering(t *testing.T) {
 	binary := failureDaemonBinary(t)
 	for _, testCase := range []struct {
-		name          string
-		beforeRemove  bool
-		mutating      bool
+		name         string
+		beforeRemove bool
+		mutating     bool
 	}{
 		{"before-remove-read-only", true, false},
 		{"before-remove-write", true, true},
@@ -43,7 +45,7 @@ func TestProcessCancelledCommitFinalizationOrdering(t *testing.T) {
 			options := Options{
 				Socket: testSocket(t), RepositoryID: "cancelled-commit-ordering",
 				DaemonPath: binary, DataDir: directory, ObjectStore: "local",
-				WALStore: "local", WALDataDir: directory + "/wal", WALFlushInterval: time.Millisecond,
+				WALStore: "local", WALDataDir: directory + "/wal", WALFlushInterval: durabilityTestFlushInterval(t, time.Millisecond),
 				testEnvironment: []string{barrier + "=" + path},
 			}
 			client, err := Ensure(ctx, options)
@@ -59,6 +61,9 @@ func TestProcessCancelledCommitFinalizationOrdering(t *testing.T) {
 			before, err := client.WriterStatus(ctx)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if before.EngineFlushIntervalMS != uint64(options.WALFlushInterval/time.Millisecond) {
+				t.Fatalf("flush interval=%d want=%s", before.EngineFlushIntervalMS, options.WALFlushInterval)
 			}
 			transaction, err := client.Begin(ctx)
 			if err != nil {
@@ -172,6 +177,7 @@ func TestProcessCancelledCommitBeforeDispatchStillRollsBack(t *testing.T) {
 	options := Options{
 		Socket: testSocket(t), RepositoryID: "cancelled-before-dispatch",
 		DaemonPath: failureDaemonBinary(t), DataDir: t.TempDir(), ObjectStore: "local",
+		WALFlushInterval: durabilityTestFlushInterval(t, 100*time.Millisecond),
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
@@ -490,12 +496,25 @@ func phase34M2KillDaemon(t *testing.T, client *Client) {
 	}
 }
 
+func durabilityTestFlushInterval(t *testing.T, fallback time.Duration) time.Duration {
+	t.Helper()
+	value := os.Getenv("VAULTICDB_TEST_DURABILITY_FLUSH_MS")
+	if value == "" {
+		return fallback
+	}
+	milliseconds, err := strconv.Atoi(value)
+	if err != nil || milliseconds < 1 || milliseconds > 1000 {
+		t.Fatalf("VAULTICDB_TEST_DURABILITY_FLUSH_MS must be between 1 and 1000: %q", value)
+	}
+	return time.Duration(milliseconds) * time.Millisecond
+}
+
 func phase34M2CrashOptions(t *testing.T, directory, repositoryID string, environment ...string) Options {
 	t.Helper()
 	return Options{
 		Socket: testSocket(t), RepositoryID: repositoryID,
 		DaemonPath: failureDaemonBinary(t), DataDir: directory, ObjectStore: "local",
-		WALStore: "local", WALDataDir: directory + "/wal", WALFlushInterval: time.Millisecond,
+		WALStore: "local", WALDataDir: directory + "/wal", WALFlushInterval: durabilityTestFlushInterval(t, time.Millisecond),
 		RebuildReset: true, testEnvironment: environment,
 	}
 }
