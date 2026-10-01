@@ -329,14 +329,15 @@ type CheckConsistency struct {
 }
 
 type CheckResources struct {
-	MemoryLimitBytes  uint64                  `json:"memory_limit_bytes"`
-	ScratchLimitBytes uint64                  `json:"scratch_limit_bytes"`
-	ScratchPeakBytes  uint64                  `json:"scratch_peak_bytes"`
-	MergePasses       uint64                  `json:"merge_passes"`
-	Workers           uint                    `json:"workers"`
-	RPCConcurrency    uint                    `json:"rpc_concurrency"`
-	Scan              daemon.ScanStats        `json:"scan"`
-	ScanRanges        []daemon.RangeScanStats `json:"scan_ranges,omitempty"`
+	WorkingState      *monitor.WorkingStateSnapshot `json:"working_state,omitempty"`
+	MemoryLimitBytes  uint64                        `json:"memory_limit_bytes"`
+	ScratchLimitBytes uint64                        `json:"scratch_limit_bytes"`
+	ScratchPeakBytes  uint64                        `json:"scratch_peak_bytes"`
+	MergePasses       uint64                        `json:"merge_passes"`
+	Workers           uint                          `json:"workers"`
+	RPCConcurrency    uint                          `json:"rpc_concurrency"`
+	Scan              daemon.ScanStats              `json:"scan"`
+	ScanRanges        []daemon.RangeScanStats       `json:"scan_ranges,omitempty"`
 }
 
 type CheckCoverage struct {
@@ -779,6 +780,8 @@ func CheckWithOptions(
 	defer progress.close()
 	defer func() {
 		result.Resources.ScratchPeakBytes, result.Resources.MergePasses = scratch.stats()
+		state := scratch.workingState()
+		result.Resources.WorkingState = &state
 		if closeErr := scratch.close(); closeErr != nil {
 			err = errors.Join(err, fmt.Errorf("clean checker scratch: %w", closeErr))
 		}

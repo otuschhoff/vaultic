@@ -277,6 +277,16 @@ func (scratch *checkScratch) stats() (peak, merges uint64) {
 	return scratch.peak, scratch.merges
 }
 
+func (scratch *checkScratch) workingState() monitor.WorkingStateSnapshot {
+	scratch.mu.Lock()
+	defer scratch.mu.Unlock()
+	return monitor.WorkingStateSnapshot{
+		Kind: monitor.WorkingCheck, Backend: "encrypted_sort", Activated: scratch.dir != "",
+		ReservedScratchBytes: scratch.used, PeakReservedScratchBytes: scratch.peak,
+		ScratchReservationEnforced: true,
+	}
+}
+
 func (scratch *checkScratch) close() error {
 	scratch.mu.Lock()
 	dir := scratch.dir

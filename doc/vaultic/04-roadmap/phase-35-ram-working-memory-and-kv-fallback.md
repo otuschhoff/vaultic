@@ -4,7 +4,9 @@
 
 [Previous: Phase 34](phase-34-operational-monitoring-and-metrics-export.md) | [Next: Phase 36](phase-36-native-smb-backup-source.md)
 
-**Status: design specification, not yet implemented.**
+**Status: M0 complete; M1-M6 remain design specifications, not implemented.**
+
+[M0 inventory, frozen contracts, and validation evidence](phase-35-m0-contract.md)
 
 ## Goal
 
@@ -248,6 +250,9 @@ benchmark files. Do not change runtime behavior during the inventory milestone.
 Commit only when explicitly requested by the operator.
 
 ### M0: Inventory, baseline, and contract
+
+Completed. See the [M0 milestone record](phase-35-m0-contract.md) for classified
+ownership, measurement limitations, executable baseline protocol, and exit gates.
 
 - Enumerate every Go-side temporary KV, sort spill, cache, staging file, and
   dependency-owned working file reached by import/check/backup. Classify each as

@@ -782,6 +782,28 @@ func TestCheckScratchRefusesCleanupWithoutOwnershipMarker(t *testing.T) {
 	}
 }
 
+func TestCheckWorkingStateReservations(t *testing.T) {
+	scratch, err := newCheckScratch(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := scratch.reserve(100); err != nil {
+		t.Fatal(err)
+	}
+	state := scratch.workingState()
+	if state.ReservedScratchBytes != 100 || state.PeakReservedScratchBytes != 100 ||
+		!state.ScratchReservationEnforced || state.ReservationEnforced || state.ScratchBytesKnown {
+		t.Fatalf("scratch state: %+v", state)
+	}
+	if err := scratch.reserve(1000); err == nil {
+		t.Fatal("scratch overflow admitted")
+	}
+	scratch.release(100)
+	if state := scratch.workingState(); state.ReservedScratchBytes != 0 || state.PeakReservedScratchBytes != 100 {
+		t.Fatalf("scratch release: %+v", state)
+	}
+}
+
 func TestLocationSpoolMergeHonorsScratchBudget(t *testing.T) {
 	recordBytes := uint64(4 + locationTupleSize + 16)
 	scratch, err := newCheckScratch(t.TempDir(), 3*(checkRunHeaderSize+recordBytes))

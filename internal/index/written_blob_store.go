@@ -16,16 +16,19 @@ import (
 	"github.com/cockroachdb/pebble"
 	legacyindex "github.com/otuschhoff/vaultic/internal/repository/index"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
 type writtenBlobStore struct {
-	mutex    sync.Mutex
-	database *pebble.DB
-	path     string
-	cipher   cipher.AEAD
-	tokenKey []byte
-	err      error
+	mutex         sync.Mutex
+	database      *pebble.DB
+	path          string
+	cipher        cipher.AEAD
+	tokenKey      []byte
+	err           error
+	metrics       *telemetry.WorkingStateMetric
+	cleanupFailed bool
 }
 
 func newWrittenBlobStore(directory string) (*writtenBlobStore, error) {
@@ -54,7 +57,9 @@ func newWrittenBlobStore(directory string) (*writtenBlobStore, error) {
 	if err != nil {
 		return nil, errors.Join(err, os.RemoveAll(path))
 	}
-	return &writtenBlobStore{database: database, path: path, cipher: aead, tokenKey: key[32:]}, nil
+	metrics := telemetry.NewWorkingStateMetric(telemetry.WorkingWrittenBlobs, "pebble")
+	metrics.Activate()
+	return &writtenBlobStore{database: database, path: path, cipher: aead, tokenKey: key[32:], metrics: metrics}, nil
 }
 
 func (store *writtenBlobStore) token(value []byte) []byte {
@@ -89,6 +94,8 @@ func (store *writtenBlobStore) StoreIndex(ctx context.Context, index *legacyinde
 	}()
 	batch := store.database.NewBatch()
 	defer batch.Close()
+	defer store.metrics.ObserveBuffer(0)
+	var entries, encodedBytes uint64
 	for blob := range index.Values() {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -107,17 +114,35 @@ func (store *writtenBlobStore) StoreIndex(ctx context.Context, index *legacyinde
 		if err := batch.Set(key, value, nil); err != nil {
 			return err
 		}
+		entries++
+		encodedBytes += uint64(len(key) + len(value))
+		store.metrics.ObserveBuffer(uint64(len(batch.Repr())))
 		if len(batch.Repr()) >= 1<<20 {
 			if err := batch.Commit(pebble.NoSync); err != nil {
 				return err
 			}
+			store.metrics.Committed(entries, encodedBytes)
+			entries, encodedBytes = 0, 0
 			batch.Reset()
 		}
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return batch.Commit(pebble.NoSync)
+	if err := batch.Commit(pebble.NoSync); err != nil {
+		return err
+	}
+	store.metrics.Committed(entries, encodedBytes)
+	return nil
+}
+
+func (store *writtenBlobStore) WorkingState() telemetry.WorkingStateSnapshot {
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+	if store.database == nil {
+		return store.metrics.Snapshot(0, !store.cleanupFailed)
+	}
+	return store.metrics.Snapshot(store.database.Metrics().DiskSpaceUsage(), true)
 }
 
 func (store *writtenBlobStore) lookup(ctx context.Context, handle vaultic.BlobHandle, firstOnly bool) (blobs []*pack.PackedBlob, resultErr error) {
@@ -199,5 +224,8 @@ func (store *writtenBlobStore) Close() error {
 	store.err = fmt.Errorf("write overlay is closed")
 	store.cipher = nil
 	clear(store.tokenKey)
-	return errors.Join(err, os.RemoveAll(store.path))
+	store.metrics.Close()
+	removeErr := os.RemoveAll(store.path)
+	store.cleanupFailed = removeErr != nil
+	return errors.Join(err, removeErr)
 }

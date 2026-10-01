@@ -175,6 +175,23 @@ func checkBenchmarkDigest(result CheckResult) [sha256.Size]byte {
 	return sha256.Sum256(encoded)
 }
 
+func TestWorkingStatePreservesCheckDigestBoundary(t *testing.T) {
+	encoded, err := json.Marshal(CheckResources{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("working_state")) {
+		t.Fatalf("zeroed resources changed the canonical JSON boundary: %s", encoded)
+	}
+	baseline := checkBenchmarkDigest(CheckResult{})
+	result := CheckResult{Resources: CheckResources{WorkingState: &monitor.WorkingStateSnapshot{
+		Kind: monitor.WorkingCheck, Backend: "encrypted_sort", PeakReservedScratchBytes: 1024,
+	}}}
+	if checkBenchmarkDigest(result) != baseline {
+		t.Fatal("resource observation changed logical check digest")
+	}
+}
+
 func checkBenchmarkMemory(b *testing.B) uint64 {
 	b.Helper()
 	configured := os.Getenv("VAULTIC_CHECK_BENCH_MEMORY_BYTES")
@@ -241,4 +258,40 @@ func BenchmarkCheckWithOptions(b *testing.B) {
 			}
 		})
 	}
+}
+
+func BenchmarkPhase35M0Check(b *testing.B) {
+	fixture := newCheckBenchmarkFixture(b, 256)
+	before := monitor.ReadWorkingRuntime()
+	var final monitor.WorkingStateSnapshot
+	var digest [sha256.Size]byte
+	b.ResetTimer()
+	for range b.N {
+		result, err := CheckWithOptions(b.Context(), fixture.source, fixture.store, CheckOptions{
+			MaxFindings: 100, MemoryBytes: 8 << 20, TempDir: b.TempDir(), TempMaxBytes: 1 << 30, Workers: 4, RPCConcurrency: 4,
+		})
+		if err != nil || !result.Clean() || result.LegacyLocations != fixture.locations || result.SlateDBLocations != fixture.locations {
+			b.Fatalf("check parity: %+v %v", result, err)
+		}
+		current := checkBenchmarkDigest(result)
+		if digest != ([sha256.Size]byte{}) && current != digest {
+			b.Fatal("check result changed")
+		}
+		digest = current
+		if result.Resources.WorkingState == nil {
+			b.Fatal("checker working state missing")
+		}
+		final = *result.Resources.WorkingState
+	}
+	b.StopTimer()
+	observation, err := json.Marshal(struct {
+		Before monitor.WorkingRuntimeSnapshot `json:"before"`
+		After  monitor.WorkingRuntimeSnapshot `json:"after"`
+		State  monitor.WorkingStateSnapshot   `json:"state"`
+		Digest string                         `json:"result_sha256"`
+	}{before, monitor.ReadWorkingRuntime(), final, fmt.Sprintf("%x", digest)})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Logf("phase35_m0=%s", observation)
 }

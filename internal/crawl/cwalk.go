@@ -13,11 +13,16 @@ import (
 
 	"github.com/cockroachdb/pebble"
 	"github.com/otuschhoff/cwalk"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 )
 
 type DirectoryManifest struct {
-	database *pebble.DB
-	path     string
+	database      *pebble.DB
+	path          string
+	mutex         sync.Mutex
+	metrics       *telemetry.WorkingStateMetric
+	closed        bool
+	cleanupFailed bool
 }
 
 type directoryRecord struct {
@@ -26,13 +31,14 @@ type directoryRecord struct {
 }
 
 type ManifestProgress struct {
-	RootsTotal      uint64  `json:"roots_total"`
-	RootsCompleted  uint64  `json:"roots_completed"`
-	DirectoriesRead uint64  `json:"directories_read"`
-	EntriesListed   uint64  `json:"entries_listed"`
-	SecondsElapsed  float64 `json:"seconds_elapsed"`
-	Finished        bool    `json:"finished"`
-	Complete        bool    `json:"complete"`
+	WorkingState    telemetry.WorkingStateSnapshot `json:"working_state"`
+	RootsTotal      uint64                         `json:"roots_total"`
+	RootsCompleted  uint64                         `json:"roots_completed"`
+	DirectoriesRead uint64                         `json:"directories_read"`
+	EntriesListed   uint64                         `json:"entries_listed"`
+	SecondsElapsed  float64                        `json:"seconds_elapsed"`
+	Finished        bool                           `json:"finished"`
+	Complete        bool                           `json:"complete"`
 }
 
 type manifestCounters struct {
@@ -72,12 +78,14 @@ func BuildDirectoryManifestWithProgress(
 		_ = os.RemoveAll(directory) // The database never opened, so this empty temporary directory is unreachable.
 		return nil, fmt.Errorf("open cwalk manifest: %w", err)
 	}
-	manifest := &DirectoryManifest{database: database, path: directory}
+	manifest := &DirectoryManifest{database: database, path: directory,
+		metrics: telemetry.NewWorkingStateMetric(telemetry.WorkingDirectories, "pebble")}
+	manifest.metrics.Activate()
 	started := time.Now()
 	counters := &manifestCounters{}
 	emitProgress := func(finished, complete bool) {
 		if report != nil {
-			report(ManifestProgress{RootsTotal: uint64(len(roots)), RootsCompleted: counters.roots.Load(),
+			report(ManifestProgress{WorkingState: manifest.WorkingState(), RootsTotal: uint64(len(roots)), RootsCompleted: counters.roots.Load(),
 				DirectoriesRead: counters.directories.Load(), EntriesListed: counters.entries.Load(),
 				SecondsElapsed: time.Since(started).Seconds(), Finished: finished, Complete: complete})
 		}
@@ -87,7 +95,7 @@ func BuildDirectoryManifestWithProgress(
 	defer cancel()
 	records := make(chan directoryRecord, queueCapacity)
 	writeDone := make(chan error, 1)
-	go writeDirectoryRecords(database, records, writeDone, cancel)
+	go writeDirectoryRecords(database, records, writeDone, cancel, manifest.metrics)
 
 	var walkersMu sync.Mutex
 	var walkers []*cwalk.Walker
@@ -136,10 +144,24 @@ func BuildDirectoryManifestWithProgress(
 	return manifest, nil
 }
 
-func writeDirectoryRecords(database *pebble.DB, records <-chan directoryRecord, done chan<- error, cancel context.CancelFunc) {
+func writeDirectoryRecords(database *pebble.DB, records <-chan directoryRecord, done chan<- error, cancel context.CancelFunc, metrics *telemetry.WorkingStateMetric) {
 	batch := database.NewBatch()
+	var resultErr error
+	defer func() {
+		metrics.ObserveBuffer(0)
+		done <- resultErr
+	}()
 	defer func() { _ = batch.Close() }() // Commit errors are returned explicitly; batch close only releases memory.
 	pending := 0
+	var encodedBytes uint64
+	commit := func() error {
+		metrics.ObserveBuffer(uint64(len(batch.Repr())))
+		if err := batch.Commit(pebble.NoSync); err != nil {
+			return err
+		}
+		metrics.Committed(uint64(pending), encodedBytes)
+		return nil
+	}
 	for record := range records {
 		encoded, err := json.Marshal(record.names)
 		if err == nil {
@@ -147,23 +169,23 @@ func writeDirectoryRecords(database *pebble.DB, records <-chan directoryRecord, 
 		}
 		if err == nil {
 			pending++
+			encodedBytes += uint64(len(manifestKey(record.path)) + len(encoded))
 			if pending == 1024 {
-				err = batch.Commit(pebble.NoSync)
+				err = commit()
 				batch.Reset()
 				pending = 0
+				encodedBytes = 0
 			}
 		}
 		if err != nil {
 			cancel()
-			done <- err
+			resultErr = err
 			return
 		}
 	}
 	if pending > 0 {
-		done <- batch.Commit(pebble.NoSync)
-		return
+		resultErr = commit()
 	}
-	done <- nil
 }
 
 func walkManifestRoots(
@@ -325,12 +347,26 @@ func (manifest *DirectoryManifest) Names(directory string) ([]string, bool, erro
 }
 
 func (manifest *DirectoryManifest) Close() error {
+	manifest.mutex.Lock()
+	defer manifest.mutex.Unlock()
 	err := manifest.database.Close()
 	removeErr := os.RemoveAll(manifest.path)
+	manifest.cleanupFailed = removeErr != nil
+	manifest.closed = true
+	manifest.metrics.Close()
 	if err != nil {
 		return err
 	}
 	return removeErr
+}
+
+func (manifest *DirectoryManifest) WorkingState() telemetry.WorkingStateSnapshot {
+	manifest.mutex.Lock()
+	defer manifest.mutex.Unlock()
+	if manifest.closed {
+		return manifest.metrics.Snapshot(0, !manifest.cleanupFailed)
+	}
+	return manifest.metrics.Snapshot(manifest.database.Metrics().DiskSpaceUsage(), true)
 }
 
 func manifestKey(path string) []byte {

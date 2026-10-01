@@ -2884,6 +2884,61 @@ func BenchmarkImportPackTransactionSizes(b *testing.B) {
 	}
 }
 
+func TestSchedulerWorkingStateObservation(t *testing.T) {
+	telemetry := NewSchedulerTelemetry()
+	telemetry.queues(2, 1, 1024, 512, time.Time{})
+	state := telemetry.Snapshot().WorkingState
+	if state.Kind != "import" || state.Backend != "streaming" || state.ObservedBufferBytes != 1024 ||
+		state.PeakObservedBufferBytes != 1024 || state.ReservationEnforced || state.ScratchBytesKnown {
+		t.Fatalf("import working state: %+v", state)
+	}
+	telemetry.queues(0, 0, 0, 0, time.Time{})
+	if state := telemetry.Snapshot().WorkingState; state.ObservedBufferBytes != 0 || state.PeakObservedBufferBytes != 1024 {
+		t.Fatalf("drained import working state: %+v", state)
+	}
+}
+
+func BenchmarkPhase35M0Import(b *testing.B) {
+	const packCount = 64
+	indexID := vaultic.Hash([]byte("phase35-import-index"))
+	idx := index.NewIndex()
+	for ordinal := range packCount {
+		idx.StorePack(vaultic.Hash([]byte(fmt.Sprintf("phase35-import-pack-%d", ordinal))),
+			pack.Blobs{{BlobHandle: vaultic.BlobHandle{ID: vaultic.Hash([]byte(fmt.Sprintf("phase35-import-blob-%d", ordinal))),
+				Type: vaultic.DataBlob}, Length: 1}})
+	}
+	var encoded bytes.Buffer
+	if err := idx.Encode(&encoded); err != nil {
+		b.Fatal(err)
+	}
+	source := &memorySource{indexes: map[vaultic.ID][]byte{indexID: encoded.Bytes()}}
+	before := monitor.ReadWorkingRuntime()
+	var final monitor.WorkingStateSnapshot
+	b.ResetTimer()
+	for range b.N {
+		telemetry := NewSchedulerTelemetry()
+		result, err := Import(b.Context(), source, fixedStatter{size: 2}, newSplitStore(),
+			Options{PackWorkers: 4, PacksPerTransaction: 8, PublicationLanes: 2, Telemetry: telemetry})
+		if err != nil || result.PacksImported != packCount || result.BlobsImported != packCount || result.ErrorsSeen != 0 {
+			b.Fatalf("import parity: %+v %v", result, err)
+		}
+		final = telemetry.Snapshot().WorkingState
+		if final.Kind != monitor.WorkingImport || final.PeakObservedBufferBytes == 0 || final.ObservedBufferBytes != 0 {
+			b.Fatalf("import observation missing or not drained: %+v", final)
+		}
+	}
+	b.StopTimer()
+	observation, err := json.Marshal(struct {
+		Before monitor.WorkingRuntimeSnapshot `json:"before"`
+		After  monitor.WorkingRuntimeSnapshot `json:"after"`
+		State  monitor.WorkingStateSnapshot   `json:"state"`
+	}{before, monitor.ReadWorkingRuntime(), final})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Logf("phase35_m0=%s", observation)
+}
+
 type frozenBenchmarkIndex struct {
 	id      vaultic.ID
 	encoded []byte

@@ -6,18 +6,21 @@ import (
 	"sync"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 )
 
 type MarkerCacheStore struct {
-	mutex    sync.Mutex
-	database *pebble.DB
-	path     string
-	limit    int
-	err      error
+	mutex         sync.Mutex
+	database      *pebble.DB
+	path          string
+	limit         int
+	err           error
+	metrics       *telemetry.WorkingStateMetric
+	cleanupFailed bool
 }
 
 func NewMarkerCacheStore(limit int) *MarkerCacheStore {
-	return &MarkerCacheStore{limit: max(1, limit)}
+	return &MarkerCacheStore{limit: max(1, limit), metrics: telemetry.NewWorkingStateMetric(telemetry.WorkingMarkers, "pebble")}
 }
 
 func (store *MarkerCacheStore) Error() error {
@@ -70,9 +73,12 @@ func (store *MarkerCacheStore) spill(prefix string, values map[string]bool) {
 			store.err = fmt.Errorf("open marker cache: %w", store.err)
 			return
 		}
+		store.metrics.Activate()
 	}
 	batch := store.database.NewBatch()
 	defer batch.Close()
+	defer store.metrics.ObserveBuffer(0)
+	var encodedBytes uint64
 	for directory, rejected := range values {
 		value := byte(0)
 		if rejected {
@@ -82,10 +88,23 @@ func (store *MarkerCacheStore) spill(prefix string, values map[string]bool) {
 			store.err = fmt.Errorf("encode marker cache: %w", err)
 			return
 		}
+		encodedBytes += uint64(len(prefix) + 1 + len(directory) + 1)
 	}
+	store.metrics.ObserveBuffer(uint64(len(batch.Repr())))
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		store.err = fmt.Errorf("write marker cache: %w", err)
+		return
 	}
+	store.metrics.Committed(uint64(len(values)), encodedBytes)
+}
+
+func (store *MarkerCacheStore) WorkingState() telemetry.WorkingStateSnapshot {
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+	if store.database == nil {
+		return store.metrics.Snapshot(0, store.path == "" && !store.cleanupFailed)
+	}
+	return store.metrics.Snapshot(store.database.Metrics().DiskSpaceUsage(), true)
 }
 
 func (store *MarkerCacheStore) Close() error {
@@ -97,10 +116,13 @@ func (store *MarkerCacheStore) Close() error {
 		store.database = nil
 	}
 	if store.path != "" {
-		if removeErr := os.RemoveAll(store.path); err == nil {
+		removeErr := os.RemoveAll(store.path)
+		store.cleanupFailed = removeErr != nil
+		if err == nil {
 			err = removeErr
 		}
 		store.path = ""
 	}
+	store.metrics.Close()
 	return err
 }

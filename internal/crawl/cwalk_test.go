@@ -2,9 +2,11 @@ package crawl
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,7 +15,44 @@ import (
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/fs"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 )
+
+func TestDirectoryManifestWriterCompletionClearsObservedBuffer(t *testing.T) {
+	manifest, err := BuildDirectoryManifest(t.Context(), []string{t.TempDir()}, 1, 4, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manifest.Close()
+	metrics := telemetry.NewWorkingStateMetric(telemetry.WorkingDirectories, "pebble")
+	records := make(chan directoryRecord, 1)
+	records <- directoryRecord{path: filepath.Join(t.TempDir(), "synthetic"), names: []string{"entry"}}
+	close(records)
+	done := make(chan error)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go writeDirectoryRecords(manifest.database, records, done, cancel, metrics)
+	defer func() {
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	}()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		state := metrics.Snapshot(0, false)
+		if state.CommittedEntries == 1 && state.ObservedBufferBytes == 0 {
+			if state.PeakObservedBufferBytes == 0 {
+				t.Fatal("missing batch observation")
+			}
+			return
+		}
+		if ctx.Err() != nil {
+			t.Fatal(ctx.Err())
+		}
+		runtime.Gosched()
+	}
+	t.Fatal("writer must clear its observed buffer before notifying completion")
+}
 
 func TestDirectoryStreamRetainedMetadataCancellation(t *testing.T) {
 	stream, err := NewDirectoryStream(t.Context(), 1, 4)
@@ -155,6 +194,73 @@ func TestBuildDirectoryManifestCancellationCleansTemporaryState(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDirectoryManifestWorkingState(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "child"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var final ManifestProgress
+	manifest, err := BuildDirectoryManifestWithProgress(t.Context(), []string{root}, 2, 1, nil,
+		func(progress ManifestProgress) { final = progress })
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := manifest.WorkingState()
+	if state.CommittedEntries != 2 || state.CommittedEncodedBytes == 0 ||
+		final.WorkingState.CommittedEntries != 2 || !final.Complete || state.PeakObservedBufferBytes == 0 {
+		t.Fatalf("manifest=%+v progress=%+v", state, final)
+	}
+	if err := manifest.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if state := manifest.WorkingState(); !state.Closed || state.RetainedEntriesUpperBound != 0 {
+		t.Fatalf("closed manifest: %+v", state)
+	}
+}
+
+func BenchmarkPhase35M0Directories(b *testing.B) {
+	root := b.TempDir()
+	for ordinal := range 512 {
+		if err := os.Mkdir(filepath.Join(root, strconv.Itoa(ordinal)), 0o700); err != nil {
+			b.Fatal(err)
+		}
+	}
+	before := telemetry.ReadWorkingRuntime()
+	var final telemetry.WorkingStateSnapshot
+	b.ResetTimer()
+	for range b.N {
+		manifest, err := BuildDirectoryManifest(b.Context(), []string{root}, 4, 64, nil)
+		if err != nil {
+			b.Fatal(err)
+		}
+		names, found, err := manifest.Names(root)
+		if err != nil || !found || len(names) != 512 {
+			b.Fatalf("directory parity: %d %v", len(names), err)
+		}
+		final = manifest.WorkingState()
+		if final.CommittedEntries != 513 {
+			b.Fatalf("directory count: %+v", final)
+		}
+		path := manifest.path
+		if err := manifest.Close(); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			b.Fatalf("directory cleanup: %v", err)
+		}
+	}
+	b.StopTimer()
+	encoded, err := json.Marshal(struct {
+		Before telemetry.WorkingRuntimeSnapshot `json:"before"`
+		After  telemetry.WorkingRuntimeSnapshot `json:"after"`
+		State  telemetry.WorkingStateSnapshot   `json:"state"`
+	}{before, telemetry.ReadWorkingRuntime(), final})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Logf("phase35_m0=%s", encoded)
 }
 
 func TestManifestRootsOverlapAndJoin(t *testing.T) {

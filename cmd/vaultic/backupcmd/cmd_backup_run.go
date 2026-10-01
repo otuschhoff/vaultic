@@ -189,6 +189,7 @@ func (run *backupRun) close() {
 		run.progress.Done()
 	}
 	if run.markerStore != nil {
+		run.reportWorkingState(run.markerStore.WorkingState())
 		if err := run.markerStore.Close(); err != nil {
 			run.printer.E("close marker cache: %v", err)
 		}
@@ -214,6 +215,18 @@ func (run *backupRun) close() {
 		if store := run.authoritativeEngine.SchemaStore(); store != nil {
 			run.reportPackPublicationStats(store.PackPublicationStats())
 		}
+	}
+}
+
+func (run *backupRun) reportWorkingState(state telemetry.WorkingStateSnapshot) {
+	if run.globalOptions.JSON {
+		run.term.Print(ui.ToJSONString(struct {
+			MessageType string `json:"message_type"`
+			telemetry.WorkingStateSnapshot
+		}{MessageType: "working_state_stats", WorkingStateSnapshot: state}))
+	} else if !run.globalOptions.Quiet {
+		run.printer.V("working state %s (%s): %d committed entries, %d encoded bytes, peak observed batch %d bytes\n",
+			state.Kind, state.Backend, state.CommittedEntries, state.CommittedEncodedBytes, state.PeakObservedBufferBytes)
 	}
 }
 

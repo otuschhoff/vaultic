@@ -1,6 +1,8 @@
 package archiver
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/fs"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/test"
 )
 
@@ -34,8 +37,16 @@ func TestMarkerCacheSpillsWithoutChangingDecisions(t *testing.T) {
 	if err := store.Error(); err != nil {
 		t.Fatal(err)
 	}
+	state := store.WorkingState()
+	if state.CommittedEntries == 0 || state.RetainedEntriesUpperBound != state.CommittedEntries ||
+		state.Backend != "pebble" || !state.ScratchBytesKnown || state.PeakObservedBufferBytes == 0 {
+		t.Fatalf("marker working state: %+v", state)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
+	}
+	if state := store.WorkingState(); !state.Closed || state.RetainedEntriesUpperBound != 0 {
+		t.Fatalf("closed marker state: %+v", state)
 	}
 	entries, err := os.ReadDir(scratch)
 	if err != nil || len(entries) != 0 {
@@ -54,6 +65,52 @@ func TestMarkerCacheSpillFailureIsReported(t *testing.T) {
 	if store.Error() == nil {
 		t.Fatal("spill failure was hidden")
 	}
+	if state := store.WorkingState(); state.CommittedEntries != 0 || state.RetainedEncodedBytesBound != 0 {
+		t.Fatalf("failed spill counted as committed: %+v", state)
+	}
+}
+
+func BenchmarkPhase35M0Markers(b *testing.B) {
+	before := telemetry.ReadWorkingRuntime()
+	var final telemetry.WorkingStateSnapshot
+	for range b.N {
+		store := NewMarkerCacheStore(4096)
+		cache := newRejectionCache()
+		cache.store, cache.prefix = store, "fixture-marker"
+		for ordinal := range 8193 {
+			cache.Store(fmt.Sprintf("fixture-directory-%08d", ordinal), ordinal%2 == 0)
+		}
+		for ordinal := range 32 {
+			value, found := cache.Get(fmt.Sprintf("fixture-directory-%08d", ordinal))
+			if !found || value != (ordinal%2 == 0) {
+				b.Fatal("marker decision changed")
+			}
+		}
+		if err := store.Error(); err != nil {
+			b.Fatal(err)
+		}
+		final = store.WorkingState()
+		if final.CommittedEntries < 8192 {
+			b.Fatalf("missing marker writes: %+v", final)
+		}
+		path := store.path
+		if err := store.Close(); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			b.Fatalf("marker cleanup: %v", err)
+		}
+	}
+	b.StopTimer()
+	encoded, err := json.Marshal(struct {
+		Before telemetry.WorkingRuntimeSnapshot `json:"before"`
+		After  telemetry.WorkingRuntimeSnapshot `json:"after"`
+		State  telemetry.WorkingStateSnapshot   `json:"state"`
+	}{before, telemetry.ReadWorkingRuntime(), final})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Logf("phase35_m0=%s", encoded)
 }
 
 func TestMarkerChecksOverlapAndCoalesce(t *testing.T) {

@@ -11,6 +11,7 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 	legacyindex "github.com/otuschhoff/vaultic/internal/repository/index"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
@@ -61,22 +62,23 @@ type blobLookupCounters struct {
 }
 
 type BlobLookupStats struct {
-	CacheHits              uint64 `json:"cache_hits"`
-	NegativeHits           uint64 `json:"negative_hits"`
-	CacheMisses            uint64 `json:"cache_misses"`
-	Evictions              uint64 `json:"evictions"`
-	PeakEntries            uint64 `json:"peak_entries"`
-	Capacity               int    `json:"capacity"`
-	AccountedCapacityBytes int    `json:"accounted_capacity_bytes"`
-	SizeRPCs               uint64 `json:"size_rpcs"`
-	SizeHandles            uint64 `json:"size_handles"`
-	SizeRPCNanoseconds     uint64 `json:"size_rpc_nanoseconds"`
-	LocationRPCs           uint64 `json:"location_rpcs"`
-	LocationRPCNanoseconds uint64 `json:"location_rpc_nanoseconds"`
+	WorkingState           *telemetry.WorkingStateSnapshot `json:"working_state,omitempty"`
+	CacheHits              uint64                          `json:"cache_hits"`
+	NegativeHits           uint64                          `json:"negative_hits"`
+	CacheMisses            uint64                          `json:"cache_misses"`
+	Evictions              uint64                          `json:"evictions"`
+	PeakEntries            uint64                          `json:"peak_entries"`
+	Capacity               int                             `json:"capacity"`
+	AccountedCapacityBytes int                             `json:"accounted_capacity_bytes"`
+	SizeRPCs               uint64                          `json:"size_rpcs"`
+	SizeHandles            uint64                          `json:"size_handles"`
+	SizeRPCNanoseconds     uint64                          `json:"size_rpc_nanoseconds"`
+	LocationRPCs           uint64                          `json:"location_rpcs"`
+	LocationRPCNanoseconds uint64                          `json:"location_rpc_nanoseconds"`
 }
 
 func (lookup *CachedBlobLookup) Stats() BlobLookupStats {
-	return BlobLookupStats{
+	stats := BlobLookupStats{
 		CacheHits: lookup.stats.hits.Load(), NegativeHits: lookup.stats.negativeHits.Load(), CacheMisses: lookup.stats.misses.Load(),
 		Evictions: lookup.stats.evictions.Load(), PeakEntries: lookup.stats.peakEntries.Load(), Capacity: lookup.capacity,
 		AccountedCapacityBytes: lookup.capacity * blobLookupCacheEntryBytes,
@@ -84,6 +86,11 @@ func (lookup *CachedBlobLookup) Stats() BlobLookupStats {
 		SizeRPCNanoseconds: lookup.stats.sizeRPCNanoseconds.Load(), LocationRPCs: lookup.stats.locationRPCs.Load(),
 		LocationRPCNanoseconds: lookup.stats.locationRPCNanoseconds.Load(),
 	}
+	if lookup.written != nil {
+		state := lookup.written.WorkingState()
+		stats.WorkingState = &state
+	}
+	return stats
 }
 
 func (lookup *CachedBlobLookup) cachedSize(handle vaultic.BlobHandle) (vaultic.BlobSize, bool) {

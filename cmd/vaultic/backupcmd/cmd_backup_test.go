@@ -24,6 +24,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/reconcile"
 	"github.com/otuschhoff/vaultic/internal/repository"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 	rtest "github.com/otuschhoff/vaultic/internal/test"
 	"github.com/otuschhoff/vaultic/internal/ui"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
@@ -76,6 +77,47 @@ func TestBackupCloseReportsLookupStatsAfterCancellation(t *testing.T) {
 
 type backupReconciliationStore struct {
 	reconcile.Store
+}
+
+func TestBackupCloseWorkingStateCancellationPrivacyAndQuiet(t *testing.T) {
+	for _, jsonOutput := range []bool{false, true} {
+		t.Run(fmt.Sprintf("json=%t", jsonOutput), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			term := &ui.MockTerminal{}
+			store := archiver.NewMarkerCacheStore(1)
+			run := &backupRun{ctx: ctx, markerStore: store, term: term,
+				globalOptions: global.Options{JSON: jsonOutput, Quiet: true}}
+			run.close()
+			if !store.WorkingState().Closed {
+				t.Fatal("cancellation did not close marker state")
+			}
+			if !jsonOutput {
+				if len(term.Output) != 0 {
+					t.Fatalf("quiet output: %v", term.Output)
+				}
+				return
+			}
+			if len(term.Output) != 1 {
+				t.Fatalf("final events: %v", term.Output)
+			}
+			var record struct {
+				MessageType string `json:"message_type"`
+				telemetry.WorkingStateSnapshot
+			}
+			if err := json.Unmarshal([]byte(term.Output[0]), &record); err != nil {
+				t.Fatal(err)
+			}
+			if record.MessageType != "working_state_stats" || record.Kind != telemetry.WorkingMarkers || record.Activated {
+				t.Fatalf("unexpected lazy marker observation: %+v", record)
+			}
+			for _, sensitive := range []string{`"path"`, `"key"`, `"value"`, `"repository"`, `"credential"`} {
+				if strings.Contains(term.Output[0], sensitive) {
+					t.Fatalf("sensitive telemetry field %s", sensitive)
+				}
+			}
+		})
+	}
 }
 
 func (*backupReconciliationStore) ScanPrefix(context.Context, []byte, []byte, uint32) ([]daemon.KeyValue, bool, error) {

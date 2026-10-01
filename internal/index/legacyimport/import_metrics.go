@@ -69,6 +69,7 @@ func (histogram durationHistogram) quantile(percent uint64) time.Duration {
 }
 
 type SchedulerSnapshot struct {
+	WorkingState            monitor.WorkingStateSnapshot
 	Phase                   string
 	PhaseTime               map[string]time.Duration
 	LaneTime                [maxPublicationLanes + 1]time.Duration
@@ -110,8 +111,9 @@ func NewSchedulerTelemetryEnabled(enabled bool) *SchedulerTelemetry {
 	return &SchedulerTelemetry{
 		last: time.Now(), operations: make(map[string]durationHistogram),
 		batchFlushes: make(map[string]uint64),
-		state:        SchedulerSnapshot{Phase: "setup", PhaseTime: make(map[string]time.Duration)},
-		action:       monitor.NewActionMetric("legacy_import", 1, enabled),
+		state: SchedulerSnapshot{Phase: "setup", PhaseTime: make(map[string]time.Duration),
+			WorkingState: monitor.WorkingStateSnapshot{Kind: monitor.WorkingImport, Backend: "streaming"}},
+		action: monitor.NewActionMetric("legacy_import", 1, enabled),
 		waits: map[string]*monitor.WaitMetric{
 			"dependency_wait": monitor.NewWaitMetric("legacy_import", "database", "capacity", maxPublicationLanes, enabled),
 			"ingest_wait":     monitor.NewWaitMetric("legacy_import", "rpc", "concurrency", maxPublicationLanes, enabled),
@@ -306,6 +308,11 @@ func (telemetry *SchedulerTelemetry) queues(ready, pending int, retained, unredu
 	telemetry.state.ReadyBatches = ready
 	telemetry.state.PendingReductionBatches = pending
 	telemetry.state.RetainedPreparedBytes = retained
+	telemetry.state.WorkingState = monitor.WorkingStateSnapshot{
+		Kind: monitor.WorkingImport, Backend: "streaming", Activated: true,
+		ObservedBufferBytes:     retained,
+		PeakObservedBufferBytes: max(telemetry.state.WorkingState.PeakObservedBufferBytes, retained),
+	}
 	telemetry.state.UnreducedPreparedBytes = unreduced
 	telemetry.oldest = oldest
 }

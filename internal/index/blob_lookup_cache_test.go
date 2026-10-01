@@ -3,6 +3,7 @@ package index
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/cockroachdb/pebble"
 	legacyindex "github.com/otuschhoff/vaultic/internal/repository/index"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
+	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
@@ -463,8 +465,16 @@ func TestSpillingBlobLookup(t *testing.T) {
 		}
 	}
 	path := lookup.written.path
+	state := lookup.written.WorkingState()
+	if state.CommittedEntries != 512 || state.CommittedEncodedBytes != 512*148 ||
+		state.RetainedEntriesUpperBound != 512 || state.Backend != "pebble" || !state.ScratchBytesKnown {
+		t.Fatalf("overlay working state: %+v", state)
+	}
 	if err := lookup.Close(); err != nil {
 		t.Fatal(err)
+	}
+	if state := lookup.written.WorkingState(); !state.Closed || state.RetainedEntriesUpperBound != 0 {
+		t.Fatalf("closed overlay working state: %+v", state)
 	}
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("overlay not removed: %v", err)
@@ -558,6 +568,57 @@ func BenchmarkWrittenBlobLookup(b *testing.B) {
 	}
 }
 
+func BenchmarkPhase35M0WrittenBlobs(b *testing.B) {
+	before := telemetry.ReadWorkingRuntime()
+	var final telemetry.WorkingStateSnapshot
+	for range b.N {
+		lookup, local, err := NewSpillingBlobLookup(&testBlobLookupSession{ctx: b.Context()}, b.TempDir(), 64<<20, 2)
+		if err != nil {
+			b.Fatal(err)
+		}
+		for packNumber := range 16 {
+			blobs := make(pack.Blobs, 512)
+			for ordinal := range blobs {
+				blobs[ordinal] = pack.Blob{BlobHandle: vaultic.BlobHandle{Type: vaultic.DataBlob,
+					ID: vaultic.Hash([]byte(fmt.Sprintf("phase35-blob-%d-%d", packNumber, ordinal)))},
+					Offset: uint(ordinal * 128), Length: 128, UncompressedLength: 128}
+			}
+			packID := vaultic.Hash([]byte(fmt.Sprintf("phase35-pack-%d", packNumber)))
+			if err := local.StorePack(b.Context(), packID, blobs, &overlayTestSaver{}); err != nil {
+				b.Fatal(err)
+			}
+			if err := local.Flush(b.Context(), &overlayTestSaver{}); err != nil {
+				b.Fatal(err)
+			}
+			got, err := lookup.LookupContext(b.Context(), blobs[0].BlobHandle)
+			if err != nil || len(got) != 1 || got[0].Pack != packID {
+				b.Fatalf("overlay parity: %v %v", got, err)
+			}
+		}
+		final = lookup.written.WorkingState()
+		if final.CommittedEntries != 8192 || final.CommittedEncodedBytes != 8192*148 {
+			b.Fatalf("working-state parity: %+v", final)
+		}
+		path := lookup.written.path
+		if err := lookup.Close(); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			b.Fatalf("overlay cleanup: %v", err)
+		}
+	}
+	b.StopTimer()
+	encoded, err := json.Marshal(struct {
+		Before telemetry.WorkingRuntimeSnapshot `json:"before"`
+		After  telemetry.WorkingRuntimeSnapshot `json:"after"`
+		State  telemetry.WorkingStateSnapshot   `json:"state"`
+	}{before, telemetry.ReadWorkingRuntime(), final})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Logf("phase35_m0=%s", encoded)
+}
+
 func TestWrittenBlobStoreEncryptionAndFailure(t *testing.T) {
 	store, err := newWrittenBlobStore(t.TempDir())
 	if err != nil {
@@ -597,6 +658,40 @@ func TestWrittenBlobStoreEncryptionAndFailure(t *testing.T) {
 	}
 	if err := store.StoreIndex(t.Context(), index); err == nil {
 		t.Fatal("write after corruption succeeded")
+	}
+}
+
+func TestWrittenBlobWorkingStateFailureAndOverwrite(t *testing.T) {
+	store, err := newWrittenBlobStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := store.path
+	defer os.RemoveAll(path)
+	idx := legacyindex.NewIndex()
+	idx.StorePack(vaultic.NewRandomID(), pack.Blobs{{BlobHandle: vaultic.NewRandomBlobHandle(), Length: 1}})
+	for range 2 {
+		if err := store.StoreIndex(t.Context(), idx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if state := store.WorkingState(); state.CommittedEntries != 2 || state.RetainedEntriesUpperBound != 2 {
+		t.Fatalf("overwrite upper bound: %+v", state)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := store.StoreIndex(ctx, idx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation: %v", err)
+	}
+	if state := store.WorkingState(); state.CommittedEntries != 2 || state.ObservedBufferBytes != 0 {
+		t.Fatalf("canceled write counted: %+v", state)
+	}
+	store.path = path + "\x00"
+	if err := store.Close(); err == nil {
+		t.Fatal("cleanup failure missing")
+	}
+	if state := store.WorkingState(); !state.Closed || state.ScratchBytesKnown {
+		t.Fatalf("failed cleanup claimed removed scratch: %+v", state)
 	}
 }
 
