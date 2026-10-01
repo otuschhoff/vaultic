@@ -1,5 +1,415 @@
 # Phase 33 Production Benchmark Evidence
 
+## Offline owned Begin transport-loss reconciliation (2026-10-01)
+
+The separately approved offline repair adds negotiated `BeginOwned` and
+`CancelBegin` RPCs without changing legacy Begin messages. A client-generated
+128-bit random identity and ten-second admission deadline identify one Begin.
+The server serializes allocation and cancellation for that identity: cleanup
+either prevents a later allocation or rolls back the recorded transaction under
+the existing admission, finalization, writer-epoch, and generation checks.
+Publication-permit acquisition is bounded by the admission deadline. Duplicate
+identities cannot allocate another transaction, and deadline reuse is rejected.
+Authentication forwarding is implemented and tested for both additive RPCs.
+
+The client never retries owned Begin. Unknown transport outcomes, malformed
+replies, and caller cancellation are reconciled with the same identity using a
+cancellation-independent ten-second cleanup budget. Only unavailable cleanup
+is retried, at most twice within that one budget. Failed or unconfirmed cleanup
+returns terminal `FailedPrecondition`, retaining original and cleanup errors
+in the error chain. A regression initially reproduced 128 new Begin attempts
+after an Aborted reply plus failed cleanup; it now stops after one Begin with
+no recovered retry attribution. Pack retry policy and the 64-failure gate are
+otherwise unchanged. The original logical caller deadline is preserved.
+
+The ledger is in-memory, capped at 4096 entries, with completed handoff history
+retained until 60 seconds beyond admission expiry. Capacity exhaustion is
+explicit backpressure; retired unknown history fails closed. This is not a
+durable reconciliation journal or an unbounded recovery guarantee. Missing
+cleanup acknowledgments still fail the operation even if the server happened
+to clean up. Capability-false clients keep the previous bounded legacy path,
+whose independent transport-loss limitation remains explicitly characterized.
+No exact production race, workload performance benefit, or deployed fix is
+claimed by these offline tests.
+
+All 210 Rust binary-target tests passed. Thirty-two new owned-path cases cover
+20 real Unix-socket gRPC reply-loss, cancellation, physical-timeout, malformed
+reply, and cleanup-failure cases; eight pack/allocation metadata-parity cases;
+and identity/authentication, writer-epoch, generation, blocked-permit expiry,
+and terminal-uncertainty assertions in four guard tests. Confirmed cleanup
+leaves zero transactions/intents and no Commit or metadata publication. Legacy
+compatibility/cancellation, prepared-Commit draining, pack retry/accounting,
+publication fencing, imports/history, and read-session race gates also passed.
+The final daemon suite passed in 139.716 s, full reconciliation in 33.921 s,
+and backup-close/reporting in 1.105 s; CLI/protocol consumers compiled.
+
+Evidence, source patches, revision, test-binary identity, and read-only
+production verification are sealed under
+`/volume2/NASDA2/rustic/db.test/begin-reconciliation-20261001-EubY1G`.
+Production remains PID 960161, epoch 99, idle/read-write on defaults with pinned
+binary/unit/environment/WAL, no drop-ins, and exact original 143 snapshot IDs.
+No deployment, restart, trial, commit, push, new snapshot, or restore acceptance
+was performed. Historical rejected trials remain rejected; the original
+backup/new-snapshot/byte-restore objective is still outstanding.
+
+## Offline Begin caller-cancellation cleanup repair (2026-10-01)
+
+After separate offline fix approval, ordinary and publication Begin reject
+already-canceled/expired callers before admission. Admitted Begin RPCs now use
+an independent handoff bounded by the existing ten-second RPC budget. The
+request retains the caller's logical deadline. If the caller cancels or expires
+before the reply arrives, the client receives the transaction ID, rolls it back
+with the existing cancellation-independent cleanup helper, and returns both
+context and gRPC cancellation/deadline identity without exposing a transaction.
+Rollback has its existing ten-second budget; cleanup errors are returned rather
+than hidden. A caller may therefore wait for bounded handoff and cleanup past
+its logical deadline. No new Begin retry, protocol change, or daemon change was
+introduced, and outer pack retry/budget policy and the 64-failure gate are intact.
+
+The new ownership-handoff regression failed before repair and passed afterward.
+Eight ordinary/publication cancellation/deadline and rollback-failure cases,
+four pre-admission cases, and four Unix-socket gRPC cases passed under race.
+Delivered replies after caller cancellation now leave zero transactions.
+Independent transport failure withholding the reply still leaves an unknown
+transaction; this is explicitly tested, not claimed fixed or safely recovered.
+Resolving that broader failure requires request-identity reconciliation, not
+blindly retrying Begin. No exact production cancellation race is proven.
+
+Neighboring schema/import/publication/history/tier/read-session race checks
+passed in 100.664 s; backup-close/reporting passed in 1.100 s and full
+reconciliation in 33.592 s. Final handoff-bound/logical-deadline checks passed
+in 15.277 s. Source, logs, and read-only production verification are sealed under
+`/volume2/NASDA2/rustic/db.test/cancel-begin-fix-20261001-okR3Dy`.
+Production remains PID 960161, epoch 99, idle/read-write on defaults, with pinned
+binary/unit/environment/WAL, no drop-ins, and exact original 143 snapshot IDs.
+No deployment, restart, trial, commit, push, snapshot, or restore acceptance was
+performed; historical rejected trials remain rejected.
+
+## Offline cancellation and Begin ownership tests (2026-10-01)
+
+Separate approval covered offline cancellation/transaction-cleanup tests, not
+a runtime fix or another production trial. An eight-case isolated-daemon matrix
+now covers pack publication and revision allocation, caller cancellation and
+deadline expiry, and delivered versus withheld successful Begin responses.
+Delivered responses allow existing cancellation-independent rollback to leave
+zero transactions. Withheld responses leave one daemon transaction while the
+caller receives Canceled or DeadlineExceeded without a transaction ID. No pack,
+blob, aggregate, or revision reservation is written, and no Commit is attempted.
+Every fixture recovers the ID out of band and verifies rollback settles it.
+
+Two additional Unix-socket gRPC relay cases forward Begin to the real isolated
+daemon, withhold its reply until cancellation/deadline, and reproduce the same
+ownership loss over gRPC. They confirm a response-loss mechanism, not the exact
+race or transaction owner in the production baseline. Ordinary daemon Begin is
+detached from request cancellation; `Client.begin` returns an error without a
+transaction, so its caller cannot address a transaction whose ID was not received.
+`rollbackTransaction` already uses `context.WithoutCancel`; known-ID cleanup is
+not the failing boundary in these tests. The ownership gap remains unfixed.
+
+All ten new cases passed under race, alongside existing prepared-Commit draining,
+publication fencing/cancellation, and pack conflict/retry/terminal checks. The
+focused suite passed in 19.454 s. Evidence is sealed under
+`/volume2/NASDA2/rustic/db.test/cancel-begin-ownership-20261001-hzBFTa`.
+Read-only verification confirmed production unchanged: PID 960161, epoch 99,
+idle/read-write, default caches/flush, pinned binary/unit/environment/WAL, no
+drop-ins, and exact original 143 snapshot IDs. No runtime code, retry policy,
+deadline, failure budget, deployment, restart, trial, commit, or push changed.
+Historical trial rejection and backup/snapshot/restore acceptance remain unchanged.
+An offline Begin-ownership cleanup fix requires separate approval.
+
+## Pack-aware cache baseline rejected after timeout (2026-10-01)
+
+After separate launch approval, a fresh pair used the same newly built CLI
+for both planned variants, SHA256
+`795cf666c467f329899846e86cd0db53c3d257d0d0daf5603e9d568cac8a7711`.
+Its source exactly matched the sealed offline pack-accounting changes. The
+124-case prospective checker, original 64-failure budget, ordinary grouping,
+512 MiB block cache, 100 ms flush, 52 sources, and 3600-second cap stayed fixed.
+Artifacts are under
+`/volume2/NASDA2/rustic/db.test/metadata-cache-pack-pair-20261001-kSLXyE`.
+
+Only the 128 MiB baseline ran: wrapper exit 124 after 3602.256 s, with
+225937 files and 322099907621 logical bytes at the final progress sample.
+Client/server outcomes exactly matched 62375 attempts: 62347 successes and
+28 Aborted responses, with zero Commit cancellations/timeouts/active requests.
+Pack counters attributed all 28 aborts: 26 recovered and two terminal aborts
+in one publication canceled at the cap. Of 67 pack publication calls, 66
+succeeded and one failed canceled. These terminal aborts must not be counted
+as recovery. Allocation and inode/directory recovered Commit aborts were zero.
+This identifies pack publication as this run's abort owner, not the owner of
+historical uninstrumented failures. The 1024 MiB candidate was held.
+
+One transaction remained at trial end, despite zero write intents. The runner
+and analyzer rejected that state; the analyzer produced no report, and the
+controller preserved its missing-report error separately from the idle-gated
+restoration failure. The CLI's final message was inability to save a snapshot
+after cap-triggered cancellation, not the original admission deadline. All
+49523 failed reconciliation items and one failed allocation were canceled.
+No snapshot was added and no payload restore was accepted.
+
+Supported non-forced demotion pruned the abandoned transaction through normal
+expiry and required quiescence before closing the writer. The exact trial-owned
+daemon was then stopped with SIGINT and normally restarted on defaults; no
+forced shutdown, fencing bypass, cache override, or runtime-code change was
+used. Independent verification confirmed PID 960161, epoch 99, read-write and
+idle, 128 MiB metadata cache, 512 MiB block cache, 100 ms flush, no drop-ins,
+pinned binary/unit/environment/WAL, and exact original 143 snapshot IDs.
+
+The separately recorded strict disposition still rejects terminal pack retries
+and the original active transaction; later recovery does not reclassify the
+baseline as accepted. There is no matched cache comparison or completed backup.
+The residual transaction's creation/cleanup race is not established; offline
+cancellation/transaction-cleanup validation is required before another trial.
+No commit, push, permanent deployment, or subsequent launch was performed.
+
+## Offline pack publication retry accounting (2026-10-01)
+
+After separate approval for offline implementation and tests, `PublishPack`
+now delegates to `PublishPackWithRetryDetails`. Per-call results and bounded
+atomic counters distinguish generic Aborted responses from Commit aborts and
+recovered retries from terminal outcomes. Calls, failures, cancellation,
+deadline expiry, retry calls, active calls, and elapsed nanoseconds are reported
+once through the final `pack_publication_stats` backup JSON event after engine
+close. Quiet mode adds no text output. Retry policy is unchanged: 128 attempts,
+100 microsecond backoff capped at 25 ms, and the existing ten-minute default
+budget only when the caller has no deadline.
+
+Coordinated real-RPC tests published four packs sharing one blob. Successful
+recovery recorded four successful Commits and six recovered Commit aborts;
+cancel-after-Aborted recorded one successful Commit and three terminal aborts,
+none recovered. Client/server Commit outcomes matched exactly, with no active
+requests, transactions, or write intents. Catalog, locations, and aggregates
+matched successful publications; replay did not double-count aggregates.
+Pre-Commit aborts do not count as Commit recovery. Deadline, cancellation,
+invalid input, retry exhaustion, JSON/quiet output, and canceled backup-close
+final emission checks passed under race. Neighboring schema, pack, history,
+tier, read-session, and backup-close race checks also passed.
+
+Artifacts are sealed separately under
+`/volume2/NASDA2/rustic/db.test/pack-retry-accounting-20261001-dJLcy6`.
+Its prospective checker requires one valid pack outcomes event and includes
+only recovered pack Commit aborts in exact failure attribution. It rejects
+terminal retries, unsettled or invalid counters, and unclassified failures;
+only the existing deliberate bounded-timeout cancellation allowance remains.
+All 124 checker cases passed, including missing/invalid fields and rejection
+of 65/66 failures even with hypothetical full pack attribution. The retained
+66-abort baseline remains rejected; its files were not modified, and its pack
+failure origin is still unproven.
+
+Read-only verification confirmed production unchanged at PID 903673, epoch 97,
+idle/read-write, 128 MiB metadata cache, 512 MiB block cache, 100 ms flush,
+no drop-ins, pinned binary/unit/environment/WAL, and exact original 143 snapshot
+IDs. No CLI deployment, daemon restart, production trial, commit, or push was
+performed. A fresh same-new-CLI cache pair requires separate launch approval.
+The original exit-zero backup, one new snapshot, and byte-for-byte restore
+acceptance remain outstanding.
+
+## Fresh cache trial stopped at the Commit budget (2026-10-01)
+
+After separate launch approval, a fresh 128/1024 MiB metadata-cache pair used
+the same newly built accounting-enabled CLI for both variants (SHA256
+`f43b7a235992da7488f3fb1908fec9cd772e6e4c32a50ee18e17b49b97c62a1e`). The source
+accounting diffs exactly matched the sealed offline repair. Ordinary grouping,
+512 MiB block cache, 100 ms flush, 52 sources, workload arguments, and the
+3600-second ceiling remained fixed. Artifacts are under
+`/volume2/NASDA2/rustic/db.test/metadata-cache-pair-20261001-0RJVgd`.
+
+The 128 MiB baseline was deliberately stopped after 3460.303 s with exit 130,
+after the sampler observed 66 failed Commits, exceeding the unchanged budget
+of 64. Client and daemon exactly matched 67876 attempts: 67810 successes,
+66 Aborted responses, and zero Commit cancellations/timeouts/active requests.
+The final progress was 181984 files and 170453058290 logical bytes. All 143
+snapshot IDs remained unchanged; no new snapshot or payload restore was accepted.
+The 1024 MiB candidate did not run, so there is no production cache comparison.
+
+Reconciliation reported 53983 reused and 52152 changed records. Its 50122
+failed items were all canceled following the intentional safety stop. The
+admission error was `context canceled`, not the original ten-second deadline.
+All directory publication counters were zero, falsifying directory publication
+as the source of this run's aborts. Allocation and file publication recovered
+abort counts were also zero. Exact counter parity alone does not establish
+successful retry recovery; the strict attribution gate remained rejected.
+
+There were 99 successful Commits outside the reported allocation/file/directory
+publication calls. The remaining nearby pack-ingestion path is
+`DaemonEngine.storePack` -> `SchemaStore.PublishPack` -> `importPackOnce`.
+`PublishPack` has an existing Aborted retry loop but no outcome attribution.
+That gap is confirmed, not proof that all 66 failures came from pack ingestion.
+The next offline gate is pack-publication retry attribution and conflict/recovery
+validation before another production comparison. Neither the failure budget
+nor deadlines were raised, and no further runtime change was made.
+
+The controller restored defaults, and independent verification confirmed PID
+903673, epoch 97, read-write and idle, 128 MiB metadata cache, 512 MiB block
+cache, and 100 ms flush. The pinned daemon, original unit/environment hashes,
+WAL binding, and exact original 143 snapshot IDs matched, with no drop-in left.
+Primary trial error, restored state, and independent restoration verification
+are retained separately; no forced daemon shutdown was used.
+
+## Offline directory retry accounting repair (2026-10-01)
+
+After explicit approval for offline accounting repairs and regression tests,
+directory revision reservations now use the existing retry-count allocation
+helper. Both singleton and shared-block reservations contribute to the general
+revision-allocation metrics, once per actual reservation attempt; reserved
+revisions now include directory blocks. Lazy reservation, sibling overlap,
+failure propagation, and retry/cancellation behavior remain unchanged.
+
+Directory publication now exposes separate calls, failures, duration, recovered
+and terminal aborts, Commit-specific aborts, and retry-call counters. File
+publication counters remain file-only. Reused directories add neither allocation
+nor publication attempts. These are accounting changes, not larger deadlines,
+new retries, atomic grouping, or a permanent cache change.
+
+Validation includes singleton/four-sibling allocation and publication matrices
+for successful recovery, terminal failure, and cancellation. Publication cases
+distinguish total aborts from Commit-specific aborts and check reuse and error
+identity. The six allocation cases first failed against the original code and
+passed after the repair. Existing file retry and sibling-overlap tests pass.
+The full reconciliation race suite passed with an isolated test daemon.
+
+The existing daemon-backed directory/reopen test now checks exact client/server
+Commit parity: 65 directory publications plus 17 reservations produced 82
+successful Commits and zero failures. A second reuse pass issued no Commits,
+and the reopened root retained all 64 children. This is offline correctness
+evidence, not production performance or proof of the origin of the earlier
+33 aborts.
+
+A separate prospective checker is retained under
+`/volume2/NASDA2/rustic/db.test/directory-retry-accounting-20261001-JY8cv4`.
+It requires directory retry fields, includes recovered directory Commit aborts
+in exact retry attribution, rejects terminal directory outcomes, and recognizes
+directory-only publication. Its 59 self-test cases pass. Applied to the retained
+baseline counters, it still rejects missing retry outcomes; historical trial
+artifacts and their rejected disposition were not changed. A fresh matched
+production pair requires the same newly built CLI for both variants and separate
+launch approval. No production trial, restart, deployment, or snapshot/restore
+acceptance was performed as part of this offline repair.
+
+## Approved metadata-cache trial held at the baseline gate (2026-09-30)
+
+The approved comparison kept ordinary publication, the 512 MiB block cache,
+100 ms flush interval, sources, workload arguments, and common CLI unchanged
+between planned 128 and 1024 MiB metadata-cache variants. Each variant had a
+3600-second safety ceiling, not a completion estimate. The disposable admission
+clone received a `.nobackup` marker before either variant could crawl its parent.
+Artifacts are under
+`/volume2/NASDA2/rustic/db.test/metadata-cache-pair-20260930-xmMZfn`.
+
+Only the 128 MiB baseline ran. It reached the ceiling in 3601.551 s, with wrapper
+exit 124, 138644 files, and 73713352807 logical bytes. It published no snapshot
+and did not reproduce R62's admission deadline. Client and daemon exactly matched
+71296 Commit attempts: 71263 successes, 33 Aborted responses, and zero Commit
+cancellations/timeouts. All requests settled and the scratch directory emptied.
+Nevertheless, the acceptance gate rejected the run: reconciliation reported no
+recovered Commit aborts, so the 33 failures were not fully attributed to retries.
+The 1024 MiB candidate was held; this is not a completed comparison, cache
+mitigation acceptance, successful backup, or payload-restore result.
+
+Two harness defects were repaired without relaxing acceptance: a remaining
+legacy analyzer assertion still expected 25 ms, and an immediate MainPID hash
+check during restoration saw the systemd child before exec. Its rejected hash
+exactly matched systemd, while the subsequently running daemon matched the
+pinned binary. The hash check now remains in the bounded readiness loop. All
+49 analyzer gate self-tests passed after correcting its configuration checks;
+reanalyzing the original baseline still rejected missing retry attribution.
+
+A local accounting gap is confirmed: directory publication discards the retry
+counts returned by `PublishReconciledRevisionWithRetryDetails`, and directory
+revision-block reservation bypasses the retry-count API. These gaps do not prove
+retrospectively that all 33 baseline aborts came from directories. The next gate
+requires offline directory retry accounting and validation before a fresh
+same-CLI matched production pair, not reclassifying unobserved retries as safe.
+
+Independent restoration verification found PID 879117, epoch 95, read-write and
+idle, with 128 MiB metadata cache, 512 MiB block cache, and 100 ms flush. All 143
+original snapshot IDs, daemon binary, original unit/environment hashes, and WAL
+binding matched; no drop-in remained. Original controller/analyzer errors are
+retained, with separate restoration verification, disposition, and repaired
+harness/artifact hashes. No runtime code change or permanent cache adoption was
+made, and no new snapshot was available for the queued byte-for-byte restores.
+
+## Representative encrypted admission clone (2026-09-30)
+
+Following explicit permission to copy production metadata, an idle-gated SIGINT
+pause produced a complete database/WAL copy at
+`/ncl1-1-vs-50/fme_dump/amakura/db.admission-20260930`. Rsync checksum verification
+completed before production restarted. Copy and verification took 490.908 s.
+Production PID 717448/epoch 92 became PID 830433/epoch 93, with exactly the same
+143 snapshot IDs, unit/environment hashes, pinned daemon, 100 ms flush interval,
+128 MiB metadata cache, and 512 MiB block cache. No backup trial or deployment
+was performed during clone creation. The 38 GiB disposable database is retained
+on NFS for follow-up.
+
+Raw logs, copy controller, validation/restoration records, and WAL relocation
+evidence are under
+`/volume2/NASDA2/rustic/db.test/admission-clone-20260930`. The configured production
+alias `/volume2/NASDA2/rustic/db` resolves to the source NFS directory. Initial
+clone startup correctly rejected its copied post-import WAL binding, which
+still named production's absolute WAL path. Only the clone's control record was
+relocated to its copied WAL directory, preserving original bytes and proving
+the production binding unchanged. Neither validator nor writer fencing was
+disabled, and no database reset was used.
+
+`TestProcessClonedBlobLookup` is opt-in via `VAULTICDB_TEST_CLONE_ROOT`, refuses
+the live directory and aliases, requires the checksum-validation marker, and
+opens required-encryption read sessions on the clone. It samples 512 existing
+blobs across 64 ID prefixes plus 128 deterministic, independently verified
+absent IDs, checks exact sizes/absence, shuffles a fixed order, and measures
+queue delay separately from RPC latency with 1, 8, and 32 callers. Each caller
+retains the normal 10-second RPC deadline; the test adds no retries. Each
+concurrency case reopens the daemon, then repeats the same workload warm.
+Engine-cold is not host/NFS-cache-cold: the copy and sampler warmed filesystem
+caches, and no host-wide cache dropping was attempted.
+
+All baseline lookups passed; the maximum observed RPC latency was 73.928 ms.
+The one-caller warm median was 17.890 ms, close to R62's 19.463 ms mean, but the
+fatal ten-second outlier did not reproduce. Transaction read locks are shared;
+measured slot/map waits were negligible, and fencing performed no object reads
+during these lookup passes.
+
+The main object-store stream counted 4.85-6.99 GB of ciphertext across each
+640-call baseline pass, including warm repeats. This measures object-store
+bytes, not physical NFS wire/disk bytes: kernel/server caching can satisfy I/O.
+Sampled 275 MB encrypted SSTs use the current 256 KiB authenticated chunks.
+The encryption wrapper requests bounded ciphertext ranges and the local
+conditional adapter forwards those ranges unchanged. Oversized encryption
+chunks and an exclusive read-session lock did not explain the observed cost.
+
+### Bounded metadata-cache discrimination
+
+`VAULTICDB_TEST_CLONE_META_CACHE_MIB` permits 128-1024 MiB on the clone only.
+The probe verifies configured metadata/block caches and keeps the 100 ms
+interval, 512 MiB block cache, encryption, release daemon and exact samples
+unchanged. Reversed-order repetitions supported metadata-cache churn as a
+routine cost in this representative keyspace:
+
+| Metadata cache | 32-caller engine-cold seconds | Warm seconds | Initial warm object-store bytes |
+| --- | --- | --- | --- |
+| 128 MiB | 0.426-0.465 | 0.394-0.430 | 4,850,221,962 |
+| 512 MiB | 0.248-0.251 | 0.184-0.203 | 1,985,169,742 |
+| 1024 MiB | 0.119-0.136 | 0.043-0.051 | 155,154,670 |
+
+The initial warm GET count fell from 1,730 to 61 at 1024 MiB, and median RPC
+latency fell from 18.992 to 1.076 ms. All passes preserved exact present and
+absent results, with zero failures, engine writes, or Commit attempts. Separate
+race-detector runs passed and report present/absent latency distributions;
+their timing is not mixed into the non-race performance table. Synthetic queue
+delay describes a fixed enqueued batch, not the production source backlog.
+
+### Decision and remaining uncertainty
+
+The bounded 1024 MiB metadata cache is a verified offline mitigation for
+read-amplification/latency in this clone. It is not proof that cache churn
+caused R62's fatal outlier, and no speculative timeout, retry, negative-cache,
+encryption, or locking change is justified by the unreproduced failure.
+Production remains at 128 MiB metadata cache and 100 ms flush interval.
+A separately approved matched trial should isolate 128 versus 1024 MiB metadata
+cache before combining a flush-cadence experiment: keep ordinary grouping,
+512 MiB block cache and 100 ms flush fixed. Exact Commit parity, idle cleanup,
+pinned identities, workload-sized cap, one new snapshot after exit 0, and
+representative byte-for-byte restores remain mandatory acceptance gates.
+
 ## Offline roadmap gates after writer recovery (2026-09-30)
 
 No production trial, deployment, configuration change, or production snapshot

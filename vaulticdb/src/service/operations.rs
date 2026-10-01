@@ -268,6 +268,7 @@ impl Service {
             wal_cleanup_failures: wal_status.cleanup_failures,
             scan_stream: true,
             publication_fence: true,
+            begin_reconciliation: true,
         }))
     }
 

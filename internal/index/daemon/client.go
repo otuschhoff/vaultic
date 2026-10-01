@@ -501,11 +501,12 @@ type durableIdempotencyRecord struct {
 
 // Limits are the bounded-work capabilities advertised by vaulticdb.
 type Limits struct {
-	MaxBatchItems    uint32
-	MaxMessageBytes  uint32
-	MaxPageItems     uint32
-	ScanStream       bool
-	PublicationFence bool
+	MaxBatchItems       uint32
+	MaxMessageBytes     uint32
+	MaxPageItems        uint32
+	ScanStream          bool
+	PublicationFence    bool
+	BeginReconciliation bool
 }
 
 // KeyValue is one binary metadata record returned by a scan.
@@ -1261,6 +1262,14 @@ func (c *authenticatedClient) Commit(
 	return c.VaulticDBClient.Commit(withAuth(ctx, c.token), in, callOptions...)
 }
 
+func (c *authenticatedClient) BeginOwned(ctx context.Context, in *vaulticdbv1.BeginOwnedRequest, callOptions ...grpc.CallOption) (*vaulticdbv1.BeginResponse, error) {
+	return c.VaulticDBClient.BeginOwned(withAuth(ctx, c.token), in, callOptions...)
+}
+
+func (c *authenticatedClient) CancelBegin(ctx context.Context, in *vaulticdbv1.CancelBeginRequest, callOptions ...grpc.CallOption) (*vaulticdbv1.Empty, error) {
+	return c.VaulticDBClient.CancelBegin(withAuth(ctx, c.token), in, callOptions...)
+}
+
 func (c *authenticatedClient) Rollback(
 	ctx context.Context,
 	in *vaulticdbv1.TransactionRequest,
@@ -1390,11 +1399,12 @@ func (c *Client) validate(ctx context.Context) error {
 		return fmt.Errorf("%w: daemon advertised invalid storage limits", ErrIncompatibleDaemon)
 	}
 	c.limits = Limits{
-		MaxBatchItems:    capabilities.GetMaxBatchItems(),
-		MaxMessageBytes:  capabilities.GetMaxMessageBytes(),
-		MaxPageItems:     capabilities.GetMaxPageItems(),
-		ScanStream:       capabilities.GetScanStream(),
-		PublicationFence: capabilities.GetPublicationFence(),
+		MaxBatchItems:       capabilities.GetMaxBatchItems(),
+		MaxMessageBytes:     capabilities.GetMaxMessageBytes(),
+		MaxPageItems:        capabilities.GetMaxPageItems(),
+		ScanStream:          capabilities.GetScanStream(),
+		PublicationFence:    capabilities.GetPublicationFence(),
+		BeginReconciliation: capabilities.GetBeginReconciliation(),
 	}
 	c.encryption = EncryptionInfo{
 		Enabled: capabilities.GetEncryptionEnabled(), Algorithm: capabilities.GetEncryptionAlgorithm(),

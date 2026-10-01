@@ -119,7 +119,7 @@ func TestBackupReportsReconciliationStats(t *testing.T) {
 	stats := reconcile.Metrics{
 		PublicationGroups: [4]uint64{1, 2, 3, 4}, RevisionAllocationCalls: 7, RevisionAllocationFailures: 1,
 		RevisionAllocationFailedCanceled: 1,
-		Failed: 3, FailedCanceled: 2,
+		Failed:                           3, FailedCanceled: 2,
 		RevisionAllocationRecoveredAborts: 3, RevisionAllocationTerminalAborts: 2,
 		RevisionAllocationRecoveredRetryCalls: 2, RevisionAllocationTerminalRetryCalls: 1,
 		RevisionsReserved: 20, InodeRevisionsAssigned: 18, RevisionAllocationNS: 100,
@@ -166,6 +166,70 @@ func TestBackupReportsCommitRPCStats(t *testing.T) {
 	}
 	if record.MessageType != "commit_rpc_stats" || record.CommitRPCStats != stats {
 		t.Fatalf("invalid commit RPC stats: %+v", record)
+	}
+}
+
+func TestBackupReportsPackPublicationStats(t *testing.T) {
+	term := &ui.MockTerminal{}
+	run := &backupRun{term: term, globalOptions: global.Options{JSON: true}}
+	stats := daemon.PackPublicationStats{Calls: 4, Failures: 1, FailedCanceled: 1,
+		RecoveredAborts: 3, RecoveredCommitAborts: 2, TerminalAborts: 1, TerminalCommitAborts: 1,
+		RecoveredRetryCalls: 2, TerminalRetryCalls: 1, NS: 100}
+	run.reportPackPublicationStats(stats)
+	if len(term.Output) != 1 {
+		t.Fatalf("output=%v", term.Output)
+	}
+	var record struct {
+		MessageType string `json:"message_type"`
+		daemon.PackPublicationStats
+	}
+	if err := json.Unmarshal([]byte(term.Output[0]), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.MessageType != "pack_publication_stats" || record.PackPublicationStats != stats {
+		t.Fatalf("invalid pack publication stats: %+v", record)
+	}
+	run.globalOptions = global.Options{Quiet: true}
+	run.reportPackPublicationStats(stats)
+	if len(term.Output) != 1 {
+		t.Fatal("quiet mode emitted pack publication stats")
+	}
+}
+
+func TestBackupCloseReportsPackStatsAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	term := &ui.MockTerminal{}
+	engine := enginepkg.NewDaemonEngine(&daemon.Client{})
+	repo := repository.TestRepository(t)
+	repo.SetEngine(&backupCloseEngine{LegacyEngine: enginepkg.NewLegacyEngine(), close: func() error {
+		if len(term.Output) != 0 {
+			t.Fatal("pack stats emitted before engine close")
+		}
+		if err := engine.SchemaStore().PublishPack(ctx, daemon.PublishedPack{}); err == nil {
+			t.Fatal("invalid publication unexpectedly succeeded")
+		}
+		return nil
+	}})
+	run := &backupRun{ctx: ctx, repo: repo, authoritativeEngine: engine, term: term,
+		globalOptions: global.Options{JSON: true}}
+	run.close()
+	var records []struct {
+		MessageType string `json:"message_type"`
+		daemon.PackPublicationStats
+	}
+	for _, output := range term.Output {
+		var record struct {
+			MessageType string `json:"message_type"`
+			daemon.PackPublicationStats
+		}
+		if err := json.Unmarshal([]byte(output), &record); err == nil && record.MessageType == "pack_publication_stats" {
+			records = append(records, record)
+		}
+	}
+	if len(records) != 1 || records[0].PackPublicationStats != engine.SchemaStore().PackPublicationStats() ||
+		records[0].Calls != 1 || records[0].Failures != 1 || records[0].Active != 0 {
+		t.Fatalf("missing final pack outcomes: %+v output=%v", records, term.Output)
 	}
 }
 

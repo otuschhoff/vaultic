@@ -87,6 +87,7 @@ pub(crate) struct Service {
     pub(crate) shutdown: watch::Sender<bool>,
     pub(crate) storage: Arc<RwLock<Option<Arc<Storage>>>>,
     pub(crate) finalization_locks: Arc<transactions::FinalizationLocks>,
+    pub(crate) begin_reconciliations: Arc<transactions::BeginReconciliations>,
 }
 
 impl Service {
@@ -421,6 +422,20 @@ impl VaulticDb for Service {
         self.handle_await_durable_through(request).await
     }
 
+    async fn begin_owned(
+        &self,
+        request: Request<proto::BeginOwnedRequest>,
+    ) -> Result<Response<BeginResponse>, Status> {
+        self.handle_begin_owned(request).await
+    }
+
+    async fn cancel_begin(
+        &self,
+        request: Request<proto::CancelBeginRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        self.handle_cancel_begin(request).await
+    }
+
     async fn begin(&self, request: Request<Empty>) -> Result<Response<BeginResponse>, Status> {
         self.handle_begin(request).await
     }
@@ -487,6 +502,7 @@ mod lifecycle_tests {
             shutdown,
             storage: Arc::new(RwLock::new(None)),
             finalization_locks: Arc::default(),
+            begin_reconciliations: Arc::default(),
         }
     }
 

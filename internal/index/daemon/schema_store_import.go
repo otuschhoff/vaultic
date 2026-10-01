@@ -3,10 +3,12 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"slices"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/index/schema"
@@ -29,6 +31,74 @@ type packImportPlan struct {
 // locations, and aggregates. Retries are idempotent and preserve existing
 // duplicate blob locations from other packs.
 func (store *SchemaStore) PublishPack(ctx context.Context, published PublishedPack) error {
+	_, _, err := store.PublishPackWithRetryDetails(ctx, published)
+	return err
+}
+
+type PackPublicationStats struct {
+	Calls                 uint64 `json:"calls"`
+	Failures              uint64 `json:"failures"`
+	FailedCanceled        uint64 `json:"failed_canceled"`
+	FailedTimedOut        uint64 `json:"failed_timed_out"`
+	RecoveredAborts       uint64 `json:"recovered_aborts"`
+	TerminalAborts        uint64 `json:"terminal_aborts"`
+	RecoveredCommitAborts uint64 `json:"recovered_commit_aborts"`
+	TerminalCommitAborts  uint64 `json:"terminal_commit_aborts"`
+	RecoveredRetryCalls   uint64 `json:"recovered_retry_calls"`
+	TerminalRetryCalls    uint64 `json:"terminal_retry_calls"`
+	Active                uint64 `json:"active"`
+	NS                    uint64 `json:"ns"`
+}
+
+type packPublicationCounters struct {
+	calls, failures, failedCanceled, failedTimedOut atomic.Uint64
+	recoveredAborts, terminalAborts                 atomic.Uint64
+	recoveredCommitAborts, terminalCommitAborts     atomic.Uint64
+	recoveredRetryCalls, terminalRetryCalls         atomic.Uint64
+	active, ns                                      atomic.Uint64
+}
+
+func (store *SchemaStore) PackPublicationStats() PackPublicationStats {
+	metrics := &store.packPublication
+	return PackPublicationStats{
+		Calls: metrics.calls.Load(), Failures: metrics.failures.Load(),
+		FailedCanceled: metrics.failedCanceled.Load(), FailedTimedOut: metrics.failedTimedOut.Load(),
+		RecoveredAborts: metrics.recoveredAborts.Load(), TerminalAborts: metrics.terminalAborts.Load(),
+		RecoveredCommitAborts: metrics.recoveredCommitAborts.Load(), TerminalCommitAborts: metrics.terminalCommitAborts.Load(),
+		RecoveredRetryCalls: metrics.recoveredRetryCalls.Load(), TerminalRetryCalls: metrics.terminalRetryCalls.Load(),
+		Active: metrics.active.Load(), NS: metrics.ns.Load(),
+	}
+}
+
+func (store *SchemaStore) PublishPackWithRetryDetails(ctx context.Context, published PublishedPack) (aborted, commitAborted uint64, resultErr error) {
+	metrics := &store.packPublication
+	started := time.Now()
+	metrics.calls.Add(1)
+	metrics.active.Add(1)
+	defer func() {
+		metrics.ns.Add(uint64(time.Since(started)))
+		if resultErr != nil {
+			metrics.failures.Add(1)
+			metrics.terminalAborts.Add(aborted)
+			metrics.terminalCommitAborts.Add(commitAborted)
+			if aborted > 0 {
+				metrics.terminalRetryCalls.Add(1)
+			}
+			if errors.Is(resultErr, context.Canceled) || status.Code(resultErr) == codes.Canceled {
+				metrics.failedCanceled.Add(1)
+			}
+			if errors.Is(resultErr, context.DeadlineExceeded) || status.Code(resultErr) == codes.DeadlineExceeded {
+				metrics.failedTimedOut.Add(1)
+			}
+		} else {
+			metrics.recoveredAborts.Add(aborted)
+			metrics.recoveredCommitAborts.Add(commitAborted)
+			if aborted > 0 {
+				metrics.recoveredRetryCalls.Add(1)
+			}
+		}
+		metrics.active.Add(^uint64(0))
+	}()
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, 10*time.Minute)
@@ -41,32 +111,36 @@ func (store *SchemaStore) PublishPack(ctx context.Context, published PublishedPa
 	}
 	backoff := 100 * time.Microsecond
 	for range revisionAllocationAttempts {
-		err := store.importPackOnce(ctx, imported)
+		err, fromCommit := store.importPackOnce(ctx, imported)
 		if status.Code(err) != codes.Aborted {
-			return err
+			return aborted, commitAborted, err
+		}
+		aborted++
+		if fromCommit {
+			commitAborted++
 		}
 		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return ctx.Err()
+			return aborted, commitAborted, ctx.Err()
 		case <-timer.C:
 		}
 		backoff = min(backoff*2, 25*time.Millisecond)
 	}
-	return fmt.Errorf("publish pack: transaction conflict retry limit exceeded")
+	return aborted, commitAborted, fmt.Errorf("publish pack: transaction conflict retry limit exceeded")
 }
 
 func (store *SchemaStore) importPackOnce(
 	ctx context.Context,
 	imported LegacyPackImport,
-) error {
+) (error, bool) {
 	if err := preparePackImport(&imported, false); err != nil {
-		return err
+		return err, false
 	}
 	transaction, err := store.client.Begin(ctx)
 	if err != nil {
-		return err
+		return err, false
 	}
 	fail := func(err error) error {
 		rollbackTransaction(ctx, transaction)
@@ -74,16 +148,16 @@ func (store *SchemaStore) importPackOnce(
 	}
 	plan, limits, err := store.planPackImport(ctx, transaction, imported)
 	if err != nil {
-		return fail(fmt.Errorf("plan pack import: %w", err))
+		return fail(fmt.Errorf("plan pack import: %w", err)), false
 	}
 	if err := writeTransactionBatches(ctx, transaction, limits, plan.puts, nil); err != nil {
-		return fail(fmt.Errorf("write pack import: %w", err))
+		return fail(fmt.Errorf("write pack import: %w", err)), false
 	}
 	if err := transaction.Commit(ctx); err != nil {
 		rollbackTransaction(ctx, transaction)
-		return err
+		return err, true
 	}
-	return nil
+	return nil, false
 }
 
 func (store *SchemaStore) planPackImport(

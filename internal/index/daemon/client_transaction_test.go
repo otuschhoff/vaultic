@@ -5,13 +5,1078 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"os"
 	"reflect"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	vaulticdbv1 "github.com/otuschhoff/vaultic/internal/index/proto/vaulticdb/v1"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
+
+type packCancelKey struct{}
+
+type canceledBeginRPC struct {
+	vaulticdbv1.VaulticDBClient
+	cancel          context.CancelFunc
+	caller          context.Context
+	hideResponse    bool
+	response        *vaulticdbv1.BeginResponse
+	rollbackErr     error
+	begins          atomic.Uint64
+	rpcDeadline     time.Time
+	logicalDeadline int64
+}
+
+func (rpc *canceledBeginRPC) Begin(ctx context.Context, request *vaulticdbv1.Empty, options ...grpc.CallOption) (*vaulticdbv1.BeginResponse, error) {
+	rpc.begins.Add(1)
+	rpc.rpcDeadline, _ = ctx.Deadline()
+	rpc.logicalDeadline = request.GetContext().GetDeadlineUnixMs()
+	response, err := rpc.VaulticDBClient.Begin(ctx, request, options...)
+	if err != nil {
+		return response, err
+	}
+	return rpc.finish(ctx, response)
+}
+
+func (rpc *canceledBeginRPC) BeginPublication(ctx context.Context, request *vaulticdbv1.BeginPublicationRequest, options ...grpc.CallOption) (*vaulticdbv1.BeginResponse, error) {
+	rpc.begins.Add(1)
+	rpc.rpcDeadline, _ = ctx.Deadline()
+	rpc.logicalDeadline = request.GetContext().GetDeadlineUnixMs()
+	response, err := rpc.VaulticDBClient.BeginPublication(ctx, request, options...)
+	if err != nil {
+		return response, err
+	}
+	return rpc.finish(ctx, response)
+}
+
+func (rpc *canceledBeginRPC) BeginOwned(ctx context.Context, request *vaulticdbv1.BeginOwnedRequest, options ...grpc.CallOption) (*vaulticdbv1.BeginResponse, error) {
+	rpc.begins.Add(1)
+	rpc.rpcDeadline, _ = ctx.Deadline()
+	rpc.logicalDeadline = request.GetContext().GetDeadlineUnixMs()
+	response, err := rpc.VaulticDBClient.BeginOwned(ctx, request, options...)
+	if err != nil {
+		return response, err
+	}
+	return rpc.finish(ctx, response)
+}
+
+func (rpc *canceledBeginRPC) finish(ctx context.Context, response *vaulticdbv1.BeginResponse) (*vaulticdbv1.BeginResponse, error) {
+	if rpc.caller != nil {
+		ctx = rpc.caller
+	}
+	rpc.response = response
+	if rpc.cancel != nil {
+		rpc.cancel()
+	} else {
+		<-ctx.Done()
+	}
+	if rpc.hideResponse {
+		return nil, status.FromContextError(ctx.Err()).Err()
+	}
+	return response, nil
+}
+
+func (rpc *canceledBeginRPC) Rollback(ctx context.Context, request *vaulticdbv1.TransactionRequest, options ...grpc.CallOption) (*vaulticdbv1.Empty, error) {
+	if rpc.rollbackErr != nil {
+		return nil, rpc.rollbackErr
+	}
+	return rpc.VaulticDBClient.Rollback(ctx, request, options...)
+}
+
+func TestClientCanceledBeginCleansOwnedTransaction(t *testing.T) {
+	for _, scenario := range []struct{ publication, deadline, rollbackFail bool }{
+		{}, {publication: true}, {deadline: true}, {publication: true, deadline: true},
+		{rollbackFail: true}, {publication: true, rollbackFail: true},
+		{deadline: true, rollbackFail: true}, {publication: true, deadline: true, rollbackFail: true},
+	} {
+		t.Run(fmt.Sprintf("publication=%t/deadline=%t/rollbackFail=%t", scenario.publication, scenario.deadline, scenario.rollbackFail), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			client, err := Ensure(ctx, Options{Socket: testSocket(t), RepositoryID: "canceled-begin-cleanup", DaemonPath: daemonBinary(t), DataDir: t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close(context.Background())
+			workCtx, stop := context.WithCancel(ctx)
+			if scenario.deadline {
+				stop()
+				workCtx, stop = context.WithTimeout(ctx, 2*time.Second)
+			}
+			defer stop()
+			rpc := &canceledBeginRPC{VaulticDBClient: client.rpc, cancel: stop, caller: workCtx}
+			if scenario.deadline {
+				rpc.cancel = nil
+			}
+			if scenario.rollbackFail {
+				rpc.rollbackErr = status.Error(codes.Unavailable, "test rollback unavailable")
+			}
+			client.rpc = rpc
+			client.limits.BeginReconciliation = false
+			var transaction *Transaction
+			var beginErr error
+			started := time.Now()
+			if scenario.publication {
+				transaction, beginErr = client.beginPublication(workCtx, []schema.ID{daemonTestID(90)})
+			} else {
+				transaction, beginErr = client.Begin(workCtx)
+			}
+			logicalDeadline, _ := workCtx.Deadline()
+			if rpc.rpcDeadline.Before(started.Add(defaultRPCDeadline)) || rpc.rpcDeadline.After(time.Now().Add(defaultRPCDeadline)) ||
+				rpc.logicalDeadline != logicalDeadline.UnixMilli() {
+				t.Fatalf("Begin handoff bound or logical deadline changed: rpc=%v logical=%d want=%v", rpc.rpcDeadline, rpc.logicalDeadline, logicalDeadline)
+			}
+			if transaction != nil {
+				rpc.rollbackErr = nil
+				_ = rollbackTransaction(workCtx, transaction)
+				t.Fatal("canceled Begin returned transaction ownership instead of cleaning it up")
+			}
+			expectedErr, expectedCode := context.Canceled, codes.Canceled
+			if scenario.deadline {
+				expectedErr, expectedCode = context.DeadlineExceeded, codes.DeadlineExceeded
+			}
+			if !errors.Is(beginErr, expectedErr) || status.Code(beginErr) != expectedCode || rpc.begins.Load() != 1 {
+				t.Fatalf("caller cancellation identity or attempts changed: err=%v begins=%d", beginErr, rpc.begins.Load())
+			}
+			var expectedTransactions uint64
+			if scenario.rollbackFail {
+				expectedTransactions = 1
+				if !errors.Is(beginErr, rpc.rollbackErr) || !strings.Contains(beginErr.Error(), "rollback canceled Begin") {
+					t.Fatalf("rollback failure hidden: %v", beginErr)
+				}
+			}
+			after, err := client.WriterStatus(ctx)
+			if err != nil || after.ActiveTransactions != expectedTransactions || after.ActiveWriteIntents != 0 || client.CommitRPCStats().Attempts != 0 {
+				t.Fatalf("canceled Begin outcome: tx=%d intents=%d err=%v", after.ActiveTransactions, after.ActiveWriteIntents, err)
+			}
+			if scenario.rollbackFail {
+				rpc.rollbackErr = nil
+				owned, err := client.transactionFromBegin(rpc.response)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := rollbackTransaction(workCtx, owned); err != nil {
+					t.Fatal(err)
+				}
+			}
+			settled, err := client.WriterStatus(ctx)
+			if err != nil || settled.ActiveTransactions != 0 || settled.ActiveWriteIntents != 0 {
+				t.Fatalf("fixture cleanup did not settle: tx=%d intents=%d err=%v", settled.ActiveTransactions, settled.ActiveWriteIntents, err)
+			}
+		})
+	}
+}
+
+func TestClientCanceledBeginSkipsAdmission(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	client, err := Ensure(ctx, Options{Socket: testSocket(t), RepositoryID: "canceled-begin-no-admission", DaemonPath: daemonBinary(t), DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	for _, deadline := range []bool{false, true} {
+		workCtx, stop := context.WithCancel(ctx)
+		if deadline {
+			stop()
+			workCtx, stop = context.WithDeadline(ctx, time.Now().Add(-time.Second))
+		}
+		stop()
+		rpc := &canceledBeginRPC{VaulticDBClient: client.rpc, cancel: stop}
+		client.rpc = rpc
+		for _, publication := range []bool{false, true} {
+			var transaction *Transaction
+			var beginErr error
+			if publication {
+				transaction, beginErr = client.beginPublication(workCtx, []schema.ID{daemonTestID(90)})
+			} else {
+				transaction, beginErr = client.Begin(workCtx)
+			}
+			if transaction != nil || !errors.Is(beginErr, workCtx.Err()) || rpc.begins.Load() != 0 {
+				t.Fatalf("canceled caller admitted: deadline=%t publication=%t err=%v calls=%d", deadline, publication, beginErr, rpc.begins.Load())
+			}
+		}
+		client.rpc = rpc.VaulticDBClient
+	}
+}
+
+func TestSchemaStoreCanceledBeginOwnership(t *testing.T) {
+	testSchemaStoreCanceledBeginOwnership(t, false)
+}
+
+func TestSchemaStoreOwnedBeginOwnership(t *testing.T) {
+	testSchemaStoreCanceledBeginOwnership(t, true)
+}
+
+func testSchemaStoreCanceledBeginOwnership(t *testing.T, owned bool) {
+	for _, scenario := range []struct {
+		allocation, deadline, hideResponse bool
+	}{
+		{}, {hideResponse: true}, {deadline: true}, {deadline: true, hideResponse: true},
+		{allocation: true}, {allocation: true, hideResponse: true},
+		{allocation: true, deadline: true}, {allocation: true, deadline: true, hideResponse: true},
+	} {
+		t.Run(fmt.Sprintf("allocation=%t/deadline=%t/hideResponse=%t", scenario.allocation, scenario.deadline, scenario.hideResponse), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			client, err := Ensure(ctx, Options{Socket: testSocket(t), RepositoryID: "canceled-begin-ownership", DaemonPath: daemonBinary(t), DataDir: t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close(context.Background())
+			workCtx, stop := context.WithCancel(ctx)
+			if scenario.deadline {
+				stop()
+				workCtx, stop = context.WithTimeout(ctx, 2*time.Second)
+			}
+			defer stop()
+			rpc := &canceledBeginRPC{VaulticDBClient: client.rpc, cancel: stop, caller: workCtx, hideResponse: scenario.hideResponse}
+			if scenario.deadline {
+				rpc.cancel = nil
+			}
+			client.rpc = rpc
+			if owned && !client.Limits().BeginReconciliation {
+				t.Fatal("fixture did not negotiate owned Begin")
+			}
+			client.limits.BeginReconciliation = owned
+			store := NewSchemaStore(client)
+			published := readSessionTestPack(daemonTestID(20), daemonTestID(90))
+			var expectedCalls, canceled, expired uint64 = 1, 1, 0
+			expectedCode := codes.Canceled
+			if scenario.deadline {
+				expectedCode = codes.DeadlineExceeded
+				canceled, expired = 0, 1
+			}
+			if scenario.allocation {
+				first, aborted, allocationErr := store.AllocateRevisionBlockWithRetryCount(workCtx, 4)
+				err = allocationErr
+				if first != 0 || aborted != 0 {
+					t.Fatalf("canceled allocation reserved revisions: first=%d aborted=%d", first, aborted)
+				}
+				expectedCalls, canceled, expired = 0, 0, 0
+			} else {
+				err = store.PublishPack(workCtx, published)
+			}
+			if status.Code(err) != expectedCode || rpc.response.GetTransactionId() == "" {
+				t.Fatalf("Begin boundary not reached: response=%+v err=%v", rpc.response, err)
+			}
+			after, err := client.WriterStatus(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stats := store.PackPublicationStats()
+			var expectedTransactions uint64
+			if scenario.hideResponse && !owned {
+				expectedTransactions = 1
+			}
+			if after.ActiveTransactions != expectedTransactions || after.ActiveWriteIntents != 0 ||
+				client.CommitRPCStats().Attempts != 0 || stats.Calls != expectedCalls || stats.Failures != expectedCalls ||
+				stats.FailedCanceled != canceled || stats.FailedTimedOut != expired || stats.Active != 0 ||
+				stats.RecoveredAborts != 0 || stats.TerminalAborts != 0 {
+				t.Fatalf("canceled Begin ownership: stats=%+v status=%+v", stats, after)
+			}
+			for _, key := range [][]byte{schema.PackKey(published.PackID), schema.BlobKey(daemonTestID(90)),
+				schema.PackAggregateKey(schema.AggregateAll), schema.NextRevisionKey()} {
+				if _, found, err := store.Get(ctx, key); err != nil || found {
+					t.Fatalf("canceled Begin changed metadata: key=%x found=%t err=%v", key, found, err)
+				}
+			}
+			if scenario.hideResponse && !owned {
+				transaction, err := client.transactionFromBegin(rpc.response)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := rollbackTransaction(workCtx, transaction); err != nil {
+					t.Fatalf("known-ID rollback inherited cancellation: %v", err)
+				}
+				settled, err := client.WriterStatus(ctx)
+				if err != nil || settled.ActiveTransactions != 0 || settled.ActiveWriteIntents != 0 {
+					t.Fatalf("fixture cleanup did not settle: status=%+v err=%v", settled, err)
+				}
+			}
+			t.Logf("owned=%t hidden_response=%t residual_transactions=%d cleanup=settled", owned, scenario.hideResponse, after.ActiveTransactions)
+		})
+	}
+}
+
+type withheldBeginService struct {
+	vaulticdbv1.UnimplementedVaulticDBServer
+	upstream        vaulticdbv1.VaulticDBClient
+	responses       chan *vaulticdbv1.BeginResponse
+	finished        chan struct{}
+	release         <-chan struct{}
+	dropReply       bool
+	owned           *vaulticdbv1.BeginOwnedRequest
+	beginCalls      atomic.Uint64
+	cancelCalls     atomic.Uint64
+	cancelReplyLoss uint64
+	cancelFailure   bool
+	emptyReply      bool
+}
+
+func (service *withheldBeginService) BeginOwned(ctx context.Context, request *vaulticdbv1.BeginOwnedRequest) (*vaulticdbv1.BeginResponse, error) {
+	defer close(service.finished)
+	service.beginCalls.Add(1)
+	service.owned = request
+	response, err := service.upstream.BeginOwned(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	service.responses <- response
+	select {
+	case <-service.release:
+		if service.dropReply {
+			return nil, status.Error(codes.Unavailable, "test independent response loss")
+		}
+		if service.emptyReply {
+			return &vaulticdbv1.BeginResponse{}, nil
+		}
+		return response, nil
+	case <-ctx.Done():
+		return nil, status.FromContextError(ctx.Err()).Err()
+	}
+}
+
+func (service *withheldBeginService) CancelBegin(ctx context.Context, request *vaulticdbv1.CancelBeginRequest) (*vaulticdbv1.Empty, error) {
+	calls := service.cancelCalls.Add(1)
+	if request.GetBeginRequestId() != service.owned.GetBeginRequestId() || request.GetBeginDeadlineUnixMs() != service.owned.GetBeginDeadlineUnixMs() {
+		return nil, status.Error(codes.InvalidArgument, "cleanup identity changed")
+	}
+	if service.cancelFailure {
+		return nil, status.Error(codes.PermissionDenied, "test cleanup rejected")
+	}
+	response, err := service.upstream.CancelBegin(ctx, request)
+	if err == nil && calls <= service.cancelReplyLoss {
+		return nil, status.Error(codes.Unavailable, "test cleanup response loss")
+	}
+	return response, err
+}
+
+func (service *withheldBeginService) Begin(ctx context.Context, request *vaulticdbv1.Empty) (*vaulticdbv1.BeginResponse, error) {
+	defer close(service.finished)
+	response, err := service.upstream.Begin(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	service.responses <- response
+	select {
+	case <-service.release:
+		if service.dropReply {
+			return nil, status.Error(codes.Unavailable, "test independent response loss")
+		}
+		return response, nil
+	case <-ctx.Done():
+		return nil, status.FromContextError(ctx.Err()).Err()
+	}
+}
+
+func (service *withheldBeginService) Rollback(ctx context.Context, request *vaulticdbv1.TransactionRequest) (*vaulticdbv1.Empty, error) {
+	return service.upstream.Rollback(ctx, request)
+}
+
+func TestClientOwnedBeginReconciliationOverGRPC(t *testing.T) {
+	for _, publication := range []bool{false, true} {
+		for _, scenario := range []struct {
+			name                                                              string
+			cancel, deadline, dropReply, emptyReply, cancelFailure, rpcExpiry bool
+			cancelReplyLoss                                                   uint64
+		}{
+			{name: "lost-begin", dropReply: true},
+			{name: "canceled", cancel: true},
+			{name: "expired", deadline: true},
+			{name: "canceled-lost-begin", cancel: true, dropReply: true},
+			{name: "expired-lost-begin", deadline: true, dropReply: true},
+			{name: "lost-cleanup-reply", dropReply: true, cancelReplyLoss: 1},
+			{name: "both-cleanup-replies-lost", dropReply: true, cancelReplyLoss: 2},
+			{name: "cleanup-rejected", dropReply: true, cancelFailure: true},
+			{name: "malformed-reply", emptyReply: true},
+			{name: "rpc-deadline", rpcExpiry: true},
+		} {
+			t.Run(fmt.Sprintf("publication=%t/%s", publication, scenario.name), func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				client, err := Ensure(ctx, Options{Socket: testSocket(t), RepositoryID: "owned-begin-grpc", DaemonPath: daemonBinary(t), DataDir: t.TempDir()})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer client.Close(context.Background())
+				if !client.Limits().BeginReconciliation {
+					t.Fatal("fixture did not negotiate Begin reconciliation")
+				}
+				originalRPC := client.rpc
+				workCtx, stop := context.WithCancel(ctx)
+				if scenario.deadline {
+					stop()
+					workCtx, stop = context.WithTimeout(ctx, 2*time.Second)
+				}
+				defer stop()
+				release := make(chan struct{})
+				service := &withheldBeginService{upstream: originalRPC, responses: make(chan *vaulticdbv1.BeginResponse, 1), finished: make(chan struct{}), release: release, dropReply: scenario.dropReply, emptyReply: scenario.emptyReply, cancelFailure: scenario.cancelFailure, cancelReplyLoss: scenario.cancelReplyLoss}
+				if scenario.cancel || scenario.deadline {
+					service.release = workCtx.Done()
+				} else if !scenario.rpcExpiry {
+					close(release)
+				}
+				socket := testSocket(t)
+				listener, err := net.Listen("unix", socket)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer listener.Close()
+				if err := os.Chmod(socket, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				server := grpc.NewServer()
+				vaulticdbv1.RegisterVaulticDBServer(server, service)
+				go func() { _ = server.Serve(listener) }()
+				defer server.Stop()
+				connection, err := grpc.NewClient("unix://"+socket, grpc.WithTransportCredentials(insecure.NewCredentials()))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer connection.Close()
+				client.rpc = vaulticdbv1.NewVaulticDBClient(connection)
+				defer func() { client.rpc = originalRPC }()
+				result := make(chan error, 1)
+				started := time.Now()
+				go func() {
+					var transaction *Transaction
+					var beginErr error
+					if publication {
+						transaction, beginErr = client.beginPublication(workCtx, []schema.ID{daemonTestID(90)})
+					} else {
+						transaction, beginErr = client.Begin(workCtx)
+					}
+					if transaction != nil {
+						result <- fmt.Errorf("uncertain Begin exposed a transaction")
+						return
+					}
+					result <- beginErr
+				}()
+				select {
+				case <-service.responses:
+				case <-ctx.Done():
+					t.Fatal("owned Begin did not allocate")
+				}
+				logicalDeadline, _ := workCtx.Deadline()
+				handoff := time.UnixMilli(service.owned.GetBeginDeadlineUnixMs())
+				if service.owned.GetContext().GetDeadlineUnixMs() != logicalDeadline.UnixMilli() ||
+					handoff.Before(started.Add(defaultRPCDeadline-time.Millisecond)) || handoff.After(time.Now().Add(defaultRPCDeadline)) || len(service.owned.GetBeginRequestId()) != 32 {
+					t.Fatal("owned Begin identity, handoff bound or caller logical deadline changed")
+				}
+				if scenario.cancel {
+					stop()
+				}
+				var beginErr error
+				select {
+				case beginErr = <-result:
+				case <-ctx.Done():
+					t.Fatal("owned Begin did not settle")
+				}
+				if beginErr == nil {
+					t.Fatal("uncertain Begin succeeded")
+				}
+				uncertainCleanup := scenario.cancelFailure || scenario.cancelReplyLoss == 2
+				if scenario.dropReply && !uncertainCleanup && status.Code(beginErr) != codes.Unavailable {
+					t.Fatalf("lost Begin status changed: %v", beginErr)
+				}
+				if uncertainCleanup && status.Code(beginErr) != codes.FailedPrecondition {
+					t.Fatalf("uncertain cleanup was not terminal: %v", beginErr)
+				}
+				if scenario.rpcExpiry && status.Code(beginErr) != codes.DeadlineExceeded {
+					t.Fatalf("physical Begin timeout identity changed: %v", beginErr)
+				}
+				if (scenario.cancel || scenario.deadline) && !errors.Is(beginErr, workCtx.Err()) {
+					t.Fatalf("caller cancellation identity lost: %v", beginErr)
+				}
+				if strings.Contains(beginErr.Error(), "reconcile uncertain Begin") != uncertainCleanup {
+					t.Fatalf("cleanup uncertainty not preserved: %v", beginErr)
+				}
+				expectedCleanup := uint64(1)
+				if scenario.cancelReplyLoss > 0 {
+					expectedCleanup = 2
+				}
+				if service.beginCalls.Load() != 1 || service.cancelCalls.Load() != expectedCleanup {
+					t.Fatalf("unexpected RPC attempts: Begin=%d Cancel=%d", service.beginCalls.Load(), service.cancelCalls.Load())
+				}
+				client.rpc = originalRPC
+				after, err := client.WriterStatus(ctx)
+				var expectedTransactions uint64
+				if scenario.cancelFailure {
+					expectedTransactions = 1
+				}
+				if err != nil || after.ActiveTransactions != expectedTransactions || after.ActiveWriteIntents != 0 || client.CommitRPCStats().Attempts != 0 {
+					t.Fatalf("owned Begin ownership: transactions=%d intents=%d err=%v", after.ActiveTransactions, after.ActiveWriteIntents, err)
+				}
+				if scenario.cancelFailure {
+					if err := client.cancelBegin(ctx, service.owned); err != nil {
+						t.Fatal(err)
+					}
+				}
+				settled, err := client.WriterStatus(ctx)
+				if err != nil || settled.ActiveTransactions != 0 || settled.ActiveWriteIntents != 0 {
+					t.Fatalf("owned fixture did not settle: transactions=%d err=%v", settled.ActiveTransactions, err)
+				}
+			})
+		}
+	}
+}
+
+func TestClientOwnedBeginIdentityGuards(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	client, err := Ensure(ctx, Options{Socket: testSocket(t), RepositoryID: "owned-begin-identity", DaemonPath: daemonBinary(t), DataDir: t.TempDir(), AuthToken: "owned-begin-fixture-token", testEnvironment: []string{"VAULTICDB_WRITER_MINIMUM_TENURE=1ms"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	if !client.Limits().BeginReconciliation {
+		t.Fatal("Begin reconciliation not negotiated")
+	}
+	deadline := time.Now().Add(10 * time.Second).UnixMilli()
+	begin := &vaulticdbv1.BeginOwnedRequest{Context: requestContext(ctx), BeginRequestId: strings.Repeat("a", 32), BeginDeadlineUnixMs: deadline}
+	cleanup := &vaulticdbv1.CancelBeginRequest{Context: requestContext(ctx), BeginRequestId: begin.BeginRequestId, BeginDeadlineUnixMs: deadline}
+	unauthenticated := vaulticdbv1.NewVaulticDBClient(client.conn)
+	if _, err := unauthenticated.BeginOwned(ctx, begin); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("unauthenticated owned Begin accepted: %v", err)
+	}
+	if _, err := unauthenticated.CancelBegin(ctx, cleanup); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("unauthenticated cleanup accepted: %v", err)
+	}
+	if _, err := client.rpc.CancelBegin(ctx, cleanup); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.rpc.BeginOwned(ctx, begin); status.Code(err) != codes.Canceled {
+		t.Fatalf("late Begin after cancellation: %v", err)
+	}
+	cleanup.BeginDeadlineUnixMs--
+	if _, err := client.rpc.CancelBegin(ctx, cleanup); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("identity/deadline reuse accepted: %v", err)
+	}
+	cleanup.BeginDeadlineUnixMs = deadline
+	begin.BeginRequestId, cleanup.BeginRequestId = strings.Repeat("b", 32), strings.Repeat("b", 32)
+	response, err := client.rpc.BeginOwned(ctx, begin)
+	if err != nil || response.GetTransactionId() == "" {
+		t.Fatalf("owned Begin: %v", err)
+	}
+	if _, err := client.rpc.BeginOwned(ctx, begin); status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("duplicate Begin allocated again: %v", err)
+	}
+	before, err := client.WriterStatus(ctx)
+	if err != nil || before.ActiveTransactions != 1 {
+		t.Fatalf("duplicate ownership: transactions=%d err=%v", before.ActiveTransactions, err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := client.rpc.CancelBegin(ctx, cleanup); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := client.rpc.BeginOwned(ctx, begin); status.Code(err) != codes.Canceled {
+		t.Fatalf("canceled identity reopened: %v", err)
+	}
+	for _, scenario := range []struct {
+		id       string
+		deadline int64
+		code     codes.Code
+	}{
+		{strings.Repeat("c", 32), time.Now().Add(-time.Millisecond).UnixMilli(), codes.DeadlineExceeded},
+		{strings.Repeat("d", 32), time.Now().Add(-61 * time.Second).UnixMilli(), codes.FailedPrecondition},
+		{strings.Repeat("e", 32), time.Now().Add(12 * time.Second).UnixMilli(), codes.InvalidArgument},
+		{"bad", deadline, codes.InvalidArgument},
+	} {
+		begin.BeginRequestId, begin.BeginDeadlineUnixMs = scenario.id, scenario.deadline
+		if _, err := client.rpc.BeginOwned(ctx, begin); status.Code(err) != scenario.code {
+			t.Fatalf("identity guard %q: %v", scenario.id, err)
+		}
+	}
+	settled, err := client.WriterStatus(ctx)
+	if err != nil || settled.ActiveTransactions != 0 || settled.ActiveWriteIntents != 0 {
+		t.Fatalf("identity guards did not settle: transactions=%d err=%v", settled.ActiveTransactions, err)
+	}
+	roleCtx := withAuth(ctx, client.options.AuthToken)
+	if _, err := client.demoteWriter(roleCtx, "owned-begin-epoch-check", false, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	promoted, err := client.promoteWriterWithTakeover(roleCtx, "owned-begin-epoch-check", false, 0)
+	if err != nil || promoted.CurrentEpoch <= before.CurrentEpoch {
+		t.Fatalf("writer epoch did not advance: epoch=%d err=%v", promoted.CurrentEpoch, err)
+	}
+	if _, err := client.rpc.CancelBegin(ctx, cleanup); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("stale Begin authority accepted: %v", err)
+	}
+	transaction, err := client.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rollbackTransaction(ctx, transaction); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClientOwnedBeginGenerationGuard(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	client, err := Ensure(ctx, Options{Socket: testSocket(t), RepositoryID: "owned-begin-generation", DaemonPath: daemonBinary(t), DataDir: t.TempDir(), ObjectStore: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	initial, err := client.GenerationStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	begin := &vaulticdbv1.BeginOwnedRequest{Context: requestContext(ctx), BeginRequestId: strings.Repeat("a", 32), BeginDeadlineUnixMs: time.Now().Add(10 * time.Second).UnixMilli()}
+	if _, err := client.rpc.BeginOwned(ctx, begin); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.cancelBegin(ctx, begin); err != nil {
+		t.Fatal(err)
+	}
+	quarantined, err := client.QuarantineGeneration(ctx, initial.ActiveGeneration, strings.Repeat("aa", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	activated, err := client.ActivateGeneration(ctx, quarantined.ActiveGeneration, quarantined.ActiveGeneration+1, "candidate", strings.Repeat("bb", 32), time.Minute)
+	if err != nil || activated.ActiveGeneration <= initial.ActiveGeneration {
+		t.Fatalf("generation did not advance: generation=%d err=%v", activated.ActiveGeneration, err)
+	}
+	if err := client.cancelBegin(ctx, begin); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("stale generation cleanup accepted: %v", err)
+	}
+	settled, err := client.WriterStatus(ctx)
+	if err != nil || settled.ActiveTransactions != 0 || settled.ActiveWriteIntents != 0 {
+		t.Fatalf("generation guard changed ownership: transactions=%d err=%v", settled.ActiveTransactions, err)
+	}
+}
+
+func TestClientOwnedBeginBlockedAdmissionExpires(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	client, err := Ensure(ctx, Options{Socket: testSocket(t), RepositoryID: "owned-begin-blocked", DaemonPath: daemonBinary(t), DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	id := daemonTestID(90)
+	holder, err := client.beginPublication(ctx, []schema.ID{id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rollbackTransaction(ctx, holder)
+	deadline := time.Now().Add(150 * time.Millisecond).UnixMilli()
+	begin := &vaulticdbv1.BeginOwnedRequest{Context: requestContext(ctx), BeginRequestId: strings.Repeat("a", 32), BeginDeadlineUnixMs: deadline, ContentIds: [][]byte{id[:]}}
+	started := time.Now()
+	if _, err := client.rpc.BeginOwned(ctx, begin); status.Code(err) != codes.DeadlineExceeded {
+		t.Fatalf("blocked Begin admitted: %v", err)
+	}
+	if time.Since(started) > time.Second {
+		t.Fatal("blocked Begin exceeded its admission budget")
+	}
+	cleanup := &vaulticdbv1.CancelBeginRequest{Context: requestContext(ctx), BeginRequestId: begin.BeginRequestId, BeginDeadlineUnixMs: deadline}
+	if _, err := client.rpc.CancelBegin(ctx, cleanup); err != nil {
+		t.Fatal(err)
+	}
+	if err := rollbackTransaction(ctx, holder); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.rpc.BeginOwned(ctx, begin); status.Code(err) != codes.Canceled {
+		t.Fatalf("expired Begin reopened after permits released: %v", err)
+	}
+	settled, err := client.WriterStatus(ctx)
+	if err != nil || settled.ActiveTransactions != 0 || settled.ActiveWriteIntents != 0 {
+		t.Fatalf("blocked admission leaked ownership: transactions=%d err=%v", settled.ActiveTransactions, err)
+	}
+}
+
+func TestClientBeginCancellationOverGRPC(t *testing.T) {
+	for _, scenario := range []struct{ deadline, dropReply bool }{{}, {deadline: true}, {dropReply: true}, {deadline: true, dropReply: true}} {
+		t.Run(fmt.Sprintf("deadline=%t/dropReply=%t", scenario.deadline, scenario.dropReply), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			client, err := Ensure(ctx, Options{Socket: testSocket(t), RepositoryID: "lost-begin-response-grpc", DaemonPath: daemonBinary(t), DataDir: t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close(context.Background())
+			originalRPC := client.rpc
+			service := &withheldBeginService{upstream: originalRPC, responses: make(chan *vaulticdbv1.BeginResponse, 1), finished: make(chan struct{})}
+			socket := testSocket(t)
+			listener, err := net.Listen("unix", socket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			if err := os.Chmod(socket, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			server := grpc.NewServer()
+			vaulticdbv1.RegisterVaulticDBServer(server, service)
+			go func() { _ = server.Serve(listener) }()
+			defer server.Stop()
+			connection, err := grpc.NewClient("unix://"+socket, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer connection.Close()
+			client.rpc = vaulticdbv1.NewVaulticDBClient(connection)
+			client.limits.BeginReconciliation = false
+			defer func() { client.rpc = originalRPC }()
+			workCtx, stop := context.WithCancel(ctx)
+			if scenario.deadline {
+				stop()
+				workCtx, stop = context.WithTimeout(ctx, 2*time.Second)
+			}
+			defer stop()
+			service.release = workCtx.Done()
+			service.dropReply = scenario.dropReply
+			result := make(chan error, 1)
+			go func() {
+				transaction, beginErr := client.Begin(workCtx)
+				if transaction != nil {
+					result <- fmt.Errorf("lost response exposed a transaction: %s", transaction.ID())
+					return
+				}
+				result <- beginErr
+			}()
+			var response *vaulticdbv1.BeginResponse
+			select {
+			case response = <-service.responses:
+			case <-ctx.Done():
+				t.Fatal("relay did not create a daemon transaction")
+			}
+			expectedCode := codes.DeadlineExceeded
+			if !scenario.deadline {
+				expectedCode = codes.Canceled
+				stop()
+			}
+			if scenario.dropReply {
+				expectedCode = codes.Unavailable
+			}
+			select {
+			case beginErr := <-result:
+				if status.Code(beginErr) != expectedCode {
+					t.Fatalf("lost response error: %v", beginErr)
+				}
+			case <-ctx.Done():
+				t.Fatal("canceled Begin did not return")
+			}
+			select {
+			case <-service.finished:
+			case <-ctx.Done():
+				t.Fatal("relay handler did not settle")
+			}
+			client.rpc = originalRPC
+			after, err := client.WriterStatus(ctx)
+			var expectedTransactions uint64
+			if scenario.dropReply {
+				expectedTransactions = 1
+			}
+			if err != nil || after.ActiveTransactions != expectedTransactions || after.ActiveWriteIntents != 0 || client.CommitRPCStats().Attempts != 0 {
+				t.Fatalf("lost gRPC response ownership: status=%+v err=%v", after, err)
+			}
+			if scenario.dropReply {
+				transaction, err := client.transactionFromBegin(response)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := rollbackTransaction(workCtx, transaction); err != nil {
+					t.Fatal(err)
+				}
+			}
+			settled, err := client.WriterStatus(ctx)
+			if err != nil || settled.ActiveTransactions != 0 || settled.ActiveWriteIntents != 0 {
+				t.Fatalf("gRPC fixture cleanup did not settle: status=%+v err=%v", settled, err)
+			}
+			t.Logf("status=%s residual_transactions=%d fixture_cleanup=settled", expectedCode, after.ActiveTransactions)
+		})
+	}
+}
+
+type packConflictRPC struct {
+	vaulticdbv1.VaulticDBClient
+	width           uint64
+	commits         atomic.Uint64
+	release         chan struct{}
+	cancelOnAbort   bool
+	beginAborts     atomic.Int64
+	beginDeadline   atomic.Int64
+	logicalDeadline atomic.Int64
+	cancelErr       error
+}
+
+func (rpc *packConflictRPC) Begin(ctx context.Context, request *vaulticdbv1.Empty, options ...grpc.CallOption) (*vaulticdbv1.BeginResponse, error) {
+	rpc.logicalDeadline.CompareAndSwap(0, request.GetContext().GetDeadlineUnixMs())
+	if deadline, ok := ctx.Deadline(); ok {
+		rpc.beginDeadline.CompareAndSwap(0, deadline.UnixNano())
+	}
+	remaining := rpc.beginAborts.Load()
+	if remaining > 0 && rpc.beginAborts.CompareAndSwap(remaining, remaining-1) {
+		return nil, status.Error(codes.Aborted, "test pre-Commit abort")
+	}
+	return rpc.VaulticDBClient.Begin(ctx, request, options...)
+}
+
+func (rpc *packConflictRPC) BeginOwned(ctx context.Context, request *vaulticdbv1.BeginOwnedRequest, options ...grpc.CallOption) (*vaulticdbv1.BeginResponse, error) {
+	rpc.logicalDeadline.CompareAndSwap(0, request.GetContext().GetDeadlineUnixMs())
+	if deadline, ok := ctx.Deadline(); ok {
+		rpc.beginDeadline.CompareAndSwap(0, deadline.UnixNano())
+	}
+	remaining := rpc.beginAborts.Load()
+	if remaining > 0 && rpc.beginAborts.CompareAndSwap(remaining, remaining-1) {
+		return nil, status.Error(codes.Aborted, "test pre-Commit abort")
+	}
+	return rpc.VaulticDBClient.BeginOwned(ctx, request, options...)
+}
+
+func (rpc *packConflictRPC) CancelBegin(ctx context.Context, request *vaulticdbv1.CancelBeginRequest, options ...grpc.CallOption) (*vaulticdbv1.Empty, error) {
+	if rpc.cancelErr != nil {
+		return nil, rpc.cancelErr
+	}
+	return rpc.VaulticDBClient.CancelBegin(ctx, request, options...)
+}
+
+func TestSchemaStorePackUncertainBeginCleanupIsTerminal(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	client, err := Ensure(ctx, Options{Socket: testSocket(t), RepositoryID: "uncertain-begin-terminal", DaemonPath: daemonBinary(t), DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	rpc := &packConflictRPC{VaulticDBClient: client.rpc, cancelErr: status.Error(codes.Unavailable, "test cleanup unavailable")}
+	rpc.beginAborts.Store(128)
+	client.rpc = rpc
+	store := NewSchemaStore(client)
+	err = store.PublishPack(ctx, readSessionTestPack(daemonTestID(20), daemonTestID(90)))
+	if status.Code(err) != codes.FailedPrecondition || !errors.Is(err, rpc.cancelErr) || rpc.beginAborts.Load() != 127 {
+		t.Fatalf("uncertain Begin was retried or error lost: remaining=%d err=%v", rpc.beginAborts.Load(), err)
+	}
+	stats := store.PackPublicationStats()
+	if stats.Calls != 1 || stats.Failures != 1 || stats.RecoveredAborts != 0 || stats.TerminalAborts != 0 || stats.RecoveredRetryCalls != 0 || stats.TerminalRetryCalls != 0 || client.CommitRPCStats().Attempts != 0 {
+		t.Fatalf("uncertain ownership counted as retry recovery: %+v", stats)
+	}
+}
+
+func (rpc *packConflictRPC) Commit(ctx context.Context, request *vaulticdbv1.TransactionRequest, options ...grpc.CallOption) (*vaulticdbv1.CommitResponse, error) {
+	ordinal := rpc.commits.Add(1)
+	if ordinal <= rpc.width {
+		if ordinal == rpc.width {
+			close(rpc.release)
+		}
+		select {
+		case <-rpc.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	response, err := rpc.VaulticDBClient.Commit(ctx, request, options...)
+	if rpc.cancelOnAbort && status.Code(err) == codes.Aborted {
+		ctx.Value(packCancelKey{}).(context.CancelFunc)()
+	}
+	return response, err
+}
+
+func TestSchemaStorePackPublicationConflictOutcomes(t *testing.T) {
+	for _, cancelOnAbort := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cancelOnAbort=%t", cancelOnAbort), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			client, err := Ensure(ctx, Options{Socket: testSocket(t), RepositoryID: "pack-conflict-outcomes", DaemonPath: daemonBinary(t), DataDir: t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close(context.Background())
+			const workers = 4
+			client.rpc = &packConflictRPC{VaulticDBClient: client.rpc, width: workers, release: make(chan struct{}), cancelOnAbort: cancelOnAbort}
+			store := NewSchemaStore(client)
+			before, err := client.WriterStatus(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			type outcome struct {
+				aborted, commitAborted uint64
+				err                    error
+			}
+			results := make(chan outcome, workers)
+			for index := range workers {
+				published := readSessionTestPack(daemonTestID(byte(index+20)), daemonTestID(90))
+				go func() {
+					workCtx, stop := context.WithCancel(ctx)
+					defer stop()
+					workCtx = context.WithValue(workCtx, packCancelKey{}, stop)
+					aborted, commitAborted, err := store.PublishPackWithRetryDetails(workCtx, published)
+					results <- outcome{aborted: aborted, commitAborted: commitAborted, err: err}
+				}()
+			}
+			var recovered, terminal, canceled uint64
+			for range workers {
+				result := <-results
+				if result.err == nil {
+					recovered += result.commitAborted
+				} else if cancelOnAbort && errors.Is(result.err, context.Canceled) {
+					terminal += result.commitAborted
+					canceled++
+				} else {
+					t.Fatalf("publication result: %+v", result)
+				}
+				if result.aborted < result.commitAborted {
+					t.Fatalf("Commit aborts exceed all aborts: %+v", result)
+				}
+			}
+			after, err := client.WriterStatus(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stats := store.PackPublicationStats()
+			rpcs := client.CommitRPCStats()
+			commits := after.Attribution.CommitRequest
+			attempts := commits.Attempts - before.Attribution.CommitRequest.Attempts
+			successes := commits.Successes - before.Attribution.CommitRequest.Successes
+			failures := commits.Failures - before.Attribution.CommitRequest.Failures
+			if failures == 0 || recovered+terminal != failures || stats.Calls != workers || stats.Failures != canceled ||
+				stats.FailedCanceled != canceled || stats.FailedTimedOut != 0 || stats.Active != 0 || stats.NS == 0 ||
+				stats.RecoveredCommitAborts != recovered || stats.TerminalCommitAborts != terminal ||
+				successes != workers-canceled || attempts != successes+failures ||
+				commits.Completed-before.Attribution.CommitRequest.Completed != attempts || commits.Active != 0 ||
+				rpcs.Attempts != attempts || rpcs.Successes != successes || rpcs.Aborted != failures ||
+				rpcs.Cancellations != 0 || rpcs.Timeouts != 0 || rpcs.OtherFailures != 0 || rpcs.Active != 0 ||
+				after.ActiveTransactions != 0 || after.ActiveWriteIntents != 0 {
+				t.Fatalf("pack Commit parity: stats=%+v rpc=%+v before=%+v after=%+v", stats, rpcs, before, after)
+			}
+			if cancelOnAbort && (terminal == 0 || stats.TerminalRetryCalls != canceled) {
+				t.Fatalf("missing terminal retry attribution: %+v", stats)
+			}
+			if !cancelOnAbort && (stats.TerminalAborts != 0 || stats.RecoveredRetryCalls == 0) {
+				t.Fatalf("missing recovered retry attribution: %+v", stats)
+			}
+			value, found, err := store.Get(ctx, schema.BlobKey(daemonTestID(90)))
+			if err != nil || !found {
+				t.Fatalf("published blob missing: %v", err)
+			}
+			record, err := schema.UnmarshalBlobRecord(value)
+			if err != nil || uint64(len(record.Locations)) != successes {
+				t.Fatalf("partial or lost pack locations: %+v err=%v", record, err)
+			}
+			expectedSize := readSessionTestPack(daemonTestID(20), daemonTestID(90)).Record.PayloadSize * successes
+			checkAggregate := func() {
+				t.Helper()
+				aggregate, found := readAggregate(t, store, ctx, schema.PackAggregateKey(schema.AggregateAll))
+				if !found || aggregate.PackCount != successes || aggregate.BlobCount != successes || aggregate.PayloadSize != expectedSize {
+					t.Fatalf("partial or duplicate pack aggregate: %+v", aggregate)
+				}
+			}
+			checkAggregate()
+			for index := range workers {
+				packID := daemonTestID(byte(index + 20))
+				_, found, err := store.Get(ctx, schema.PackKey(packID))
+				present := slices.ContainsFunc(record.Locations, func(location schema.BlobLocation) bool { return location.PackID == packID })
+				if err != nil || found != present {
+					t.Fatalf("pack catalog/location parity: pack=%x found=%t present=%t err=%v", packID, found, present, err)
+				}
+			}
+			for _, location := range record.Locations {
+				if err := store.PublishPack(ctx, readSessionTestPack(location.PackID, daemonTestID(90))); err != nil {
+					t.Fatal(err)
+				}
+			}
+			checkAggregate()
+			t.Logf("calls=%d successful_commits=%d recovered_commit_aborts=%d terminal_commit_aborts=%d", stats.Calls, successes, recovered, terminal)
+		})
+	}
+}
+
+func TestSchemaStorePackPreCommitRetryOutcome(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	client, err := Ensure(ctx, Options{Socket: testSocket(t), RepositoryID: "pack-pre-commit-retry", DaemonPath: daemonBinary(t), DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	rpc := &packConflictRPC{VaulticDBClient: client.rpc}
+	rpc.beginAborts.Store(1)
+	client.rpc = rpc
+	store := NewSchemaStore(client)
+	aborted, commitAborted, err := store.PublishPackWithRetryDetails(ctx, readSessionTestPack(daemonTestID(20), daemonTestID(90)))
+	stats := store.PackPublicationStats()
+	deadline, _ := ctx.Deadline()
+	if err != nil || aborted != 1 || commitAborted != 0 || stats.Calls != 1 || stats.Failures != 0 ||
+		stats.RecoveredAborts != 1 || stats.RecoveredCommitAborts != 0 || stats.RecoveredRetryCalls != 1 ||
+		rpc.logicalDeadline.Load() != deadline.UnixMilli() || client.CommitRPCStats().Aborted != 0 {
+		t.Fatalf("pre-Commit retry/deadline changed: aborted=%d commitAborted=%d stats=%+v err=%v", aborted, commitAborted, stats, err)
+	}
+}
+
+func TestSchemaStorePackPublicationTerminalOutcomes(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	client, err := Ensure(ctx, Options{Socket: testSocket(t), RepositoryID: "pack-terminal-outcomes", DaemonPath: daemonBinary(t), DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	originalRPC := client.rpc
+	for _, scenario := range []string{"default-budget", "canceled", "expired", "invalid", "retry-limit"} {
+		t.Run(scenario, func(t *testing.T) {
+			rpc := &packConflictRPC{VaulticDBClient: originalRPC}
+			client.rpc = rpc
+			store := NewSchemaStore(client)
+			workCtx := ctx
+			published := readSessionTestPack(daemonTestID(20), daemonTestID(90))
+			var expectedAborts, canceled, timedOut uint64
+			switch scenario {
+			case "default-budget":
+				workCtx = context.Background()
+			case "canceled":
+				var stop context.CancelFunc
+				workCtx, stop = context.WithCancel(ctx)
+				stop()
+				canceled = 1
+			case "expired":
+				var stop context.CancelFunc
+				workCtx, stop = context.WithDeadline(ctx, time.Now().Add(-time.Second))
+				defer stop()
+				timedOut = 1
+			case "invalid":
+				published = PublishedPack{}
+			case "retry-limit":
+				expectedAborts = revisionAllocationAttempts
+				rpc.beginAborts.Store(revisionAllocationAttempts)
+			}
+			before := time.Now()
+			beforeRPC := client.CommitRPCStats()
+			aborted, commitAborted, err := store.PublishPackWithRetryDetails(workCtx, published)
+			stats := store.PackPublicationStats()
+			if scenario == "default-budget" {
+				deadline := time.UnixMilli(rpc.logicalDeadline.Load())
+				if err != nil || deadline.Before(before.Truncate(time.Millisecond).Add(10*time.Minute)) || deadline.After(time.Now().Add(10*time.Minute)) ||
+					stats.Failures != 0 || stats.RecoveredAborts != 0 {
+					t.Fatalf("default pack budget/stats changed: deadline=%v stats=%+v err=%v", deadline, stats, err)
+				}
+			} else if err == nil || stats.Failures != 1 || stats.TerminalAborts != expectedAborts ||
+				stats.TerminalRetryCalls != min(expectedAborts, 1) || stats.RecoveredAborts != 0 ||
+				client.CommitRPCStats() != beforeRPC {
+				t.Fatalf("terminal pack result: stats=%+v err=%v", stats, err)
+			}
+			if scenario == "retry-limit" && !strings.Contains(err.Error(), "transaction conflict retry limit exceeded") {
+				t.Fatalf("retry-limit error changed: %v", err)
+			}
+			if aborted != expectedAborts || commitAborted != 0 || stats.Calls != 1 || stats.Active != 0 ||
+				stats.FailedCanceled != canceled || stats.FailedTimedOut != timedOut || stats.NS == 0 ||
+				stats.RecoveredCommitAborts != 0 || stats.TerminalCommitAborts != 0 {
+				t.Fatalf("pack terminal classification: aborted=%d commitAborted=%d stats=%+v err=%v", aborted, commitAborted, stats, err)
+			}
+		})
+	}
+}
 
 func TestSchemaStoreImportsHistoricalSnapshot(t *testing.T) {
 	ctx := context.Background()
@@ -160,6 +1225,11 @@ func TestSchemaStorePublishesAuthoritativePacksAndDuplicateLocations(t *testing.
 		if err := store.PublishPack(context.Background(), published); err != nil {
 			t.Fatal(err)
 		}
+	}
+	stats := store.PackPublicationStats()
+	if stats.Calls != 2 || stats.Failures != 0 || stats.Active != 0 || stats.NS == 0 ||
+		stats.RecoveredAborts != 0 || stats.TerminalAborts != 0 || stats.RecoveredCommitAborts != 0 {
+		t.Fatalf("serial pack publication stats: %+v", stats)
 	}
 	value, found, err := store.Get(context.Background(), schema.BlobKey(blobID))
 	if err != nil || !found {

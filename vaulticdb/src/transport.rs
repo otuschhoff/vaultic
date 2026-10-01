@@ -9,8 +9,7 @@ fn repository_key(repository_id: &str) -> String {
 
 fn injected_transport_failure(name: &str) -> Option<anyhow::Error> {
     #[cfg(feature = "test-failpoints")]
-    if std::env::var("VAULTICDB_TEST_CAPABILITY").as_deref()
-        == Ok("vaulticdb-process-tests-v1")
+    if std::env::var("VAULTICDB_TEST_CAPABILITY").as_deref() == Ok("vaulticdb-process-tests-v1")
         && std::env::var("VAULTICDB_TEST_TRANSPORT_FAILURE").as_deref() == Ok(name)
     {
         return Some(anyhow::anyhow!("injected transport {name} failure"));
@@ -73,9 +72,7 @@ async fn run_daemon() -> Result<()> {
         unix_socket: matches!(&transport, TransportConfig::Unix(_)),
         tcp_enabled: matches!(&transport, TransportConfig::Tcp { .. }),
         draining: Arc::new(AtomicBool::new(false)),
-        lifecycle: Arc::new(Mutex::new(DaemonLifecycle::loading(
-            unix_time_ms_i64()?,
-        ))),
+        lifecycle: Arc::new(Mutex::new(DaemonLifecycle::loading(unix_time_ms_i64()?))),
         writer_role: Arc::new(Mutex::new(WriterRoleState::read_write(
             1,
             clock_started,
@@ -153,8 +150,8 @@ async fn run_daemon() -> Result<()> {
                 Ok(storage) => storage.close().await,
                 Err(error) => Err(error),
             };
-            let close_result = injected_transport_failure("storage-close")
-                .map_or(close_result, Err);
+            let close_result =
+                injected_transport_failure("storage-close").map_or(close_result, Err);
             let artifact_cleanup = artifacts.cleanup();
             drop(_lock);
             combine_results(vec![
@@ -164,8 +161,14 @@ async fn run_daemon() -> Result<()> {
                 ("cleanup runtime artifacts", artifact_cleanup),
             ])?;
         }
-        TransportConfig::Tcp { address, allowlist, metadata_path } => {
-            let listener = TcpListener::bind(address).await.context("bind TCP listener")?;
+        TransportConfig::Tcp {
+            address,
+            allowlist,
+            metadata_path,
+        } => {
+            let listener = TcpListener::bind(address)
+                .await
+                .context("bind TCP listener")?;
             if let Some(parent) = metadata_path.parent() {
                 prepare_private_runtime_directory(parent)?;
             }
@@ -202,8 +205,8 @@ async fn run_daemon() -> Result<()> {
                 Ok(storage) => storage.close().await,
                 Err(error) => Err(error),
             };
-            let close_result = injected_transport_failure("storage-close")
-                .map_or(close_result, Err);
+            let close_result =
+                injected_transport_failure("storage-close").map_or(close_result, Err);
             let artifact_cleanup = artifacts.cleanup();
             combine_results(vec![
                 ("serve gRPC", result),
@@ -330,10 +333,12 @@ fn spawn_storage_loader(
     result_receiver
 }
 
-async fn load_storage(service: Service, storage_config: crate::storage::StorageConfig) -> Result<Arc<Storage>> {
+async fn load_storage(
+    service: Service,
+    storage_config: crate::storage::StorageConfig,
+) -> Result<Arc<Storage>> {
     #[cfg(feature = "test-failpoints")]
-    if std::env::var("VAULTICDB_TEST_CAPABILITY").as_deref()
-        == Ok("vaulticdb-process-tests-v1")
+    if std::env::var("VAULTICDB_TEST_CAPABILITY").as_deref() == Ok("vaulticdb-process-tests-v1")
         && std::env::var_os("VAULTICDB_TEST_PANIC_LOADER").is_some()
     {
         panic!("injected storage loader panic");
@@ -405,24 +410,19 @@ async fn load_storage(service: Service, storage_config: crate::storage::StorageC
         )
     };
     *service.storage.write().await = Some(storage.clone());
-    let became_ready = service
-        .state
-        .lifecycle
-        .lock()
-        .await
-        .finish_loading(
-                if is_writer {
-                    DaemonPhase::ReadWrite
-                } else {
-                    DaemonPhase::ReadOnly
-                },
-                if is_writer {
-                    "SlateDB writer ready"
-                } else {
-                    "SlateDB reader ready"
-                },
-                unix_time_ms_i64().map_err(|status| anyhow::anyhow!(status.message().to_owned()))?,
-            );
+    let became_ready = service.state.lifecycle.lock().await.finish_loading(
+        if is_writer {
+            DaemonPhase::ReadWrite
+        } else {
+            DaemonPhase::ReadOnly
+        },
+        if is_writer {
+            "SlateDB writer ready"
+        } else {
+            "SlateDB reader ready"
+        },
+        unix_time_ms_i64().map_err(|status| anyhow::anyhow!(status.message().to_owned()))?,
+    );
     let became_ready = match became_ready {
         Ok(became_ready) => became_ready,
         Err(error) => {
@@ -498,6 +498,7 @@ fn storage_service(
         shutdown,
         storage: Arc::new(RwLock::new(None)),
         finalization_locks: Arc::default(),
+        begin_reconciliations: Arc::default(),
     };
     let server = VaulticDbServer::new(service.clone())
         .max_decoding_message_size(MAX_MESSAGE_BYTES as usize)
@@ -548,8 +549,9 @@ async fn write_runtime_metadata(socket: &Path, tcp_enabled: bool) -> Result<()> 
             "protocol={PROTOCOL_VERSION}\nschema={SCHEMA_VERSION}\ntcp_enabled={tcp_enabled}\n"
         ),
     ) {
-        remove_file_if_exists_sync(&pid_path)
-            .with_context(|| format!("rollback PID metadata after capability write failed: {error}"))?;
+        remove_file_if_exists_sync(&pid_path).with_context(|| {
+            format!("rollback PID metadata after capability write failed: {error}")
+        })?;
         return Err(error).with_context(|| format!("write {}", cap_path.display()));
     }
     Ok(())
@@ -690,13 +692,22 @@ fn prepare_private_runtime_directory(path: &Path) -> Result<()> {
 
     let metadata = std::fs::symlink_metadata(path)?;
     if !metadata.file_type().is_dir() {
-        bail!("vaulticdb runtime path {} is not a directory", path.display());
+        bail!(
+            "vaulticdb runtime path {} is not a directory",
+            path.display()
+        );
     }
     if metadata.uid() != unsafe { libc::geteuid() } {
-        bail!("vaulticdb runtime directory {} has an unsafe owner", path.display());
+        bail!(
+            "vaulticdb runtime directory {} has an unsafe owner",
+            path.display()
+        );
     }
     if metadata.permissions().mode() & 0o777 != 0o700 {
-        bail!("vaulticdb runtime directory {} must have mode 0700", path.display());
+        bail!(
+            "vaulticdb runtime directory {} must have mode 0700",
+            path.display()
+        );
     }
     Ok(())
 }
@@ -807,14 +818,20 @@ mod runtime_directory_tests {
         ]).unwrap_err();
         assert_eq!(failure_exit_status(&error), 78);
         assert_eq!(failure_exit_status(&anyhow::anyhow!("storage timeout")), 1);
-        assert_eq!(failure_exit_status(&anyhow::anyhow!("detected newer DB client")), 1);
+        assert_eq!(
+            failure_exit_status(&anyhow::anyhow!("detected newer DB client")),
+            1
+        );
     }
 
     #[test]
     fn result_aggregation_preserves_primary_and_cleanup_failures() {
         let error = combine_results(vec![
             ("serve gRPC", Err(anyhow::anyhow!("primary failure"))),
-            ("cleanup runtime artifacts", Err(anyhow::anyhow!("cleanup failure"))),
+            (
+                "cleanup runtime artifacts",
+                Err(anyhow::anyhow!("cleanup failure")),
+            ),
         ])
         .unwrap_err();
         let combined = error.downcast_ref::<CombinedOperationErrors>().unwrap();

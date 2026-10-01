@@ -308,6 +308,7 @@ mod tests {
             shutdown,
             storage: Arc::new(RwLock::new(Some(storage.clone()))),
             finalization_locks: Arc::default(),
+            begin_reconciliations: Arc::default(),
         };
         (service, storage)
     }

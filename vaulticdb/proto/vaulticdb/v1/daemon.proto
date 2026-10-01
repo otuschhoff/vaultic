@@ -13,6 +13,19 @@ message Empty {
   RequestContext context = 1;
 }
 
+message BeginOwnedRequest {
+  RequestContext context = 1;
+  repeated bytes content_ids = 2;
+  string begin_request_id = 3;
+  int64 begin_deadline_unix_ms = 4;
+}
+
+message CancelBeginRequest {
+  RequestContext context = 1;
+  string begin_request_id = 2;
+  int64 begin_deadline_unix_ms = 3;
+}
+
 message ErrorDetail {
   string code = 1;
   string message = 2;
@@ -185,6 +198,7 @@ message CapabilitiesResponse {
   uint64 wal_cleanup_failures = 31;
   bool scan_stream = 32;
   bool publication_fence = 33;
+  bool begin_reconciliation = 34;
 }
 
 message ReadCacheStatusRequest {
@@ -699,6 +713,8 @@ service VaulticDB {
   rpc RollbackGeneration(RollbackGenerationRequest) returns (GenerationStatusResponse);
   rpc RetireGeneration(RetireGenerationRequest) returns (GenerationStatusResponse);
   rpc Drain(Empty) returns (Empty);
+  rpc BeginOwned(BeginOwnedRequest) returns (BeginResponse);
+  rpc CancelBegin(CancelBeginRequest) returns (Empty);
   rpc Shutdown(Empty) returns (Empty);
   rpc Get(GetRequest) returns (GetResponse);
   rpc MultiGet(MultiGetRequest) returns (MultiGetResponse);

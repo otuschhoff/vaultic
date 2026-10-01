@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -672,17 +673,26 @@ const (
 )
 
 func (c *Client) begin(ctx context.Context) (*Transaction, error) {
-	ctx, cancel := withDefaultRPCDeadline(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, errors.Join(err, status.FromContextError(err).Err())
+	}
+	if c.Limits().BeginReconciliation {
+		return c.beginOwned(ctx, nil)
+	}
+	rpcCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultRPCDeadline)
 	defer cancel()
-	response, err := c.rpc.Begin(ctx, &vaulticdbv1.Empty{Context: requestContext(ctx)})
+	response, err := c.rpc.Begin(rpcCtx, &vaulticdbv1.Empty{Context: requestContext(ctx)})
 	if err != nil {
 		c.auditRPCError(ctx, "begin", err)
 		return nil, err
 	}
-	return c.transactionFromBegin(response)
+	return c.finishBegin(ctx, response)
 }
 
 func (c *Client) beginPublication(ctx context.Context, contentIDs []schema.ID) (*Transaction, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, errors.Join(err, status.FromContextError(err).Err())
+	}
 	ids := make([][]byte, 0, min(len(contentIDs), 4096))
 	seen := make(map[schema.ID]struct{}, min(len(contentIDs), 4096))
 	for _, id := range contentIDs {
@@ -695,9 +705,12 @@ func (c *Client) beginPublication(ctx context.Context, contentIDs []schema.ID) (
 		seen[id] = struct{}{}
 		ids = append(ids, id[:])
 	}
-	ctx, cancel := withDefaultRPCDeadline(ctx)
+	if c.Limits().BeginReconciliation {
+		return c.beginOwned(ctx, ids)
+	}
+	rpcCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultRPCDeadline)
 	defer cancel()
-	response, err := c.rpc.BeginPublication(ctx, &vaulticdbv1.BeginPublicationRequest{
+	response, err := c.rpc.BeginPublication(rpcCtx, &vaulticdbv1.BeginPublicationRequest{
 		Context: requestContext(ctx), ContentIds: ids,
 	})
 	if status.Code(err) == codes.Unimplemented {
@@ -707,7 +720,70 @@ func (c *Client) beginPublication(ctx context.Context, contentIDs []schema.ID) (
 		c.auditRPCError(ctx, "begin_publication", err)
 		return nil, err
 	}
-	return c.transactionFromBegin(response)
+	return c.finishBegin(ctx, response)
+}
+
+func (c *Client) beginOwned(ctx context.Context, contentIDs [][]byte) (*Transaction, error) {
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return nil, fmt.Errorf("create Begin request identity: %w", err)
+	}
+	rpcCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultRPCDeadline)
+	defer cancel()
+	deadline, _ := rpcCtx.Deadline()
+	request := &vaulticdbv1.BeginOwnedRequest{
+		Context: requestContext(ctx), ContentIds: contentIDs,
+		BeginRequestId: fmt.Sprintf("%x", nonce[:]), BeginDeadlineUnixMs: deadline.UnixMilli(),
+	}
+	response, err := c.rpc.BeginOwned(rpcCtx, request)
+	var transaction *Transaction
+	if err == nil {
+		transaction, err = c.transactionFromBegin(response)
+	}
+	if callerErr := ctx.Err(); callerErr != nil {
+		err = errors.Join(err, callerErr, status.FromContextError(callerErr).Err())
+	}
+	if err == nil {
+		return transaction, nil
+	}
+	c.auditRPCError(ctx, "begin_owned", err)
+	if cleanupErr := c.cancelBegin(ctx, request); cleanupErr != nil {
+		err = errors.Join(status.Error(codes.FailedPrecondition, "Begin ownership could not be reconciled"),
+			err, fmt.Errorf("reconcile uncertain Begin: %w", cleanupErr))
+	}
+	return nil, err
+}
+
+func (c *Client) cancelBegin(ctx context.Context, begin *vaulticdbv1.BeginOwnedRequest) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultRPCDeadline)
+	defer cancel()
+	request := &vaulticdbv1.CancelBeginRequest{
+		Context: requestContext(cleanupCtx), BeginRequestId: begin.GetBeginRequestId(),
+		BeginDeadlineUnixMs: begin.GetBeginDeadlineUnixMs(),
+	}
+	var err error
+	for attempt := 0; attempt < 2; attempt++ {
+		_, err = c.rpc.CancelBegin(cleanupCtx, request)
+		if err == nil || status.Code(err) != codes.Unavailable || cleanupCtx.Err() != nil {
+			break
+		}
+	}
+	return err
+}
+
+func (c *Client) finishBegin(ctx context.Context, response *vaulticdbv1.BeginResponse) (*Transaction, error) {
+	transaction, err := c.transactionFromBegin(response)
+	if err != nil {
+		return nil, err
+	}
+	if callerErr := ctx.Err(); callerErr != nil {
+		resultErr := errors.Join(callerErr, status.FromContextError(callerErr).Err())
+		if err := rollbackTransaction(ctx, transaction); err != nil {
+			return nil, errors.Join(resultErr, fmt.Errorf("rollback canceled Begin: %w", err))
+		}
+		return nil, resultErr
+	}
+	return transaction, nil
 }
 
 func (c *Client) transactionFromBegin(response *vaulticdbv1.BeginResponse) (*Transaction, error) {

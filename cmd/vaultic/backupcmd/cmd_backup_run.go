@@ -211,6 +211,21 @@ func (run *backupRun) close() {
 	}
 	if run.authoritativeEngine != nil && run.authoritativeEngine.Client() != nil {
 		run.reportCommitRPCStats(run.authoritativeEngine.Client().CommitRPCStats())
+		if store := run.authoritativeEngine.SchemaStore(); store != nil {
+			run.reportPackPublicationStats(store.PackPublicationStats())
+		}
+	}
+}
+
+func (run *backupRun) reportPackPublicationStats(stats daemon.PackPublicationStats) {
+	if run.globalOptions.JSON {
+		run.term.Print(ui.ToJSONString(struct {
+			MessageType string `json:"message_type"`
+			daemon.PackPublicationStats
+		}{MessageType: "pack_publication_stats", PackPublicationStats: stats}))
+	} else if !run.globalOptions.Quiet {
+		run.printer.V("metadata pack publication: %d calls, %d failed, %d recovered Commit aborts, %d terminal Commit aborts\n",
+			stats.Calls, stats.Failures, stats.RecoveredCommitAborts, stats.TerminalCommitAborts)
 	}
 }
 

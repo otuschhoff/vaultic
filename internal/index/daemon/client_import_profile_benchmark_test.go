@@ -2,13 +2,18 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +26,195 @@ import (
 type benchmarkBlobSizeRPC struct {
 	vaulticdbv1.VaulticDBClient
 	value []byte
+}
+
+func TestProcessClonedBlobLookup(t *testing.T) {
+	root := os.Getenv("VAULTICDB_TEST_CLONE_ROOT")
+	if root == "" {
+		t.Skip("set VAULTICDB_TEST_CLONE_ROOT to the validated disposable clone")
+	}
+	const cloneRoot = "/ncl1-1-vs-50/fme_dump/amakura/db.admission-20260930"
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil || resolved != cloneRoot {
+		t.Fatalf("refuse non-clone data directory: %q error=%v", resolved, err)
+	}
+	var marker struct{ Clone string }
+	encoded, err := os.ReadFile("/volume2/NASDA2/rustic/db.test/admission-clone-20260930/clone.validated.json")
+	if err != nil || json.Unmarshal(encoded, &marker) != nil || marker.Clone != resolved {
+		t.Fatal("clone checksum-validation marker is missing or does not match")
+	}
+	ctx := t.Context()
+	if _, deadline := ctx.Deadline(); deadline {
+		t.Fatal("clone probe must preserve the default per-RPC deadline")
+	}
+	metaCacheMiB := uint64(128)
+	if value := os.Getenv("VAULTICDB_TEST_CLONE_META_CACHE_MIB"); value != "" {
+		metaCacheMiB, err = strconv.ParseUint(value, 10, 16)
+		if err != nil || metaCacheMiB < 128 || metaCacheMiB > 1024 {
+			t.Fatal("clone metadata cache must be between 128 and 1024 MiB")
+		}
+	}
+	options := Options{
+		RepositoryID: "c4d68689c785d02a28d6eec485c62132823dc9873ff7f627c2bac80258251528",
+		DaemonPath:   daemonBinary(t), DataDir: root, ObjectStore: "local",
+		WALStore: "local", WALDataDir: filepath.Join(root, "wal"), WALFlushInterval: 100 * time.Millisecond,
+		MetaCacheBytes: metaCacheMiB << 20, BlockCacheBytes: 512 << 20,
+		EncryptionMode: "required", PassphraseFile: "/volume2/NASDA2/rustic/etc/metadata-recovery",
+	}
+	open := func(t *testing.T) (*Client, *ReadSession) {
+		t.Helper()
+		current := options
+		current.Socket = testSocket(t)
+		client, err := Ensure(ctx, current)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = client.Close(context.Background()) })
+		session, err := NewSchemaStore(client).BeginReadSession(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = session.Close(context.Background()) })
+		return client, session
+	}
+	client, session := open(t)
+	var handles []vaultic.BlobHandle
+	var expected []vaultic.BlobSize
+	for prefix := 0; prefix < 256; prefix += 4 {
+		entries, _, err := session.ScanPrefix(ctx, []byte{'b', ':', byte(prefix)}, nil, 8)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			parsed, err := schema.ParseKey(entry.Key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sizes, err := decodeBlobSizes(entry.Value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for blobType, size := range sizes {
+				if size.Found {
+					handles = append(handles, vaultic.BlobHandle{ID: vaultic.ID(parsed.ID), Type: vaultic.BlobType(blobType)})
+					expected = append(expected, size)
+					break
+				}
+			}
+		}
+	}
+	if len(handles) == 0 {
+		t.Fatal("clone contains no sampled blob records")
+	}
+	presentCount := len(handles)
+	for index := range 128 {
+		id := sha256.Sum256(fmt.Appendf(nil, "vaultic-admission-clone-missing:%d", index))
+		handles = append(handles, vaultic.BlobHandle{ID: vaultic.ID(id), Type: vaultic.DataBlob})
+		expected = append(expected, vaultic.BlobSize{})
+	}
+	missing, err := session.LookupBlobSizesContext(ctx, handles[presentCount:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, size := range missing {
+		if size.Found {
+			t.Fatal("deterministic absent probe unexpectedly exists")
+		}
+	}
+	t.Logf("clone_samples present=%d absent=%d", presentCount, len(handles)-presentCount)
+	if err := session.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	order := rand.New(rand.NewSource(33)).Perm(len(handles))
+	for _, concurrency := range []int{1, 8, 32} {
+		t.Run(fmt.Sprintf("workers=%d", concurrency), func(t *testing.T) {
+			client, session := open(t)
+			for _, pass := range []string{"engine-cold", "warm"} {
+				before, err := client.WriterStatus(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if before.EngineMetaCacheBytes != options.MetaCacheBytes || before.EngineBlockCacheBytes != options.BlockCacheBytes || before.EngineFlushIntervalMS != 100 {
+					t.Fatalf("clone configuration mismatch: metadata=%d block=%d flush=%d", before.EngineMetaCacheBytes, before.EngineBlockCacheBytes, before.EngineFlushIntervalMS)
+				}
+				type result struct {
+					queue, elapsed time.Duration
+					err            error
+				}
+				results := make([]result, len(order))
+				type job struct {
+					ordinal int
+					queued  time.Time
+				}
+				jobs := make(chan job, len(order))
+				started := time.Now()
+				for ordinal := range order {
+					jobs <- job{ordinal: ordinal, queued: time.Now()}
+				}
+				close(jobs)
+				var workers sync.WaitGroup
+				for range concurrency {
+					workers.Go(func() {
+						for pending := range jobs {
+							index := order[pending.ordinal]
+							issued := time.Now()
+							sizes, err := session.LookupBlobSizesContext(ctx, handles[index:index+1])
+							if err == nil && (len(sizes) != 1 || sizes[0] != expected[index]) {
+								err = fmt.Errorf("size mismatch for sampled blob %s", handles[index].ID.Str())
+							}
+							results[pending.ordinal] = result{queue: issued.Sub(pending.queued), elapsed: time.Since(issued), err: err}
+						}
+					})
+				}
+				workers.Wait()
+				wall := time.Since(started)
+				after, err := client.WriterStatus(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				latencies := make([]time.Duration, len(results))
+				classes := map[string][]time.Duration{"present": nil, "absent": nil}
+				var queueTotal time.Duration
+				failures := 0
+				for ordinal, result := range results {
+					latencies[ordinal] = result.elapsed
+					class := "present"
+					if order[ordinal] >= presentCount {
+						class = "absent"
+					}
+					classes[class] = append(classes[class], result.elapsed)
+					queueTotal += result.queue
+					if result.err != nil {
+						failures++
+						t.Logf("lookup_failure sample=%d elapsed=%s error=%v", ordinal, result.elapsed, result.err)
+					}
+				}
+				sort.Slice(latencies, func(left, right int) bool { return latencies[left] < latencies[right] })
+				t.Logf("clone_lookup pass=%s workers=%d calls=%d seconds=%.6f queue_mean_ms=%.3f p50_ms=%.3f p95_ms=%.3f p99_ms=%.3f max_ms=%.3f failures=%d",
+					pass, concurrency, len(results), wall.Seconds(), float64(queueTotal.Microseconds())/float64(len(results))/1000,
+					float64(latencies[len(results)/2].Microseconds())/1000, float64(latencies[(len(results)-1)*95/100].Microseconds())/1000,
+					float64(latencies[(len(results)-1)*99/100].Microseconds())/1000, float64(latencies[len(results)-1].Microseconds())/1000, failures)
+				for _, class := range []string{"present", "absent"} {
+					values := classes[class]
+					sort.Slice(values, func(left, right int) bool { return values[left] < values[right] })
+					t.Logf("clone_lookup_class pass=%s workers=%d class=%s calls=%d p50_ms=%.3f p99_ms=%.3f max_ms=%.3f",
+						pass, concurrency, class, len(values), float64(values[len(values)/2].Microseconds())/1000,
+						float64(values[(len(values)-1)*99/100].Microseconds())/1000, float64(values[len(values)-1].Microseconds())/1000)
+				}
+				beforeJSON, _ := json.Marshal(before.Attribution)
+				afterJSON, _ := json.Marshal(after.Attribution)
+				t.Logf("clone_attribution_before=%s", beforeJSON)
+				t.Logf("clone_attribution_after=%s", afterJSON)
+				if failures != 0 || after.Attribution.EngineWriteOps != before.Attribution.EngineWriteOps ||
+					after.Attribution.CommitRequest.Attempts != before.Attribution.CommitRequest.Attempts {
+					t.Errorf("lookup failures=%d or unexpected writes/Commits", failures)
+				}
+			}
+		})
+	}
 }
 
 func (rpc *benchmarkBlobSizeRPC) MultiGet(

@@ -73,39 +73,48 @@ func (options Options) withDefaults() (Options, error) {
 }
 
 type Metrics struct {
-	Scanned                               uint64                         `json:"scanned"`
-	Reused                                uint64                         `json:"reused"`
-	Changed                               uint64                         `json:"changed"`
-	Deferred                              uint64                         `json:"deferred"`
-	Failed                                uint64                         `json:"failed"`
-	FailedCanceled                        uint64                         `json:"failed_canceled"`
-	Reconciled                            uint64                         `json:"reconciled"`
-	PublicationGroups                     [publicationConcurrency]uint64 `json:"publication_groups_by_size"`
-	PublicationGroupNS                    uint64                         `json:"publication_group_ns"`
-	ExistingRecordLookupNS                uint64                         `json:"existing_record_lookup_ns"`
-	PublicationWorkerWaitNS               uint64                         `json:"publication_worker_wait_ns"`
-	RevisionAllocationCalls               uint64                         `json:"revision_allocation_calls"`
-	RevisionAllocationFailures            uint64                         `json:"revision_allocation_failures"`
-	RevisionAllocationFailedCanceled      uint64                         `json:"revision_allocation_failed_canceled"`
-	RevisionAllocationRecoveredAborts     uint64                         `json:"revision_allocation_recovered_aborts"`
-	RevisionAllocationTerminalAborts      uint64                         `json:"revision_allocation_terminal_aborts"`
-	RevisionAllocationRecoveredRetryCalls uint64                         `json:"revision_allocation_recovered_retry_calls"`
-	RevisionAllocationTerminalRetryCalls  uint64                         `json:"revision_allocation_terminal_retry_calls"`
-	RevisionAllocationNS                  uint64                         `json:"revision_allocation_ns"`
-	RevisionsReserved                     uint64                         `json:"revisions_reserved"`
-	InodeRevisionsAssigned                uint64                         `json:"inode_revisions_assigned"`
-	InodePublicationCalls                 uint64                         `json:"inode_publication_calls"`
-	InodePublicationFailures              uint64                         `json:"inode_publication_failures"`
-	InodePublicationRecoveredAborts       uint64                         `json:"inode_publication_recovered_aborts"`
-	InodePublicationTerminalAborts        uint64                         `json:"inode_publication_terminal_aborts"`
-	InodePublicationRecoveredCommitAborts uint64                         `json:"inode_publication_recovered_commit_aborts"`
-	InodePublicationTerminalCommitAborts  uint64                         `json:"inode_publication_terminal_commit_aborts"`
-	InodePublicationRecoveredRetryCalls   uint64                         `json:"inode_publication_recovered_retry_calls"`
-	InodePublicationTerminalRetryCalls    uint64                         `json:"inode_publication_terminal_retry_calls"`
-	InodePublicationNS                    uint64                         `json:"inode_publication_ns"`
-	AtomicGroupCalls                      uint64                         `json:"atomic_group_calls"`
-	AtomicGroupFailures                   uint64                         `json:"atomic_group_failures"`
-	AtomicGroupNS                         uint64                         `json:"atomic_group_ns"`
+	Scanned                                   uint64                         `json:"scanned"`
+	Reused                                    uint64                         `json:"reused"`
+	Changed                                   uint64                         `json:"changed"`
+	Deferred                                  uint64                         `json:"deferred"`
+	Failed                                    uint64                         `json:"failed"`
+	FailedCanceled                            uint64                         `json:"failed_canceled"`
+	Reconciled                                uint64                         `json:"reconciled"`
+	PublicationGroups                         [publicationConcurrency]uint64 `json:"publication_groups_by_size"`
+	PublicationGroupNS                        uint64                         `json:"publication_group_ns"`
+	ExistingRecordLookupNS                    uint64                         `json:"existing_record_lookup_ns"`
+	PublicationWorkerWaitNS                   uint64                         `json:"publication_worker_wait_ns"`
+	RevisionAllocationCalls                   uint64                         `json:"revision_allocation_calls"`
+	RevisionAllocationFailures                uint64                         `json:"revision_allocation_failures"`
+	RevisionAllocationFailedCanceled          uint64                         `json:"revision_allocation_failed_canceled"`
+	RevisionAllocationRecoveredAborts         uint64                         `json:"revision_allocation_recovered_aborts"`
+	RevisionAllocationTerminalAborts          uint64                         `json:"revision_allocation_terminal_aborts"`
+	RevisionAllocationRecoveredRetryCalls     uint64                         `json:"revision_allocation_recovered_retry_calls"`
+	RevisionAllocationTerminalRetryCalls      uint64                         `json:"revision_allocation_terminal_retry_calls"`
+	RevisionAllocationNS                      uint64                         `json:"revision_allocation_ns"`
+	RevisionsReserved                         uint64                         `json:"revisions_reserved"`
+	InodeRevisionsAssigned                    uint64                         `json:"inode_revisions_assigned"`
+	InodePublicationCalls                     uint64                         `json:"inode_publication_calls"`
+	InodePublicationFailures                  uint64                         `json:"inode_publication_failures"`
+	InodePublicationRecoveredAborts           uint64                         `json:"inode_publication_recovered_aborts"`
+	InodePublicationTerminalAborts            uint64                         `json:"inode_publication_terminal_aborts"`
+	InodePublicationRecoveredCommitAborts     uint64                         `json:"inode_publication_recovered_commit_aborts"`
+	InodePublicationTerminalCommitAborts      uint64                         `json:"inode_publication_terminal_commit_aborts"`
+	InodePublicationRecoveredRetryCalls       uint64                         `json:"inode_publication_recovered_retry_calls"`
+	InodePublicationTerminalRetryCalls        uint64                         `json:"inode_publication_terminal_retry_calls"`
+	InodePublicationNS                        uint64                         `json:"inode_publication_ns"`
+	DirectoryPublicationCalls                 uint64                         `json:"directory_publication_calls"`
+	DirectoryPublicationFailures              uint64                         `json:"directory_publication_failures"`
+	DirectoryPublicationRecoveredAborts       uint64                         `json:"directory_publication_recovered_aborts"`
+	DirectoryPublicationTerminalAborts        uint64                         `json:"directory_publication_terminal_aborts"`
+	DirectoryPublicationRecoveredCommitAborts uint64                         `json:"directory_publication_recovered_commit_aborts"`
+	DirectoryPublicationTerminalCommitAborts  uint64                         `json:"directory_publication_terminal_commit_aborts"`
+	DirectoryPublicationRecoveredRetryCalls   uint64                         `json:"directory_publication_recovered_retry_calls"`
+	DirectoryPublicationTerminalRetryCalls    uint64                         `json:"directory_publication_terminal_retry_calls"`
+	DirectoryPublicationNS                    uint64                         `json:"directory_publication_ns"`
+	AtomicGroupCalls                          uint64                         `json:"atomic_group_calls"`
+	AtomicGroupFailures                       uint64                         `json:"atomic_group_failures"`
+	AtomicGroupNS                             uint64                         `json:"atomic_group_ns"`
 }
 
 type Store interface {
@@ -173,39 +182,48 @@ type Reconciler struct {
 	debtByPath map[string][][]byte
 	crawlDebt  map[string][]byte
 
-	scanned                               atomic.Uint64
-	reused                                atomic.Uint64
-	changed                               atomic.Uint64
-	deferred                              atomic.Uint64
-	failed                                atomic.Uint64
-	failedCanceled                        atomic.Uint64
-	reconciled                            atomic.Uint64
-	publicationGroups                     [publicationConcurrency]atomic.Uint64
-	publicationGroupNS                    atomic.Uint64
-	existingRecordLookupNS                atomic.Uint64
-	publicationWorkerWaitNS               atomic.Uint64
-	revisionAllocationCalls               atomic.Uint64
-	revisionAllocationFailures            atomic.Uint64
-	revisionAllocationFailedCanceled      atomic.Uint64
-	revisionAllocationRecoveredAborts     atomic.Uint64
-	revisionAllocationTerminalAborts      atomic.Uint64
-	revisionAllocationRecoveredRetryCalls atomic.Uint64
-	revisionAllocationTerminalRetryCalls  atomic.Uint64
-	revisionAllocationNS                  atomic.Uint64
-	revisionsReserved                     atomic.Uint64
-	inodeRevisionsAssigned                atomic.Uint64
-	inodePublicationCalls                 atomic.Uint64
-	inodePublicationFailures              atomic.Uint64
-	inodePublicationRecoveredAborts       atomic.Uint64
-	inodePublicationTerminalAborts        atomic.Uint64
-	inodePublicationRecoveredCommitAborts atomic.Uint64
-	inodePublicationTerminalCommitAborts  atomic.Uint64
-	inodePublicationRecoveredRetryCalls   atomic.Uint64
-	inodePublicationTerminalRetryCalls    atomic.Uint64
-	inodePublicationNS                    atomic.Uint64
-	atomicGroupCalls                      atomic.Uint64
-	atomicGroupFailures                   atomic.Uint64
-	atomicGroupNS                         atomic.Uint64
+	scanned                                   atomic.Uint64
+	reused                                    atomic.Uint64
+	changed                                   atomic.Uint64
+	deferred                                  atomic.Uint64
+	failed                                    atomic.Uint64
+	failedCanceled                            atomic.Uint64
+	reconciled                                atomic.Uint64
+	publicationGroups                         [publicationConcurrency]atomic.Uint64
+	publicationGroupNS                        atomic.Uint64
+	existingRecordLookupNS                    atomic.Uint64
+	publicationWorkerWaitNS                   atomic.Uint64
+	revisionAllocationCalls                   atomic.Uint64
+	revisionAllocationFailures                atomic.Uint64
+	revisionAllocationFailedCanceled          atomic.Uint64
+	revisionAllocationRecoveredAborts         atomic.Uint64
+	revisionAllocationTerminalAborts          atomic.Uint64
+	revisionAllocationRecoveredRetryCalls     atomic.Uint64
+	revisionAllocationTerminalRetryCalls      atomic.Uint64
+	revisionAllocationNS                      atomic.Uint64
+	revisionsReserved                         atomic.Uint64
+	inodeRevisionsAssigned                    atomic.Uint64
+	inodePublicationCalls                     atomic.Uint64
+	inodePublicationFailures                  atomic.Uint64
+	inodePublicationRecoveredAborts           atomic.Uint64
+	inodePublicationTerminalAborts            atomic.Uint64
+	inodePublicationRecoveredCommitAborts     atomic.Uint64
+	inodePublicationTerminalCommitAborts      atomic.Uint64
+	inodePublicationRecoveredRetryCalls       atomic.Uint64
+	inodePublicationTerminalRetryCalls        atomic.Uint64
+	inodePublicationNS                        atomic.Uint64
+	directoryPublicationCalls                 atomic.Uint64
+	directoryPublicationFailures              atomic.Uint64
+	directoryPublicationRecoveredAborts       atomic.Uint64
+	directoryPublicationTerminalAborts        atomic.Uint64
+	directoryPublicationRecoveredCommitAborts atomic.Uint64
+	directoryPublicationTerminalCommitAborts  atomic.Uint64
+	directoryPublicationRecoveredRetryCalls   atomic.Uint64
+	directoryPublicationTerminalRetryCalls    atomic.Uint64
+	directoryPublicationNS                    atomic.Uint64
+	atomicGroupCalls                          atomic.Uint64
+	atomicGroupFailures                       atomic.Uint64
+	atomicGroupNS                             atomic.Uint64
 }
 
 func New(ctx context.Context, filesystem statFS, store Store, options Options) (*Reconciler, error) {
@@ -272,31 +290,40 @@ func (reconciler *Reconciler) Metrics() Metrics {
 		Scanned: reconciler.scanned.Load(), Reused: reconciler.reused.Load(), Changed: reconciler.changed.Load(),
 		Deferred: reconciler.deferred.Load(), Failed: reconciler.failed.Load(),
 		FailedCanceled: reconciler.failedCanceled.Load(), Reconciled: reconciler.reconciled.Load(),
-		PublicationGroupNS:                    reconciler.publicationGroupNS.Load(),
-		ExistingRecordLookupNS:                reconciler.existingRecordLookupNS.Load(),
-		PublicationWorkerWaitNS:               reconciler.publicationWorkerWaitNS.Load(),
-		RevisionAllocationCalls:               reconciler.revisionAllocationCalls.Load(),
-		RevisionAllocationFailures:            reconciler.revisionAllocationFailures.Load(),
-		RevisionAllocationFailedCanceled:      reconciler.revisionAllocationFailedCanceled.Load(),
-		RevisionAllocationRecoveredAborts:     reconciler.revisionAllocationRecoveredAborts.Load(),
-		RevisionAllocationTerminalAborts:      reconciler.revisionAllocationTerminalAborts.Load(),
-		RevisionAllocationRecoveredRetryCalls: reconciler.revisionAllocationRecoveredRetryCalls.Load(),
-		RevisionAllocationTerminalRetryCalls:  reconciler.revisionAllocationTerminalRetryCalls.Load(),
-		RevisionAllocationNS:                  reconciler.revisionAllocationNS.Load(),
-		RevisionsReserved:                     reconciler.revisionsReserved.Load(),
-		InodeRevisionsAssigned:                reconciler.inodeRevisionsAssigned.Load(),
-		InodePublicationCalls:                 reconciler.inodePublicationCalls.Load(),
-		InodePublicationFailures:              reconciler.inodePublicationFailures.Load(),
-		InodePublicationRecoveredAborts:       reconciler.inodePublicationRecoveredAborts.Load(),
-		InodePublicationTerminalAborts:        reconciler.inodePublicationTerminalAborts.Load(),
-		InodePublicationRecoveredCommitAborts: reconciler.inodePublicationRecoveredCommitAborts.Load(),
-		InodePublicationTerminalCommitAborts:  reconciler.inodePublicationTerminalCommitAborts.Load(),
-		InodePublicationRecoveredRetryCalls:   reconciler.inodePublicationRecoveredRetryCalls.Load(),
-		InodePublicationTerminalRetryCalls:    reconciler.inodePublicationTerminalRetryCalls.Load(),
-		InodePublicationNS:                    reconciler.inodePublicationNS.Load(),
-		AtomicGroupCalls:                      reconciler.atomicGroupCalls.Load(),
-		AtomicGroupFailures:                   reconciler.atomicGroupFailures.Load(),
-		AtomicGroupNS:                         reconciler.atomicGroupNS.Load(),
+		PublicationGroupNS:                        reconciler.publicationGroupNS.Load(),
+		ExistingRecordLookupNS:                    reconciler.existingRecordLookupNS.Load(),
+		PublicationWorkerWaitNS:                   reconciler.publicationWorkerWaitNS.Load(),
+		RevisionAllocationCalls:                   reconciler.revisionAllocationCalls.Load(),
+		RevisionAllocationFailures:                reconciler.revisionAllocationFailures.Load(),
+		RevisionAllocationFailedCanceled:          reconciler.revisionAllocationFailedCanceled.Load(),
+		RevisionAllocationRecoveredAborts:         reconciler.revisionAllocationRecoveredAborts.Load(),
+		RevisionAllocationTerminalAborts:          reconciler.revisionAllocationTerminalAborts.Load(),
+		RevisionAllocationRecoveredRetryCalls:     reconciler.revisionAllocationRecoveredRetryCalls.Load(),
+		RevisionAllocationTerminalRetryCalls:      reconciler.revisionAllocationTerminalRetryCalls.Load(),
+		RevisionAllocationNS:                      reconciler.revisionAllocationNS.Load(),
+		RevisionsReserved:                         reconciler.revisionsReserved.Load(),
+		InodeRevisionsAssigned:                    reconciler.inodeRevisionsAssigned.Load(),
+		InodePublicationCalls:                     reconciler.inodePublicationCalls.Load(),
+		InodePublicationFailures:                  reconciler.inodePublicationFailures.Load(),
+		InodePublicationRecoveredAborts:           reconciler.inodePublicationRecoveredAborts.Load(),
+		InodePublicationTerminalAborts:            reconciler.inodePublicationTerminalAborts.Load(),
+		InodePublicationRecoveredCommitAborts:     reconciler.inodePublicationRecoveredCommitAborts.Load(),
+		InodePublicationTerminalCommitAborts:      reconciler.inodePublicationTerminalCommitAborts.Load(),
+		InodePublicationRecoveredRetryCalls:       reconciler.inodePublicationRecoveredRetryCalls.Load(),
+		InodePublicationTerminalRetryCalls:        reconciler.inodePublicationTerminalRetryCalls.Load(),
+		InodePublicationNS:                        reconciler.inodePublicationNS.Load(),
+		DirectoryPublicationCalls:                 reconciler.directoryPublicationCalls.Load(),
+		DirectoryPublicationFailures:              reconciler.directoryPublicationFailures.Load(),
+		DirectoryPublicationRecoveredAborts:       reconciler.directoryPublicationRecoveredAborts.Load(),
+		DirectoryPublicationTerminalAborts:        reconciler.directoryPublicationTerminalAborts.Load(),
+		DirectoryPublicationRecoveredCommitAborts: reconciler.directoryPublicationRecoveredCommitAborts.Load(),
+		DirectoryPublicationTerminalCommitAborts:  reconciler.directoryPublicationTerminalCommitAborts.Load(),
+		DirectoryPublicationRecoveredRetryCalls:   reconciler.directoryPublicationRecoveredRetryCalls.Load(),
+		DirectoryPublicationTerminalRetryCalls:    reconciler.directoryPublicationTerminalRetryCalls.Load(),
+		DirectoryPublicationNS:                    reconciler.directoryPublicationNS.Load(),
+		AtomicGroupCalls:                          reconciler.atomicGroupCalls.Load(),
+		AtomicGroupFailures:                       reconciler.atomicGroupFailures.Load(),
+		AtomicGroupNS:                             reconciler.atomicGroupNS.Load(),
 	}
 	for index := range metrics.PublicationGroups {
 		metrics.PublicationGroups[index] = reconciler.publicationGroups[index].Load()
@@ -1041,7 +1068,7 @@ func (reconciler *Reconciler) publishDirectories(directories []preparedItem, pub
 			err    error
 		}
 		results := make([]result, len(pending))
-		allocate := reconciler.store.AllocateRevision
+		allocate := reconciler.allocateInodeRevision
 		if store, ok := reconciler.store.(interface {
 			AllocateRevisionBlock(context.Context, uint64) (uint64, error)
 		}); ok && len(pending) > 1 {
@@ -1054,7 +1081,10 @@ func (reconciler *Reconciler) publishDirectories(directories []preparedItem, pub
 					return 0, err
 				}
 				if next == 0 {
-					start, err := store.AllocateRevisionBlock(ctx, uint64(len(pending)))
+					started := time.Now()
+					count := uint64(len(pending))
+					start, aborted, err := reconciler.allocateRevisionBlock(ctx, count, store.AllocateRevisionBlock)
+					reconciler.recordRevisionAllocation(started, count, aborted, err)
 					if err != nil {
 						return 0, err
 					}
@@ -1346,7 +1376,24 @@ func (reconciler *Reconciler) publishRecordWithAllocator(
 	} else {
 		err = reconciler.store.PublishReconciledRevision(reconciler.ctx, request)
 	}
-	if !directory {
+	if directory {
+		reconciler.directoryPublicationCalls.Add(1)
+		reconciler.directoryPublicationNS.Add(uint64(time.Since(started)))
+		if err != nil {
+			reconciler.directoryPublicationFailures.Add(1)
+			reconciler.directoryPublicationTerminalAborts.Add(aborted)
+			reconciler.directoryPublicationTerminalCommitAborts.Add(commitAborted)
+			if aborted > 0 {
+				reconciler.directoryPublicationTerminalRetryCalls.Add(1)
+			}
+		} else {
+			reconciler.directoryPublicationRecoveredAborts.Add(aborted)
+			reconciler.directoryPublicationRecoveredCommitAborts.Add(commitAborted)
+			if aborted > 0 {
+				reconciler.directoryPublicationRecoveredRetryCalls.Add(1)
+			}
+		}
+	} else {
 		reconciler.inodePublicationCalls.Add(1)
 		reconciler.inodePublicationNS.Add(uint64(time.Since(started)))
 		if err != nil {

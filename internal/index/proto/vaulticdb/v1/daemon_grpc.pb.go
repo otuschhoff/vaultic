@@ -33,6 +33,8 @@ const (
 	VaulticDB_RollbackGeneration_FullMethodName       = "/vaulticdb.v1.VaulticDB/RollbackGeneration"
 	VaulticDB_RetireGeneration_FullMethodName         = "/vaulticdb.v1.VaulticDB/RetireGeneration"
 	VaulticDB_Drain_FullMethodName                    = "/vaulticdb.v1.VaulticDB/Drain"
+	VaulticDB_BeginOwned_FullMethodName               = "/vaulticdb.v1.VaulticDB/BeginOwned"
+	VaulticDB_CancelBegin_FullMethodName              = "/vaulticdb.v1.VaulticDB/CancelBegin"
 	VaulticDB_Shutdown_FullMethodName                 = "/vaulticdb.v1.VaulticDB/Shutdown"
 	VaulticDB_Get_FullMethodName                      = "/vaulticdb.v1.VaulticDB/Get"
 	VaulticDB_MultiGet_FullMethodName                 = "/vaulticdb.v1.VaulticDB/MultiGet"
@@ -80,6 +82,8 @@ type VaulticDBClient interface {
 	RollbackGeneration(ctx context.Context, in *RollbackGenerationRequest, opts ...grpc.CallOption) (*GenerationStatusResponse, error)
 	RetireGeneration(ctx context.Context, in *RetireGenerationRequest, opts ...grpc.CallOption) (*GenerationStatusResponse, error)
 	Drain(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error)
+	BeginOwned(ctx context.Context, in *BeginOwnedRequest, opts ...grpc.CallOption) (*BeginResponse, error)
+	CancelBegin(ctx context.Context, in *CancelBeginRequest, opts ...grpc.CallOption) (*Empty, error)
 	Shutdown(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error)
 	Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (*GetResponse, error)
 	MultiGet(ctx context.Context, in *MultiGetRequest, opts ...grpc.CallOption) (*MultiGetResponse, error)
@@ -251,6 +255,26 @@ func (c *vaulticDBClient) Drain(ctx context.Context, in *Empty, opts ...grpc.Cal
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Empty)
 	err := c.cc.Invoke(ctx, VaulticDB_Drain_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) BeginOwned(ctx context.Context, in *BeginOwnedRequest, opts ...grpc.CallOption) (*BeginResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BeginResponse)
+	err := c.cc.Invoke(ctx, VaulticDB_BeginOwned_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vaulticDBClient) CancelBegin(ctx context.Context, in *CancelBeginRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, VaulticDB_CancelBegin_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -554,6 +578,8 @@ type VaulticDBServer interface {
 	RollbackGeneration(context.Context, *RollbackGenerationRequest) (*GenerationStatusResponse, error)
 	RetireGeneration(context.Context, *RetireGenerationRequest) (*GenerationStatusResponse, error)
 	Drain(context.Context, *Empty) (*Empty, error)
+	BeginOwned(context.Context, *BeginOwnedRequest) (*BeginResponse, error)
+	CancelBegin(context.Context, *CancelBeginRequest) (*Empty, error)
 	Shutdown(context.Context, *Empty) (*Empty, error)
 	Get(context.Context, *GetRequest) (*GetResponse, error)
 	MultiGet(context.Context, *MultiGetRequest) (*MultiGetResponse, error)
@@ -632,6 +658,12 @@ func (UnimplementedVaulticDBServer) RetireGeneration(context.Context, *RetireGen
 }
 func (UnimplementedVaulticDBServer) Drain(context.Context, *Empty) (*Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method Drain not implemented")
+}
+func (UnimplementedVaulticDBServer) BeginOwned(context.Context, *BeginOwnedRequest) (*BeginResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method BeginOwned not implemented")
+}
+func (UnimplementedVaulticDBServer) CancelBegin(context.Context, *CancelBeginRequest) (*Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method CancelBegin not implemented")
 }
 func (UnimplementedVaulticDBServer) Shutdown(context.Context, *Empty) (*Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method Shutdown not implemented")
@@ -983,6 +1015,42 @@ func _VaulticDB_Drain_Handler(srv interface{}, ctx context.Context, dec func(int
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(VaulticDBServer).Drain(ctx, req.(*Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_BeginOwned_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BeginOwnedRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).BeginOwned(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_BeginOwned_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).BeginOwned(ctx, req.(*BeginOwnedRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VaulticDB_CancelBegin_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CancelBeginRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VaulticDBServer).CancelBegin(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VaulticDB_CancelBegin_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VaulticDBServer).CancelBegin(ctx, req.(*CancelBeginRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1528,6 +1596,14 @@ var VaulticDB_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Drain",
 			Handler:    _VaulticDB_Drain_Handler,
+		},
+		{
+			MethodName: "BeginOwned",
+			Handler:    _VaulticDB_BeginOwned_Handler,
+		},
+		{
+			MethodName: "CancelBegin",
+			Handler:    _VaulticDB_CancelBegin_Handler,
 		},
 		{
 			MethodName: "Shutdown",

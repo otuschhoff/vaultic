@@ -742,6 +742,7 @@ func (store *blockAllocationStore) AllocateRevisionBlock(ctx context.Context, co
 type retryOutcomeStore struct {
 	*fakeStore
 	aborted            uint64
+	commitAborted      *uint64
 	allocationFailure  error
 	publicationFailure error
 }
@@ -771,7 +772,11 @@ func (store *retryOutcomeStore) PublishReconciledRevisionWithRetryCount(ctx cont
 
 func (store *retryOutcomeStore) PublishReconciledRevisionWithRetryDetails(ctx context.Context, request daemon.ReconciledRevision) (uint64, uint64, error) {
 	aborted, err := store.PublishReconciledRevisionWithRetryCount(ctx, request)
-	return aborted, aborted, err
+	commitAborted := aborted
+	if store.commitAborted != nil {
+		commitAborted = *store.commitAborted
+	}
+	return aborted, commitAborted, err
 }
 
 func TestPublicationRetryOutcomes(t *testing.T) {
@@ -814,6 +819,114 @@ func TestPublicationRetryOutcomes(t *testing.T) {
 		metrics.RevisionAllocationTerminalRetryCalls != publicationConcurrency || metrics.RevisionAllocationRecoveredRetryCalls != 0 ||
 		metrics.RevisionAllocationFailures != publicationConcurrency || metrics.InodePublicationCalls != 0 {
 		t.Fatalf("terminal allocation: %+v", metrics)
+	}
+}
+
+func TestDirectoryRevisionAllocationRetryOutcomes(t *testing.T) {
+	for _, count := range []int{1, publicationConcurrency} {
+		for _, failure := range []error{nil, errors.New("allocation failed"), context.Canceled} {
+			t.Run(fmt.Sprintf("count=%d/failure=%v", count, failure), func(t *testing.T) {
+				store := &retryOutcomeStore{fakeStore: newFakeStore(), aborted: 2, allocationFailure: failure}
+				reconciler := &Reconciler{ctx: context.Background(), filesystem: testFilesystem(), store: store}
+				directories := make([]preparedItem, count)
+				for index := range directories {
+					inode := uint64(index + 10)
+					directories[index] = preparedItem{
+						workItem: workItem{sourcePath: fmt.Sprintf("/source/d%d", index), snapshotPath: fmt.Sprintf("/snapshot/d%d", index)},
+						identity: identity{fsid: 1, inode: inode}, parent: identity{fsid: 1, inode: 1}, stat: dirInfo(1, inode),
+					}
+				}
+				published := make(map[string]publishedItem)
+				reconciler.publishDirectories(directories, published)
+				metrics := reconciler.Metrics()
+				if failure == nil {
+					if len(published) != count || metrics.RevisionAllocationCalls != 1 ||
+						metrics.RevisionAllocationRecoveredAborts != 2 || metrics.RevisionAllocationFailures != 0 ||
+						metrics.RevisionAllocationRecoveredRetryCalls != 1 || metrics.RevisionsReserved != uint64(count) {
+						t.Fatalf("recovered directory allocation: %+v published=%d", metrics, len(published))
+					}
+				} else {
+					canceled := uint64(0)
+					if errors.Is(failure, context.Canceled) {
+						canceled = uint64(count)
+					}
+					if len(published) != 0 || metrics.RevisionAllocationCalls != uint64(count) ||
+						metrics.RevisionAllocationFailures != uint64(count) || metrics.RevisionAllocationFailedCanceled != canceled ||
+						metrics.RevisionAllocationTerminalAborts != 2*uint64(count) ||
+						metrics.RevisionAllocationTerminalRetryCalls != uint64(count) || metrics.RevisionsReserved != 0 {
+						t.Fatalf("terminal directory allocation: %+v published=%d", metrics, len(published))
+					}
+				}
+				if metrics.RevisionAllocationNS == 0 {
+					t.Fatal("directory allocation duration was not recorded")
+				}
+			})
+		}
+	}
+}
+
+func TestDirectoryPublicationRetryOutcomes(t *testing.T) {
+	for _, count := range []int{1, publicationConcurrency} {
+		for _, failure := range []error{nil, errors.New("publication failed"), context.Canceled} {
+			t.Run(fmt.Sprintf("count=%d/failure=%v", count, failure), func(t *testing.T) {
+				commitAborted := uint64(1)
+				store := &retryOutcomeStore{fakeStore: newFakeStore(), aborted: 2,
+					commitAborted: &commitAborted, publicationFailure: failure}
+				reconciler := &Reconciler{ctx: context.Background(), filesystem: testFilesystem(), store: store}
+				directories := make([]preparedItem, count)
+				for index := range directories {
+					inode := uint64(index + 10)
+					directories[index] = preparedItem{
+						workItem: workItem{sourcePath: fmt.Sprintf("/source/d%d", index), snapshotPath: fmt.Sprintf("/snapshot/d%d", index)},
+						identity: identity{fsid: 1, inode: inode}, parent: identity{fsid: 1, inode: 1}, stat: dirInfo(1, inode),
+					}
+				}
+				published := make(map[string]publishedItem)
+				reconciler.publishDirectories(directories, published)
+				metrics := reconciler.Metrics()
+				if metrics.DirectoryPublicationCalls != uint64(count) || metrics.DirectoryPublicationNS == 0 ||
+					metrics.InodePublicationCalls != 0 || metrics.InodePublicationRecoveredAborts != 0 ||
+					metrics.InodePublicationTerminalAborts != 0 || metrics.RevisionAllocationRecoveredAborts != 2 ||
+					metrics.RevisionAllocationCalls != 1 || metrics.RevisionsReserved != uint64(count) {
+					t.Fatalf("directory accounting contaminated file/allocation metrics: %+v", metrics)
+				}
+				if failure != nil {
+					if len(published) != 0 || metrics.DirectoryPublicationFailures != uint64(count) ||
+						metrics.DirectoryPublicationTerminalAborts != 2*uint64(count) ||
+						metrics.DirectoryPublicationTerminalCommitAborts != uint64(count) ||
+						metrics.DirectoryPublicationTerminalRetryCalls != uint64(count) ||
+						metrics.DirectoryPublicationRecoveredAborts != 0 || metrics.DirectoryPublicationRecoveredCommitAborts != 0 ||
+						metrics.DirectoryPublicationRecoveredRetryCalls != 0 || len(reconciler.errors) != count {
+						t.Fatalf("terminal directory publication: %+v published=%d", metrics, len(published))
+					}
+					for _, actual := range reconciler.errors {
+						if !errors.Is(actual, failure) {
+							t.Fatalf("expected %v, got %v", failure, actual)
+						}
+					}
+					if errors.Is(failure, context.Canceled) && metrics.FailedCanceled != uint64(count) {
+						t.Fatalf("directory cancellation missing: %+v", metrics)
+					}
+					return
+				}
+				if len(published) != count || metrics.DirectoryPublicationFailures != 0 ||
+					metrics.DirectoryPublicationRecoveredAborts != 2*uint64(count) ||
+					metrics.DirectoryPublicationRecoveredCommitAborts != uint64(count) ||
+					metrics.DirectoryPublicationRecoveredRetryCalls != uint64(count) ||
+					metrics.DirectoryPublicationTerminalAborts != 0 || metrics.DirectoryPublicationTerminalCommitAborts != 0 ||
+					metrics.DirectoryPublicationTerminalRetryCalls != 0 || len(reconciler.errors) != 0 {
+					t.Fatalf("recovered directory publication: %+v published=%d", metrics, len(published))
+				}
+				reconciler.publishDirectories(directories, published)
+				after := reconciler.Metrics()
+				if after.Reused != uint64(count) || after.RevisionAllocationCalls != metrics.RevisionAllocationCalls ||
+					after.DirectoryPublicationCalls != metrics.DirectoryPublicationCalls ||
+					after.DirectoryPublicationRecoveredCommitAborts != metrics.DirectoryPublicationRecoveredCommitAborts ||
+					after.DirectoryPublicationNS != metrics.DirectoryPublicationNS {
+					t.Fatalf("reused directories counted again: before=%+v after=%+v", metrics, after)
+				}
+			})
+		}
 	}
 }
 
@@ -1358,6 +1471,7 @@ func TestDaemonBackedDirectoryPublication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	beforeRPC := client.CommitRPCStats()
 	published := make(map[string]publishedItem)
 	started := time.Now()
 	reconciler.publishDirectories(directories, published)
@@ -1366,6 +1480,32 @@ func TestDaemonBackedDirectoryPublication(t *testing.T) {
 	if err != nil || len(reconciler.errors) != 0 || len(published) != siblings+1 ||
 		after.ActiveTransactions != 0 || after.ActiveWriteIntents != 0 {
 		t.Fatalf("directory publication errors=%v published=%d writer=%+v err=%v", reconciler.errors, len(published), after, err)
+	}
+	metrics := reconciler.Metrics()
+	afterRPC := client.CommitRPCStats()
+	commits := after.Attribution.CommitRequest
+	attempts := commits.Attempts - before.Attribution.CommitRequest.Attempts
+	successes := commits.Successes - before.Attribution.CommitRequest.Successes
+	failures := commits.Failures - before.Attribution.CommitRequest.Failures
+	if metrics.DirectoryPublicationCalls != siblings+1 || metrics.InodePublicationCalls != 0 ||
+		metrics.RevisionsReserved != siblings+1 || metrics.DirectoryPublicationFailures != 0 ||
+		metrics.RevisionAllocationFailures != 0 || metrics.DirectoryPublicationTerminalAborts != 0 ||
+		successes != metrics.RevisionAllocationCalls+metrics.DirectoryPublicationCalls ||
+		failures != metrics.RevisionAllocationRecoveredAborts+metrics.DirectoryPublicationRecoveredCommitAborts ||
+		attempts != successes+failures || commits.Completed-before.Attribution.CommitRequest.Completed != attempts ||
+		afterRPC.Attempts-beforeRPC.Attempts != attempts || afterRPC.Successes-beforeRPC.Successes != successes ||
+		afterRPC.Aborted-beforeRPC.Aborted != failures || afterRPC.Active != 0 || commits.Active != 0 ||
+		afterRPC.Cancellations != beforeRPC.Cancellations || afterRPC.Timeouts != beforeRPC.Timeouts ||
+		afterRPC.OtherFailures != beforeRPC.OtherFailures ||
+		commits.Cancellations != before.Attribution.CommitRequest.Cancellations || commits.Timeouts != before.Attribution.CommitRequest.Timeouts {
+		t.Fatalf("directory Commit parity: metrics=%+v rpcBefore=%+v rpcAfter=%+v commitBefore=%+v commitAfter=%+v",
+			metrics, beforeRPC, afterRPC, before.Attribution.CommitRequest, commits)
+	}
+	reconciler.publishDirectories(directories, published)
+	reused := reconciler.Metrics()
+	if len(reconciler.errors) != 0 || reused.Reused != siblings+1 || reused.DirectoryPublicationCalls != metrics.DirectoryPublicationCalls ||
+		reused.RevisionAllocationCalls != metrics.RevisionAllocationCalls || client.CommitRPCStats() != afterRPC {
+		t.Fatalf("reused directories issued Commits: before=%+v after=%+v rpc=%+v", metrics, reused, client.CommitRPCStats())
 	}
 	t.Logf("directories=%d seconds=%.6f commits=%d failures=%d durable_us=%d", siblings+1, elapsed.Seconds(),
 		after.Attribution.CommitRequest.Attempts-before.Attribution.CommitRequest.Attempts,

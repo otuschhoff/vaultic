@@ -122,6 +122,7 @@ type SchemaStore struct {
 	publicationMu       sync.RWMutex
 	publicationPlanning lockedDurationHistogram
 	publicationCommit   lockedDurationHistogram
+	packPublication     packPublicationCounters
 	legacyImportGate    chan struct{}
 	freshImportSeen     *idSeenFilter
 	legacySplitMu       sync.Mutex
