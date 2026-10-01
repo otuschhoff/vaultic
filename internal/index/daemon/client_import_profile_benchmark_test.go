@@ -21,11 +21,207 @@ import (
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type benchmarkBlobSizeRPC struct {
 	vaulticdbv1.VaulticDBClient
 	value []byte
+}
+
+func TestProcessClonedOwnedBeginReadiness(t *testing.T) {
+	root := os.Getenv("VAULTICDB_TEST_BEGIN_READINESS_CLONE")
+	if root == "" {
+		t.Skip("set VAULTICDB_TEST_BEGIN_READINESS_CLONE to the validated disposable clone")
+	}
+	const cloneRoot = "/ncl1-1-vs-50/fme_dump/amakura/db.begin-readiness-20261001-fuU56R"
+	const artifacts = "/volume2/NASDA2/rustic/db.test/begin-readiness-deploy-20261001-fuU56R"
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil || resolved != cloneRoot {
+		t.Fatalf("refuse non-clone data directory: %q error=%v", resolved, err)
+	}
+	var marker struct {
+		Clone                                                  string
+		ChecksumVerified, WALRelocated, ProductionWALUnchanged bool
+	}
+	encoded, err := os.ReadFile(artifacts + "/clone.validated.json")
+	if err != nil || json.Unmarshal(encoded, &marker) != nil || marker.Clone != resolved ||
+		!marker.ChecksumVerified || !marker.WALRelocated || !marker.ProductionWALUnchanged {
+		t.Fatal("clone checksum and WAL-relocation marker is missing or invalid")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	options := Options{
+		RepositoryID: "c4d68689c785d02a28d6eec485c62132823dc9873ff7f627c2bac80258251528",
+		DaemonPath:   daemonBinary(t), DataDir: root, ObjectStore: "local", StartTimeout: 90 * time.Second,
+		WALStore: "local", WALDataDir: filepath.Join(root, "wal"), WALFlushInterval: 100 * time.Millisecond,
+		MetaCacheBytes: 128 << 20, BlockCacheBytes: 512 << 20, EncryptionMode: "required",
+		PassphraseFile: "/volume2/NASDA2/rustic/etc/metadata-recovery",
+	}
+	open := func() *Client {
+		current := options
+		current.Socket = testSocket(t)
+		client, err := Ensure(ctx, current)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = client.Close(context.Background()) })
+		if !client.Limits().BeginReconciliation {
+			t.Fatal("owned Begin capability not negotiated")
+		}
+		return client
+	}
+	client := open()
+	before, err := client.WriterStatus(ctx)
+	if err != nil || before.ActiveTransactions != 0 || before.ActiveWriteIntents != 0 || before.EngineMetaCacheBytes != 128<<20 || before.EngineBlockCacheBytes != 512<<20 || before.EngineFlushIntervalMS != 100 {
+		t.Fatalf("clone not idle on defaults: err=%v", err)
+	}
+	sample, _, err := client.ScanPage(ctx, []byte{'b', ':'}, nil, 128, "")
+	if err != nil || len(sample) != 128 {
+		t.Fatalf("clone sample: count=%d err=%v", len(sample), err)
+	}
+	started := time.Now()
+	var latestDeadline int64
+	var deadlineMutex sync.Mutex
+	jobs := make(chan int)
+	failures := make(chan error, 4096)
+	var workers sync.WaitGroup
+	for worker := 0; worker < 32; worker++ {
+		workers.Go(func() {
+			for ordinal := range jobs {
+				request := &vaulticdbv1.BeginOwnedRequest{Context: requestContext(ctx), BeginRequestId: fmt.Sprintf("%032x", ordinal+1), BeginDeadlineUnixMs: time.Now().Add(10 * time.Second).UnixMilli()}
+				deadlineMutex.Lock()
+				latestDeadline = max(latestDeadline, request.BeginDeadlineUnixMs)
+				deadlineMutex.Unlock()
+				response, err := client.rpc.BeginOwned(ctx, request)
+				if err != nil || response.GetTransactionId() == "" {
+					failures <- fmt.Errorf("Begin %d: %w", ordinal, err)
+					continue
+				}
+				if err := client.cancelBegin(ctx, request); err != nil {
+					failures <- fmt.Errorf("cancel %d: %w", ordinal, err)
+				}
+			}
+		})
+	}
+	for ordinal := 0; ordinal < 4096; ordinal++ {
+		jobs <- ordinal
+	}
+	close(jobs)
+	workers.Wait()
+	close(failures)
+	for err := range failures {
+		t.Error(err)
+	}
+	if t.Failed() {
+		t.FailNow()
+	}
+	elapsed := time.Since(started)
+	t.Logf("owned_begin_load workers=32 calls=4096 seconds=%.6f calls_per_second=%.3f", elapsed.Seconds(), 4096/elapsed.Seconds())
+	if elapsed >= 60*time.Second {
+		t.Fatal("ledger did not reach capacity within retention window")
+	}
+	full, err := client.WriterStatus(ctx)
+	if err != nil || full.ActiveTransactions != 0 || full.ActiveWriteIntents != 0 || client.CommitRPCStats().Attempts != 0 || full.Attribution.CommitRequest.Attempts != before.Attribution.CommitRequest.Attempts {
+		t.Fatalf("load leaked transaction/Commit: transactions=%d err=%v", full.ActiveTransactions, err)
+	}
+	probe := &vaulticdbv1.BeginOwnedRequest{Context: requestContext(ctx), BeginRequestId: strings.Repeat("f", 32), BeginDeadlineUnixMs: time.Now().Add(10 * time.Second).UnixMilli()}
+	if _, err := client.rpc.BeginOwned(ctx, probe); status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("ledger capacity did not fail closed: %v", err)
+	}
+	if err := client.cancelBegin(ctx, probe); status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("full ledger cleanup not explicit: %v", err)
+	}
+	retirement := time.NewTimer(time.Until(time.UnixMilli(latestDeadline).Add(60*time.Second + time.Millisecond)))
+	defer retirement.Stop()
+	select {
+	case <-retirement.C:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	probe.BeginDeadlineUnixMs = time.Now().Add(10 * time.Second).UnixMilli()
+	if _, err := client.rpc.BeginOwned(ctx, probe); err != nil {
+		t.Fatalf("retired ledger did not recover capacity: %v", err)
+	}
+	if err := client.cancelBegin(ctx, probe); err != nil {
+		t.Fatal(err)
+	}
+	first := &vaulticdbv1.CancelBeginRequest{Context: requestContext(ctx), BeginRequestId: fmt.Sprintf("%032x", 4096), BeginDeadlineUnixMs: latestDeadline}
+	if _, err := client.rpc.CancelBegin(ctx, first); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("retired history acknowledged cleanup: %v", err)
+	}
+	sustainedStarted := time.Now()
+	sustainedJobs := make(chan int)
+	sustainedFailures := make(chan error, 2400)
+	var sustainedWorkers sync.WaitGroup
+	for worker := 0; worker < 32; worker++ {
+		sustainedWorkers.Go(func() {
+			for ordinal := range sustainedJobs {
+				request := &vaulticdbv1.BeginOwnedRequest{Context: requestContext(ctx), BeginRequestId: fmt.Sprintf("%032x", ordinal+4097), BeginDeadlineUnixMs: time.Now().Add(10 * time.Second).UnixMilli()}
+				response, err := client.rpc.BeginOwned(ctx, request)
+				if err != nil || response.GetTransactionId() == "" {
+					sustainedFailures <- fmt.Errorf("sustained Begin %d: %w", ordinal, err)
+					continue
+				}
+				if err := client.cancelBegin(ctx, request); err != nil {
+					sustainedFailures <- err
+				}
+			}
+		})
+	}
+	ticker := time.NewTicker(time.Second / 20)
+	for ordinal := 0; ordinal < 2400; ordinal++ {
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+		sustainedJobs <- ordinal
+	}
+	ticker.Stop()
+	close(sustainedJobs)
+	sustainedWorkers.Wait()
+	close(sustainedFailures)
+	for err := range sustainedFailures {
+		t.Error(err)
+	}
+	if t.Failed() {
+		t.FailNow()
+	}
+	t.Logf("owned_begin_sustained calls=2400 rate=20 seconds=%.6f failures=0", time.Since(sustainedStarted).Seconds())
+	orphan := &vaulticdbv1.BeginOwnedRequest{Context: requestContext(ctx), BeginRequestId: strings.Repeat("e", 32), BeginDeadlineUnixMs: time.Now().Add(10 * time.Second).UnixMilli()}
+	response, err := client.rpc.BeginOwned(ctx, orphan)
+	if err != nil || response.GetTransactionId() == "" {
+		t.Fatalf("restart fixture Begin: %v", err)
+	}
+	if err := client.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	restarted := open()
+	after, err := restarted.WriterStatus(ctx)
+	if err != nil || after.CurrentEpoch <= before.CurrentEpoch || after.ActiveTransactions != 0 || after.ActiveWriteIntents != 0 {
+		t.Fatalf("restart retained ownership: transactions=%d err=%v", after.ActiveTransactions, err)
+	}
+	if err := restarted.cancelBegin(ctx, orphan); err != nil {
+		t.Fatalf("restart cleanup tombstone failed: %v", err)
+	}
+	if _, err := restarted.rpc.BeginOwned(ctx, orphan); status.Code(err) != codes.Canceled {
+		t.Fatalf("restart allowed canceled identity: %v", err)
+	}
+	current, _, err := restarted.ScanPage(ctx, []byte{'b', ':'}, nil, 128, "")
+	if err != nil || len(current) != len(sample) {
+		t.Fatalf("restart sample count changed: %v", err)
+	}
+	for ordinal := range sample {
+		if string(sample[ordinal].Key) != string(current[ordinal].Key) || string(sample[ordinal].Value) != string(current[ordinal].Value) {
+			t.Fatal("read-only clone metadata changed")
+		}
+	}
+	if after.Attribution.CommitRequest.Attempts != 0 {
+		t.Fatal("restart attempted Commit")
+	}
+	t.Logf("readiness capacity=4096 reclaimed=true retired_history=failed-precondition restart_transactions=0 sample_records=%d before_epoch=%d after_epoch=%d", len(sample), before.CurrentEpoch, after.CurrentEpoch)
 }
 
 func TestProcessClonedBlobLookup(t *testing.T) {

@@ -1,5 +1,185 @@
 # Phase 33 Production Benchmark Evidence
 
+## Shared-reservation production trial: safe but incomplete (2026-10-01)
+
+The approved shared-reservation CLI was built from the captured source,
+validated, and used for one fresh 52-source production trial. CLI SHA256 was
+`38705f2685e15f05faf343f3bf37da2854b87bf675f9b3415a85b6536a211778`.
+The Rust daemon remained byte-identical. An owned-idle SIGINT shutdown had
+a confirmed clean exit, followed by a normal start at PID 1160366, epoch 102,
+with zero attribution counters and unchanged binary, unit, effective/runtime
+configuration, WAL, 128 MiB metadata cache, 512 MiB block cache, and 100 ms
+flush. The exact 143 original snapshots were preserved. The unchanged
+analyzer passed all 124 self-tests; all 20 sealed launch inputs and four
+compiled-source checksums were independently verified before launch.
+
+The wrapper reached the unchanged 3600-second cap and exited 124 after
+3600.610 s; the CLI reported exit 130, unable to save the snapshot because
+its context was canceled. Last progress was 194059 files and 186232621348
+logical bytes, not a completed snapshot or newly uploaded bytes. No new
+snapshot appeared, and no restore acceptance was attempted or claimed.
+
+All 2690 client/server Commit attempts settled successfully, with zero
+aborts, cancellations, timeouts, other client failures, or active Commit
+calls. Reconciliation used two revision reservations, reserving 10000 IDs
+and assigning 2631; all 2631 inode publications succeeded. It reported
+191757 reused records and 6494 failed records, all canceled. Unused reserved
+IDs are safe gaps, not published revisions. Durable-wait attribution was
+202.502247 s and engine submission was 0.333033 s. No pack-publication calls
+occurred, so this run does not validate the previously failing pack path.
+
+The analyzer accepted only the bounded publication-safety gate and explicitly
+reported `completed: false`. The completion controller rejected the nonzero
+backup exit. This bounded safety pass must not be represented as completed
+backup acceptance. Workload coverage and reuse differ from the previous
+trial; the lower allocation count and isolated clone improvement do not
+establish a full-workload performance improvement. Remaining completion
+costs are unresolved under the existing cap.
+
+The raw post-backup writer already had zero transactions and write intents;
+no cleanup, demotion, promotion, or recovery was needed. Independent read-only
+verification confirmed the same PID/epoch, idle/read-write state, unchanged
+configuration/runtime/WAL/defaults, no stray Vaultic clients, and all original
+143 snapshot IDs through both matching and legacy CLIs. Current source
+checksums still matched the validated build before this documentation update.
+
+Raw results, profiles, rejection, and independent verification are retained
+under `/volume2/NASDA2/rustic/db.test/revision-batch-fix-20261001-qB7P2R`.
+No 1024 MiB candidate, relaxed gate, additional production trial, new commit,
+or push was performed. Historical rejected trials remain rejected. The
+original exit-zero backup/new-snapshot/byte-restore objective remains unmet.
+
+## Offline shared prepared-batch revision reservations (2026-10-01)
+
+Following approval to execute offline diagnosis, validation, deployment, and
+one fresh production trial, the retained timeout evidence was examined.
+Successful Commits accumulated 3596.541 s of WAL-durability wait versus
+49.951 s of engine submission time. Ordinary four-worker inode groups
+already shared one allocation Commit per group, but repeated this durable
+reservation for each group in a prepared batch. Metadata body reads were
+also substantial; this change does not claim to eliminate read amplification
+or prove that the earlier terminal aborts caused the timeout.
+
+The backup client now shares one lazy revision reservation across the
+ordinary groups in each prepared batch. Inode Commits remain independent,
+group concurrency remains four, and atomic-publication options, durability,
+retry bounds, and safety gates are unchanged. Reuse does not reserve IDs;
+canceled allocation cannot consume a reserved ID. Unused IDs may remain
+safe gaps when a partially reused batch ends. The reservoir does not survive
+the batch. A focused regression initially observed three reservations of
+four IDs and now observes one reservation of twelve unique IDs. Reuse,
+cancellation, bounded refill, and recovered/terminal retry accounting pass.
+
+The opt-in clone probe refuses the production path before connection and
+uses the validated encrypted HDD/NFS clone, the exact release daemon,
+128 MiB metadata cache, 512 MiB block cache, and 100 ms flush. It writes only
+synthetic inode metadata in an epoch-specific namespace, not production
+metadata or payload packs. For each 128-inode pass, allocation Commits fell
+from 32 to 1 while inode Commits remained 128. Both execution orders were
+tested: paired totals were 12.917484 s versus 6.703482 s (ratio 0.518946).
+Persisted inode values, zero-write reuse, 128 original blob samples, and
+zero leftover transactions/intents passed. A real 5000-slot default-size
+reservation kept the next allocator outside its reserved range. The final
+clone race test passed in 23.468 s. The initial fixture runtime-directory
+permission refusal is retained separately; no security check was weakened.
+
+This is an isolated metadata-publication result, not full backup throughput,
+snapshot, or restore acceptance. Evidence is retained under
+`/volume2/NASDA2/rustic/db.test/revision-batch-fix-20261001-qB7P2R`.
+The implementation is in the Go backup client; the Rust daemon code is
+unchanged. At this offline stage, production acceptance was still pending
+the fresh strictly gated run described above.
+
+## Owned Begin default-cache production trial rejected (2026-10-01)
+
+After the request to continue, one production backup used the deployed owned
+Begin release and matching CLI, with the unchanged 52-source workload,
+8 NFS connections, 4 readers, ordinary publication groups, 128 MiB daemon
+metadata cache, 512 MiB block cache, and 100 ms flush. The 3600-second cap,
+64-Commit-failure budget, and terminal-publication rejection gates were not
+relaxed. No 1024 MiB comparison, cache override, or daemon restart was run.
+The analyzer's 124 self-tests and read-only production preflight passed;
+all 12 sealed launch inputs were independently checksum-verified.
+
+The wrapper timed out with exit 124 after 3602.504 s. Last reported progress
+was 250419 files and 461157483942 logical bytes; these are not a completed
+snapshot or newly uploaded byte count. There were no new snapshots, and all
+143 original snapshot IDs remained unchanged. No restore acceptance was
+attempted or claimed.
+
+Client/server Commit accounting settled exactly: 50959 attempts, 50907
+successes, and 52 Aborted failures, with zero Commit cancellations, timeouts,
+other client failures, or active Commit calls. Pack publication reported
+114 calls, 2 canceled terminal failures, 41 recovered Commit aborts, and
+11 terminal Commit aborts; 14 retrying calls recovered and 1 ended terminally.
+Thus all 52 Commit aborts have pack attribution, but only 41 recovered.
+The 52 failures being below the budget does not make terminal failures
+acceptable. Reconciliation reported 50819 canceled failures and 3 inode
+publication failures; revision allocation and directory publication failures
+were zero. The analyzer and controller both rejected the trial. Raw errors,
+analysis, and decision are preserved without reclassification.
+
+Unlike the preceding legacy trial, the raw post-backup writer already had
+zero transactions and write intents. No expiry quiescence, demotion,
+promotion, recovery, or forced shutdown was needed. Independent read-only
+verification confirmed PID 1096071, epoch 101, idle/read-write state,
+unchanged binary/unit/effective configuration/runtime environment/WAL/defaults,
+no drop-ins, and exact original snapshot parity through matching and legacy
+CLIs. This observed cleanup result is not proof of every possible ownership
+failure being eliminated, nor a production completion or performance claim.
+
+Evidence is retained under
+`/volume2/NASDA2/rustic/db.test/owned-begin-backup-20261001-rXKFEW`, including
+the sealed launch inputs, CPU/goroutine profiles, raw accounting, rejection,
+and independent outcome verification. Historical rejected trials remain
+rejected. No new commit, push, deployment, or follow-up production trial was
+performed. The original exit-zero backup/new-snapshot/byte-restore objective
+remains outstanding.
+
+## Owned Begin release readiness and approved daemon deployment (2026-10-01)
+
+After explicit approval to clone production and replace the daemon, matching
+profiled static release CLI/daemon binaries were built from clean commit
+`1824a8f7b0c35830982bf14b62660c2c751df759`. No test-failpoints feature was enabled.
+The production daemon was stopped only after PID/binary ownership, idle writer,
+configuration, WAL, and original snapshot gates; SIGINT shutdown had a confirmed
+clean exit. A fresh cold clone was copied and checksum-verified in 406.764 s at
+`/ncl1-1-vs-50/fme_dump/amakura/db.begin-readiness-20261001-fuU56R`.
+Only the clone WAL binding was relocated, and the clone was excluded from
+backup with `.nobackup`. Production was restored on its original binary at
+PID 1094950, epoch 100, while offline clone checks ran.
+
+The clone-only readiness probe rejects the production path before connecting.
+Using the exact release daemon, encryption, HDD/NFS data and WAL, 128 MiB
+metadata cache, 512 MiB block cache, and 100 ms flush, it completed 4096 owned
+Begin/cancel pairs at 32 workers in 1.272555 s (3218.721 calls/s). Deliberate
+ledger saturation returned explicit ResourceExhausted without allocating more
+transactions. After real retention expiry, capacity was reclaimed and retired
+unknown history failed closed. A further 2400 calls paced at 20/s completed in
+120.010189 s with zero failures across retention cycles. Shutdown/restart with
+an outstanding Begin left zero transactions/intents, rejected a canceled
+identity after restart, and preserved 128 sampled blob records. No Commit or
+payload publication was performed. The race-enabled probe passed in 193.462 s.
+These synthetic admission checks are not a production backup throughput claim;
+the bounded in-memory ledger and explicit overload behavior remain limitations.
+
+The independently verified readiness gate permitted atomic daemon replacement,
+with the original binary retained for guarded rollback. Production now runs
+PID 1096071, epoch 101, installed daemon SHA256
+`2e69693454611fdc64c3b03ef633dc87f70151032c5c96f82cabf443533aa8bf`.
+Independent read-only verification found idle/read-write state, unchanged
+unit/effective configuration/runtime environment/WAL and cache/flush defaults,
+no drop-ins, and the exact original 143 snapshot IDs through both matching and
+legacy CLIs. The matching CLI is retained in the deployment artifacts rather
+than replacing an unrelated CLI installation. Legacy clients remain compatible
+but do not opt into the new owned Begin behavior.
+
+Source/build/clone/load/restart/deployment evidence and rollback artifacts are
+sealed under `/volume2/NASDA2/rustic/db.test/begin-readiness-deploy-20261001-fuU56R`.
+No backup trial, new snapshot, restore acceptance, forced production shutdown,
+locking/fencing bypass, commit, or push accompanied this deployment. The
+original backup/new-snapshot/byte-restore objective remains outstanding.
+
 ## Offline owned Begin transport-loss reconciliation (2026-10-01)
 
 The separately approved offline repair adds negotiated `BeginOwned` and

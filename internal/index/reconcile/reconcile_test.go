@@ -12,6 +12,7 @@ import (
 	pathpkg "path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -747,6 +748,41 @@ type retryOutcomeStore struct {
 	publicationFailure error
 }
 
+func TestProcessBatchSharesRevisionReservation(t *testing.T) {
+	store := &blockAllocationStore{fakeStore: newFakeStore()}
+	reconciler := &Reconciler{ctx: context.Background(), filesystem: testFilesystem(), store: store}
+	count := 3 * publicationConcurrency
+	batch := publicationTestBatch(0, count)
+	published := make(map[string]publishedItem)
+	var directories []preparedItem
+	hardlinks := make(map[identity][]preparedItem)
+	reconciler.processBatch(batch, &directories, hardlinks, published)
+	if len(store.requests) != 1 || store.requests[0] != uint64(count) {
+		t.Fatalf("one prepared batch must share a revision reservation: %v", store.requests)
+	}
+	if len(published) != count || len(reconciler.errors) != 0 {
+		t.Fatalf("published=%d errors=%v", len(published), reconciler.errors)
+	}
+	revisions := make(map[uint64]bool)
+	for _, item := range batch {
+		pointer, err := schema.UnmarshalCurrentPointer(store.values[string(schema.CurrentInodeKey(item.identity.fsid, item.identity.inode))])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pointer.Revision == 0 || pointer.Revision > uint64(count) || revisions[pointer.Revision] {
+			t.Fatalf("invalid or duplicate revision: %d", pointer.Revision)
+		}
+		revisions[pointer.Revision] = true
+	}
+	before := reconciler.Metrics()
+	reconciler.processBatch(batch, &directories, hardlinks, published)
+	after := reconciler.Metrics()
+	if len(store.requests) != 1 || after.RevisionAllocationCalls != before.RevisionAllocationCalls ||
+		after.InodePublicationCalls != before.InodePublicationCalls || after.Reused-before.Reused != uint64(count) {
+		t.Fatalf("reused batch must not reserve or publish: before=%+v after=%+v requests=%v", before, after, store.requests)
+	}
+}
+
 func (store *retryOutcomeStore) AllocateRevisionBlockWithRetryCount(ctx context.Context, count uint64) (uint64, uint64, error) {
 	if store.allocationFailure != nil {
 		return 0, store.aborted, store.allocationFailure
@@ -777,6 +813,28 @@ func (store *retryOutcomeStore) PublishReconciledRevisionWithRetryDetails(ctx co
 		commitAborted = *store.commitAborted
 	}
 	return aborted, commitAborted, err
+}
+
+func TestInodeRevisionAllocatorCancellationAndRefill(t *testing.T) {
+	store := &blockAllocationStore{fakeStore: newFakeStore()}
+	reconciler := &Reconciler{ctx: context.Background(), store: store}
+	allocate := reconciler.inodeRevisionAllocator(2)
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := allocate(canceled); !errors.Is(err, context.Canceled) || len(store.requests) != 0 {
+		t.Fatalf("canceled allocation reserved revisions: error=%v requests=%v", err, store.requests)
+	}
+	for want := uint64(1); want <= 5; want++ {
+		if got, err := allocate(context.Background()); err != nil || got != want {
+			t.Fatalf("revision=%d want=%d error=%v", got, want, err)
+		}
+		if _, err := allocate(canceled); !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled allocation consumed a reserved revision: %v", err)
+		}
+	}
+	if !slices.Equal(store.requests, []uint64{2, 2, 2}) || reconciler.Metrics().RevisionsReserved != 6 {
+		t.Fatalf("bounded refill: requests=%v metrics=%+v", store.requests, reconciler.Metrics())
+	}
 }
 
 func TestPublicationRetryOutcomes(t *testing.T) {
@@ -1809,6 +1867,168 @@ func publicationTestMetrics(reconcilers []*Reconciler) Metrics {
 		}
 	}
 	return total
+}
+
+func TestProcessClonedBatchRevisionReservations(t *testing.T) {
+	root := os.Getenv("VAULTICDB_TEST_REVISION_BATCH_CLONE")
+	if root == "" {
+		t.Skip("set VAULTICDB_TEST_REVISION_BATCH_CLONE to the validated disposable clone")
+	}
+	const cloneRoot = "/ncl1-1-vs-50/fme_dump/amakura/db.begin-readiness-20261001-fuU56R"
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil || resolved != cloneRoot {
+		t.Fatalf("refuse non-clone data directory: %q error=%v", resolved, err)
+	}
+	var marker struct {
+		Clone                                                  string
+		ChecksumVerified, WALRelocated, ProductionWALUnchanged bool
+	}
+	encoded, err := os.ReadFile("/volume2/NASDA2/rustic/db.test/begin-readiness-deploy-20261001-fuU56R/clone.validated.json")
+	if err != nil || json.Unmarshal(encoded, &marker) != nil || marker.Clone != resolved ||
+		!marker.ChecksumVerified || !marker.WALRelocated || !marker.ProductionWALUnchanged {
+		t.Fatal("clone checksum and WAL-relocation marker is missing or invalid")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	socketDirectory := t.TempDir()
+	if err := os.Chmod(socketDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	client, err := daemon.Ensure(ctx, daemon.Options{
+		Socket:       filepath.Join(socketDirectory, "daemon.sock"),
+		RepositoryID: "c4d68689c785d02a28d6eec485c62132823dc9873ff7f627c2bac80258251528",
+		DaemonPath:   reconciliationDaemonBinary(t), DataDir: root, ObjectStore: "local", StartTimeout: 90 * time.Second,
+		WALStore: "local", WALDataDir: filepath.Join(root, "wal"), WALFlushInterval: 100 * time.Millisecond,
+		MetaCacheBytes: 128 << 20, BlockCacheBytes: 512 << 20, EncryptionMode: "required",
+		PassphraseFile: "/volume2/NASDA2/rustic/etc/metadata-recovery",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := client.Close(context.Background()); err != nil {
+			t.Errorf("clone graceful close: %v", err)
+		}
+	})
+	before, err := client.WriterStatus(ctx)
+	if err != nil || before.ActiveTransactions != 0 || before.ActiveWriteIntents != 0 ||
+		before.EngineMetaCacheBytes != 128<<20 || before.EngineBlockCacheBytes != 512<<20 || before.EngineFlushIntervalMS != 100 {
+		t.Fatalf("clone not idle on defaults: %v", err)
+	}
+	if before.CurrentEpoch >= math.MaxUint32/8 {
+		t.Fatal("clone synthetic filesystem-ID space exhausted")
+	}
+	sample, _, err := client.ScanPage(ctx, []byte{'b', ':'}, nil, 128, "")
+	if err != nil || len(sample) != 128 {
+		t.Fatalf("clone sample: count=%d error=%v", len(sample), err)
+	}
+	store := daemon.NewSchemaStore(client)
+	count := 128
+	var legacyElapsed, sharedElapsed time.Duration
+	pass := 0
+	for _, modes := range [][]string{{"per-group", "shared-batch"}, {"shared-batch", "per-group"}} {
+		for _, mode := range modes {
+			pass++
+			batch := publicationTestBatch(0, count)
+			for ordinal := range batch {
+				batch[ordinal].identity.fsid = math.MaxUint32 - uint32(before.CurrentEpoch*8) - uint32(pass)
+				batch[ordinal].parent.fsid = batch[ordinal].identity.fsid
+				batch[ordinal].sourcePath = fmt.Sprintf("/__revision_batch_probe__/%d/%d/%d", before.CurrentEpoch, pass, ordinal)
+				batch[ordinal].snapshotPath = batch[ordinal].sourcePath
+				batch[ordinal].node.Content = nil
+				batch[ordinal].stat.Size = 0
+				if _, found, err := store.Get(ctx, schema.CurrentInodeKey(batch[ordinal].identity.fsid, batch[ordinal].identity.inode)); err != nil || found {
+					t.Fatalf("synthetic clone identity collision: found=%t error=%v", found, err)
+				}
+			}
+			reconciler := &Reconciler{ctx: ctx, filesystem: testFilesystem(), store: store}
+			published := make(map[string]publishedItem)
+			var directories []preparedItem
+			hardlinks := make(map[identity][]preparedItem)
+			prior, err := client.WriterStatus(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			started := time.Now()
+			if mode == "per-group" {
+				for offset := 0; offset < count; offset += publicationConcurrency {
+					reconciler.publishInodes(batch[offset:offset+publicationConcurrency], published)
+				}
+			} else {
+				reconciler.processBatch(batch, &directories, hardlinks, published)
+			}
+			elapsed := time.Since(started)
+			allocationCalls := uint64(1)
+			if mode == "per-group" {
+				allocationCalls = uint64(count / publicationConcurrency)
+				legacyElapsed += elapsed
+			} else {
+				sharedElapsed += elapsed
+			}
+			metrics := reconciler.Metrics()
+			latest, err := client.WriterStatus(ctx)
+			if err != nil || latest.ActiveTransactions != 0 || latest.ActiveWriteIntents != 0 || len(reconciler.errors) != 0 ||
+				len(published) != count || metrics.RevisionAllocationCalls != allocationCalls || metrics.InodePublicationCalls != uint64(count) ||
+				metrics.InodeRevisionsAssigned != uint64(count) || metrics.RevisionsReserved != uint64(count) ||
+				latest.Attribution.CommitRequest.Attempts-prior.Attribution.CommitRequest.Attempts != uint64(count)+allocationCalls ||
+				latest.Attribution.CommitRequest.Failures != prior.Attribution.CommitRequest.Failures {
+				t.Fatalf("clone publication: mode=%s metrics=%+v errors=%v writerError=%v", mode, metrics, reconciler.errors, err)
+			}
+			for _, item := range batch {
+				pointerValue, found, err := store.Get(ctx, schema.CurrentInodeKey(item.identity.fsid, item.identity.inode))
+				if err != nil || !found {
+					t.Fatalf("persisted current pointer: found=%t error=%v", found, err)
+				}
+				pointer, err := schema.UnmarshalCurrentPointer(pointerValue)
+				if err != nil {
+					t.Fatal(err)
+				}
+				value, found, err := store.Get(ctx, pointer.RecordKey)
+				want, _, prepareErr := prepareInodeValue(item, false)
+				if err != nil || prepareErr != nil || !found || !bytes.Equal(value, want) {
+					t.Fatalf("persisted inode parity: found=%t error=%v prepare=%v", found, err, prepareErr)
+				}
+			}
+			reconciler.processBatch(batch, &directories, hardlinks, published)
+			reused, err := client.WriterStatus(ctx)
+			if err != nil || reused.Attribution.CommitRequest.Attempts != latest.Attribution.CommitRequest.Attempts ||
+				reconciler.Metrics().Reused != uint64(count) {
+				t.Fatalf("clone reuse wrote metadata: %v", err)
+			}
+			t.Logf("clone_reservations mode=%s count=%d seconds=%.6f allocations=%d inode_commits=%d total_commits=%d durability_us=%d idle_transactions=%d",
+				mode, count, elapsed.Seconds(), allocationCalls, count, uint64(count)+allocationCalls,
+				latest.Attribution.DurableWait.TotalUS-prior.Attribution.DurableWait.TotalUS, latest.ActiveTransactions)
+		}
+	}
+	defaults, err := (Options{}).withDefaults()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sparse := &Reconciler{ctx: ctx, store: store}
+	reserve := sparse.inodeRevisionAllocator(uint64(defaults.BatchSize))
+	first, err := reserve(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := store.AllocateRevision(ctx)
+	if err != nil || next != first+uint64(defaults.BatchSize) || sparse.Metrics().RevisionAllocationCalls != 1 {
+		t.Fatalf("default-size reservation boundary: first=%d next=%d error=%v", first, next, err)
+	}
+	t.Logf("clone_default_reservation count=%d next_outside_reserved_block=true", defaults.BatchSize)
+	afterSample, _, err := client.ScanPage(ctx, []byte{'b', ':'}, nil, 128, "")
+	if err != nil || len(afterSample) != len(sample) {
+		t.Fatalf("clone post-sample: count=%d error=%v", len(afterSample), err)
+	}
+	for ordinal := range sample {
+		if !bytes.Equal(sample[ordinal].Key, afterSample[ordinal].Key) || !bytes.Equal(sample[ordinal].Value, afterSample[ordinal].Value) {
+			t.Fatal("existing clone blob sample changed")
+		}
+	}
+	t.Logf("clone_reservation_comparison legacy_seconds=%.6f shared_seconds=%.6f ratio=%.6f metadata_only=true sample_records=128",
+		legacyElapsed.Seconds(), sharedElapsed.Seconds(), float64(sharedElapsed)/float64(legacyElapsed))
+	if sharedElapsed >= legacyElapsed*8/10 {
+		t.Fatal("shared reservation did not reduce paired clone elapsed time by at least 20 percent")
+	}
 }
 
 func TestDaemonBackedPublicationAttribution(t *testing.T) {

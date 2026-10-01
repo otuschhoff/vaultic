@@ -708,8 +708,9 @@ func (reconciler *Reconciler) processBatch(
 	published map[string]publishedItem,
 ) {
 	pending := make([]preparedItem, 0, publicationConcurrency)
+	allocate := reconciler.inodeRevisionAllocator(uint64(len(batch)))
 	flush := func() {
-		reconciler.publishInodes(pending, published)
+		reconciler.publishInodesWithAllocator(pending, published, allocate)
 		pending = pending[:0]
 	}
 	for _, item := range batch {
@@ -758,6 +759,45 @@ func publicationConflicts(pending []preparedItem, item preparedItem) bool {
 }
 
 func (reconciler *Reconciler) publishInodes(items []preparedItem, published map[string]publishedItem) {
+	reconciler.publishInodesWithAllocator(items, published, reconciler.inodeRevisionAllocator(uint64(len(items))))
+}
+
+func (reconciler *Reconciler) inodeRevisionAllocator(count uint64) func(context.Context) (uint64, error) {
+	store, ok := reconciler.store.(interface {
+		AllocateRevisionBlock(context.Context, uint64) (uint64, error)
+	})
+	if !ok || count == 0 {
+		return reconciler.allocateInodeRevision
+	}
+	var allocationMu sync.Mutex
+	var next, remaining uint64
+	return func(ctx context.Context) (uint64, error) {
+		allocationMu.Lock()
+		defer allocationMu.Unlock()
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		if remaining == 0 {
+			started := time.Now()
+			start, aborted, err := reconciler.allocateRevisionBlock(ctx, count, store.AllocateRevisionBlock)
+			reconciler.recordRevisionAllocation(started, count, aborted, err)
+			if err != nil {
+				return 0, err
+			}
+			next, remaining = start, count
+		}
+		revision := next
+		next++
+		remaining--
+		return revision, nil
+	}
+}
+
+func (reconciler *Reconciler) publishInodesWithAllocator(
+	items []preparedItem,
+	published map[string]publishedItem,
+	allocate func(context.Context) (uint64, error),
+) {
 	if len(items) == 0 {
 		return
 	}
@@ -768,41 +808,11 @@ func (reconciler *Reconciler) publishInodes(items []preparedItem, published map[
 		reconciler.publishInodeGroup(items, published)
 		return
 	}
-	if len(items) == 1 {
-		reconciler.publishInode(items[0], published)
-		return
-	}
 	type result struct {
 		key []byte
 		err error
 	}
 	results := make([]result, len(items))
-	allocate := reconciler.allocateInodeRevision
-	if store, ok := reconciler.store.(interface {
-		AllocateRevisionBlock(context.Context, uint64) (uint64, error)
-	}); ok {
-		var allocationMu sync.Mutex
-		var next uint64
-		allocate = func(ctx context.Context) (uint64, error) {
-			allocationMu.Lock()
-			defer allocationMu.Unlock()
-			if err := ctx.Err(); err != nil {
-				return 0, err
-			}
-			if next == 0 {
-				started := time.Now()
-				start, aborted, err := reconciler.allocateRevisionBlock(ctx, uint64(len(items)), store.AllocateRevisionBlock)
-				reconciler.recordRevisionAllocation(started, uint64(len(items)), aborted, err)
-				if err != nil {
-					return 0, err
-				}
-				next = start
-			}
-			revision := next
-			next++
-			return revision, nil
-		}
-	}
 	var workers sync.WaitGroup
 	for index, item := range items {
 		workers.Go(func() {
