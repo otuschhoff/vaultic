@@ -330,7 +330,7 @@ func (profile ExperimentProfile) Validate() error {
 		return fmt.Errorf("S3 network RTT is an assumption, not an injectable service delay")
 	}
 	if profile.DelayUS > MaxExperimentDelayUS || profile.JitterUS > MaxExperimentDelayUS || profile.TailDelayUS > MaxExperimentDelayUS {
-		return fmt.Errorf("experiment delay exceeds limit %d microseconds", MaxExperimentDelayUS)
+		return fmt.Errorf("experiment delay exceeds limit %d microseconds", uint64(MaxExperimentDelayUS))
 	}
 	if profile.TailEvery == 0 && profile.TailDelayUS != 0 || profile.TailEvery != 0 && profile.TailDelayUS == 0 {
 		return fmt.Errorf("tail delay and frequency must be configured together")
@@ -342,7 +342,7 @@ func (profile ExperimentProfile) Validate() error {
 		return fmt.Errorf("correlated slow period requires a tail frequency")
 	}
 	if profile.BandwidthBPS > MaxExperimentBandwidth {
-		return fmt.Errorf("experiment bandwidth exceeds limit %d", MaxExperimentBandwidth)
+		return fmt.Errorf("experiment bandwidth exceeds limit %d", uint64(MaxExperimentBandwidth))
 	}
 	if profile.Concurrency > 4096 {
 		return fmt.Errorf("experiment concurrency exceeds limit 4096")

@@ -34,7 +34,7 @@ func (e *encoder) u64(value uint64) {
 func (e *encoder) i64(value int64) { e.u64(uint64(value)) }
 func (e *encoder) id(value ID)     { e.data = append(e.data, value[:]...) }
 func (e *encoder) bytes(value []byte) error {
-	if len(value) > maxFieldBytes || len(value) > math.MaxUint32 {
+	if len(value) > maxFieldBytes || uint64(len(value)) > math.MaxUint32 {
 		return fmt.Errorf("%w: field is too large", ErrMalformed)
 	}
 	e.u32(uint32(len(value)))
