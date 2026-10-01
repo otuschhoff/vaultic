@@ -1,8 +1,8 @@
-# Phase 35: Native SMB backup, restore, and Windows metadata indexing
+# Phase 36: Native SMB backup, restore, and Windows metadata indexing
 
 [← Back to roadmap index](00-overview.md)
 
-[← Phase 34](phase-34-operational-monitoring-and-metrics-export.md) · [Phase 36 →](phase-36-writable-fuse-and-durable-writeback.md)
+[← Phase 35](phase-35-ram-working-memory-and-kv-fallback.md) · [Phase 37 →](phase-37-writable-fuse-and-durable-writeback.md)
 
 [Backup documentation](../../040_backup.rst) · [Sealed topology and credentials](phase-24-sealed-topology-and-credentials-in-the-recovery-capsule.md) · [Analytics](../02-architecture/07-analytics-engine.md)
 

@@ -1,8 +1,8 @@
-# Phase 41: Remote principals and brokered VaulticDB access tickets
+# Phase 42: Remote principals and brokered VaulticDB access tickets
 
 [← Back to roadmap index](00-overview.md)
 
-[← Phase 40](phase-40-multi-server-nfs-ha-research.md) · [Phase 42 →](phase-42-vaulticdb-failure-recovery-and-error-contracts.md)
+[← Phase 41](phase-41-multi-server-nfs-ha-research.md) · [Phase 43 →](phase-43-vaulticdb-failure-recovery-and-error-contracts.md)
 
 [Broker implementation and state machines](../02-architecture/08-quorum-key-broker.md) · [Cloud object storage operator guide](../../051_cloud_object_storage.rst)
 

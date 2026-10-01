@@ -53,14 +53,18 @@ commit series so it can be reviewed or reverted independently.
 | 32 | [Scalable legacy metadata bulk import](phase-32-scalable-legacy-metadata-bulk-import.md) | implemented; optimization and scenario validation ongoing |
 | 33 | [index check scalability & performance](phase-33-index-check-scalability-and-performance.md) | implemented; production validation reaches SlateDB scan |
 | 34 | [Operational monitoring and bounded metrics export](phase-34-operational-monitoring-and-metrics-export.md) | design |
-| 35 | [Native SMB backup, restore, and Windows metadata indexing](phase-35-native-smb-backup-source.md) | design |
-| 36 | [Writable FUSE and durable writeback](phase-36-writable-fuse-and-durable-writeback.md) | design |
-| 37 | [Writable NFSv3 workspace exports](phase-37-writable-nfsv3-exports.md) | design |
-| 38 | [NFSv3 locking and recovery](phase-38-nfsv3-locking-and-recovery.md) | design |
-| 39 | [NFS server-side group authorization](phase-39-nfs-server-side-group-authorization.md) | design |
-| 40 | [Multi-server writable NFS availability research](phase-40-multi-server-nfs-ha-research.md) | research planned |
-| 41 | [Remote principals and brokered VaulticDB access tickets](phase-41-remote-principals-and-brokered-vaulticdb-access-tickets.md) | design |
-| 42 | [VaulticDB failure recovery and error contracts](phase-42-vaulticdb-failure-recovery-and-error-contracts.md) | proposed |
+| 35 | [RAM-only working memory with a pure-Go KV fallback](phase-35-ram-working-memory-and-kv-fallback.md) | design |
+| 36 | [Native SMB backup, restore, and Windows metadata indexing](phase-36-native-smb-backup-source.md) | design |
+| 37 | [Writable FUSE and durable writeback](phase-37-writable-fuse-and-durable-writeback.md) | design |
+| 38 | [Writable NFSv3 workspace exports](phase-38-writable-nfsv3-exports.md) | design |
+| 39 | [NFSv3 locking and recovery](phase-39-nfsv3-locking-and-recovery.md) | design |
+| 40 | [NFS server-side group authorization](phase-40-nfs-server-side-group-authorization.md) | design |
+| 41 | [Multi-server writable NFS availability research](phase-41-multi-server-nfs-ha-research.md) | research planned |
+| 42 | [Remote principals and brokered VaulticDB access tickets](phase-42-remote-principals-and-brokered-vaulticdb-access-tickets.md) | design |
+| 43 | [VaulticDB failure recovery and error contracts](phase-43-vaulticdb-failure-recovery-and-error-contracts.md) | proposed |
+
+Phase 35 was inserted for Go-side working-memory policy. The former phases
+35 through 42 are now 36 through 43; their scope is unchanged.
 
 ## Supporting plans
 
