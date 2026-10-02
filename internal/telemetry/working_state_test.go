@@ -89,3 +89,40 @@ func TestWorkingStateBoundedIdentityAndOverflow(t *testing.T) {
 		}
 	}
 }
+
+func TestM5WorkingRuntimeIntervals(t *testing.T) {
+	before := WorkingRuntimeSnapshot{AllocatedBytes: 100, GCCycles: 2, GCCPUSeconds: 1,
+		GCAssistCPUSeconds: .25, pauseCounts: []uint64{10, 20, 0}, pauseBuckets: []float64{0, .001, .01, math.Inf(1)}}
+	after := WorkingRuntimeSnapshot{AllocatedBytes: 300, GCCycles: 4, GCCPUSeconds: 1.5,
+		GCAssistCPUSeconds: .3, pauseCounts: []uint64{109, 21, 0}, pauseBuckets: []float64{0, .001, .01, math.Inf(1)}}
+	interval := WorkingRuntimeDifference(before, after)
+	if interval.AllocatedBytes != 200 || interval.GCCycles != 2 || interval.GCPauses != 100 ||
+		interval.GCCPUSeconds != .5 || math.Abs(interval.GCAssistCPUSeconds-.05) > 1e-9 ||
+		interval.GCPauseP50Seconds != .001 || interval.GCPauseP95Seconds != .001 ||
+		interval.GCPauseP99Seconds != .001 || interval.GCPauseMaxSeconds != .01 || len(interval.Unavailable) != 0 {
+		t.Fatalf("incorrect interval: %+v", interval)
+	}
+	for _, invalid := range []WorkingRuntimeSnapshot{
+		{}, {AllocatedBytes: 300, GCCycles: 4, GCCPUSeconds: 1.5, GCAssistCPUSeconds: .3},
+		{AllocatedBytes: 300, GCCycles: 4, GCCPUSeconds: 1.5, GCAssistCPUSeconds: .3,
+			pauseCounts: []uint64{109, 21, 1}, pauseBuckets: after.pauseBuckets},
+	} {
+		if result := WorkingRuntimeDifference(before, invalid); len(result.Unavailable) == 0 {
+			t.Fatalf("missing/reset/unbounded histogram accepted: %+v", result)
+		}
+	}
+	first := ReadWorkingRuntime()
+	owned := append([]uint64(nil), first.pauseCounts...)
+	second := ReadWorkingRuntime()
+	if len(first.pauseCounts) != len(owned) || len(second.pauseCounts) == 0 {
+		t.Fatal("runtime histogram missing")
+	}
+	for index := range owned {
+		if first.pauseCounts[index] != owned[index] {
+			t.Fatal("snapshot borrowed runtime histogram")
+		}
+	}
+	if _, err := json.Marshal(WorkingRuntimeDifference(first, second)); err != nil {
+		t.Fatal(err)
+	}
+}

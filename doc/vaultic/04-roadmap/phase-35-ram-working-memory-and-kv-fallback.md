@@ -4,7 +4,8 @@
 
 [Previous: Phase 34](phase-34-operational-monitoring-and-metrics-export.md) | [Next: Phase 36](phase-36-native-smb-backup-source.md)
 
-**Status: M0-M4 complete; M5-M6 remain design specifications, not implemented.**
+**Status: M0-M4 complete; M5 benchmark protocol implemented, sealed execution
+blocked by competing host builds; M6 remains a design specification.**
 
 [M0 inventory, frozen contracts, and validation evidence](phase-35-m0-contract.md)
 
@@ -15,6 +16,8 @@
 [M3 command-path integration, mode contracts, and validation evidence](phase-35-m3-integration.md)
 
 [M4 bounded automatic fallback, CLI policy, and validation evidence](phase-35-m4-fallback.md)
+
+[M5 implemented benchmark protocol, review repairs, and execution blocker](phase-35-m5-benchmarks.md)
 
 ## Goal
 
@@ -331,6 +334,11 @@ No production command paths switch backend in this milestone.
   fallback-induced publication retry or false success.
 
 ### M5: Realistic end-to-end and GC benchmarks
+
+Protocol and focused review repairs are implemented. Final repeated evidence
+is not accepted: monitored captures were invalidated by competing host builds.
+See the [M5 record](phase-35-m5-benchmarks.md). The exit gate remains pending;
+there is no production recommendation or default change.
 
 - Run the benchmark matrix below against isolated immutable clones and source
   fixtures. Require semantic gates before evaluating performance.

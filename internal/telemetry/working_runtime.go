@@ -17,6 +17,72 @@ type WorkingRuntimeSnapshot struct {
 	GCPauses           uint64   `json:"gc_pauses_total"`
 	GCPauseP99Seconds  float64  `json:"gc_pause_p99_seconds_cumulative"`
 	Unavailable        []string `json:"unavailable,omitempty"`
+	pauseCounts        []uint64
+	pauseBuckets       []float64
+}
+
+type WorkingRuntimeInterval struct {
+	AllocatedBytes     uint64   `json:"allocated_bytes"`
+	GCCycles           uint64   `json:"gc_cycles"`
+	GCCPUSeconds       float64  `json:"gc_cpu_seconds"`
+	GCAssistCPUSeconds float64  `json:"gc_assist_cpu_seconds"`
+	GCPauses           uint64   `json:"gc_pauses"`
+	GCPauseP50Seconds  float64  `json:"gc_pause_p50_upper_seconds"`
+	GCPauseP95Seconds  float64  `json:"gc_pause_p95_upper_seconds"`
+	GCPauseP99Seconds  float64  `json:"gc_pause_p99_upper_seconds"`
+	GCPauseMaxSeconds  float64  `json:"gc_pause_max_upper_seconds"`
+	Unavailable        []string `json:"unavailable,omitempty"`
+}
+
+func WorkingRuntimeDifference(before, after WorkingRuntimeSnapshot) WorkingRuntimeInterval {
+	result := WorkingRuntimeInterval{Unavailable: append([]string(nil), before.Unavailable...)}
+	result.Unavailable = append(result.Unavailable, after.Unavailable...)
+	if after.AllocatedBytes < before.AllocatedBytes || after.GCCycles < before.GCCycles ||
+		after.GCCPUSeconds < before.GCCPUSeconds || after.GCAssistCPUSeconds < before.GCAssistCPUSeconds {
+		result.Unavailable = append(result.Unavailable, "runtime_counter_reset")
+		return result
+	}
+	result.AllocatedBytes = after.AllocatedBytes - before.AllocatedBytes
+	result.GCCycles = after.GCCycles - before.GCCycles
+	result.GCCPUSeconds = after.GCCPUSeconds - before.GCCPUSeconds
+	result.GCAssistCPUSeconds = after.GCAssistCPUSeconds - before.GCAssistCPUSeconds
+	if len(before.pauseCounts) != len(after.pauseCounts) || len(after.pauseBuckets) != len(after.pauseCounts)+1 {
+		result.Unavailable = append(result.Unavailable, workingRuntimeNames[8])
+		return result
+	}
+	counts := make([]uint64, len(after.pauseCounts))
+	for index, count := range after.pauseCounts {
+		if count < before.pauseCounts[index] || len(before.pauseBuckets) != len(after.pauseBuckets) ||
+			before.pauseBuckets[index] != after.pauseBuckets[index] || before.pauseBuckets[index+1] != after.pauseBuckets[index+1] {
+			result.Unavailable = append(result.Unavailable, workingRuntimeNames[8])
+			return result
+		}
+		counts[index] = count - before.pauseCounts[index]
+		result.GCPauses = saturatingWorkingAdd(result.GCPauses, counts[index])
+	}
+	percentiles := []struct {
+		percent uint64
+		output  *float64
+	}{{50, &result.GCPauseP50Seconds}, {95, &result.GCPauseP95Seconds},
+		{99, &result.GCPauseP99Seconds}, {100, &result.GCPauseMaxSeconds}}
+	for _, percentile := range percentiles {
+		target := result.GCPauses - result.GCPauses/100*(100-percentile.percent) - result.GCPauses%100*(100-percentile.percent)/100
+		var seen uint64
+		for index, count := range counts {
+			seen = saturatingWorkingAdd(seen, count)
+			if target == 0 || seen < target {
+				continue
+			}
+			upper := after.pauseBuckets[index+1]
+			if math.IsInf(upper, 0) || math.IsNaN(upper) || upper < 0 {
+				result.Unavailable = append(result.Unavailable, workingRuntimeNames[8])
+			} else {
+				*percentile.output = upper
+			}
+			break
+		}
+	}
+	return result
 }
 
 var workingRuntimeNames = [...]string{
@@ -54,6 +120,8 @@ func workingRuntimeSnapshot(samples []runtimemetrics.Sample) WorkingRuntimeSnaps
 			result.GCAssistCPUSeconds = sample.Value.Float64()
 		case index == 8 && sample.Value.Kind() == runtimemetrics.KindFloat64Histogram:
 			histogram := sample.Value.Float64Histogram()
+			result.pauseCounts = append([]uint64(nil), histogram.Counts...)
+			result.pauseBuckets = append([]float64(nil), histogram.Buckets...)
 			for _, count := range histogram.Counts {
 				result.GCPauses = saturatingWorkingAdd(result.GCPauses, count)
 			}
