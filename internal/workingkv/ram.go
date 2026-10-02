@@ -3,14 +3,14 @@ package workingkv
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
+	"github.com/otuschhoff/vaultic/internal/workingstate"
 	"sort"
 	"sync"
 	"unsafe"
 )
 
-var ErrWorkingMemoryLimitExceeded = errors.New("working memory limit exceeded")
+var ErrWorkingMemoryLimitExceeded = workingstate.ErrMemoryLimitExceeded
 
 type MemoryLimitError struct{ Limit, Used, Requested uint64 }
 
@@ -36,10 +36,16 @@ func (budget *Budget) Snapshot() BudgetSnapshot {
 	defer budget.mutex.Unlock()
 	return budget.state
 }
+
+func (budget *Budget) lower(limit uint64) {
+	budget.mutex.Lock()
+	defer budget.mutex.Unlock()
+	budget.state.Limit = min(budget.state.Limit, limit)
+}
 func (budget *Budget) reserve(size uint64) error {
 	budget.mutex.Lock()
 	defer budget.mutex.Unlock()
-	if size > budget.state.Limit-budget.state.Used {
+	if budget.state.Used > budget.state.Limit || size > budget.state.Limit-budget.state.Used {
 		return &MemoryLimitError{budget.state.Limit, budget.state.Used, size}
 	}
 	budget.state.Used += size
@@ -80,6 +86,29 @@ type ramEngine struct {
 }
 
 func ramCharge(size uint64) uint64 { return size + size/4 + 64 }
+
+func (impl *ramEngine) visit(ctx context.Context, visit func([]byte, []byte) error) error {
+	impl.mutex.RLock()
+	defer impl.mutex.RUnlock()
+	var walk func(uint32) error
+	walk = func(index uint32) error {
+		if index == 0 {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		node := impl.node(index)
+		if err := walk(node.left); err != nil {
+			return err
+		}
+		if err := visit(impl.data(node.key), impl.data(node.value)); err != nil {
+			return err
+		}
+		return walk(node.right)
+	}
+	return walk(impl.root)
+}
 func OpenRAM(budget *Budget) (*Store, error) {
 	if budget == nil {
 		return nil, ErrInvalid

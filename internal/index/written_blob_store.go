@@ -57,7 +57,15 @@ func newWrittenBlobStoreContext(ctx context.Context, directory string) (*written
 	}
 	metrics := telemetry.NewWorkingStateMetric(telemetry.WorkingWrittenBlobs, database.Backend())
 	metrics.Activate()
-	return &writtenBlobStore{database: database, path: database.Path(), cipher: aead, tokenKey: key[32:], metrics: metrics}, nil
+	result := &writtenBlobStore{database: database, path: database.Path(), cipher: aead, tokenKey: key[32:], metrics: metrics}
+	database.SetVerifier(func(key, value []byte) error {
+		if len(value) < aead.NonceSize() {
+			return workingkv.ErrWorkingStateCorrupt
+		}
+		_, err := aead.Open(nil, value[:aead.NonceSize()], value[aead.NonceSize():], key)
+		return err
+	})
+	return result, nil
 }
 
 func (store *writtenBlobStore) token(value []byte) []byte {
@@ -91,6 +99,19 @@ func (store *writtenBlobStore) StoreIndex(ctx context.Context, index *legacyinde
 		}
 	}()
 	var batch []workingkv.Entry
+	batchLimit := workingkv.MaxBatchBytes
+	if policy := workingkv.PolicyFrom(ctx); policy != nil {
+		batchLimit = int(min(uint64(batchLimit), policy.Available()/8))
+		if batchLimit < 192 {
+			return workingkv.ErrWorkingMemoryLimitExceeded
+		}
+		charge := uint64(batchLimit)*3 + 4096
+		if err := policy.Reserve(charge); err != nil {
+			return err
+		}
+		defer policy.Release(charge)
+		batch = make([]workingkv.Entry, 0, batchLimit/192)
+	}
 	size := 0
 	defer store.metrics.ObserveBuffer(0)
 	var entries, encodedBytes uint64
@@ -123,7 +144,7 @@ func (store *writtenBlobStore) StoreIndex(ctx context.Context, index *legacyinde
 			return err
 		}
 		value := store.cipher.Seal(nonce, nonce, encoded[:], key)
-		if size+len(key)+len(value)+16 > workingkv.MaxBatchBytes {
+		if size+len(key)+len(value)+16 > batchLimit || (workingkv.PolicyFrom(ctx) != nil && len(batch) == cap(batch)) {
 			if err := commit(); err != nil {
 				return err
 			}
@@ -147,6 +168,7 @@ func (store *writtenBlobStore) WorkingState() telemetry.WorkingStateSnapshot {
 		return store.metrics.Snapshot(0, !store.cleanupFailed)
 	}
 	size, known := store.database.ScratchBytes()
+	store.metrics.SetBackend(store.database.Backend())
 	return store.metrics.Snapshot(size, known)
 }
 

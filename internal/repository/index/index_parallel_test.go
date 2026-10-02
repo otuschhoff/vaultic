@@ -12,6 +12,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	rtest "github.com/otuschhoff/vaultic/internal/test"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/workingkv"
 )
 
 type delayedIndexLoader struct {
@@ -19,6 +20,51 @@ type delayedIndexLoader struct {
 	delayed     vaultic.ID
 	laterLoaded chan struct{}
 	notifyOnce  *sync.Once
+}
+
+func TestM4IndexDecodeOwnership(t *testing.T) {
+	repo, unpacked, _ := repository.TestRepositoryWithVersion(t, vaultic.StableRepoVersion)
+	source := index.NewMasterIndex()
+	for range 3 {
+		rtest.OK(t, source.StorePack(t.Context(), vaultic.NewRandomID(), pack.Blobs{{BlobHandle: vaultic.NewRandomBlobHandle(), Length: uint(crypto.CiphertextLength(10))}}, unpacked))
+		rtest.OK(t, source.Flush(t.Context(), unpacked))
+	}
+	policy, err := workingkv.NewPolicy(workingkv.ModeRAM, 32<<20, "")
+	rtest.OK(t, err)
+	ctx := workingkv.WithPolicy(t.Context(), policy)
+	for _, ordered := range []bool{false, true} {
+		master := index.NewMasterIndex()
+		callback := func(_ vaultic.ID, idx *index.Index, err error) error {
+			if err == nil {
+				master.Insert(idx)
+			}
+			return err
+		}
+		if ordered {
+			err = index.ForAllIndexesInOrder(ctx, repo, repo, callback)
+		} else {
+			err = index.ForAllIndexesWorkers(ctx, repo, repo, 2, callback)
+		}
+		rtest.OK(t, err)
+		if policy.Budget().Used == 0 {
+			t.Fatal("retained full index released early")
+		}
+		rtest.OK(t, master.MergeFinalIndexes())
+		rtest.OK(t, master.Close())
+		if policy.Budget().Used != 0 {
+			t.Fatal("full index reservation leaked", policy.Budget())
+		}
+	}
+	stop := errors.New("stop callback")
+	err = index.ForAllIndexesInOrder(ctx, repo, repo, func(vaultic.ID, *index.Index, error) error { return stop })
+	if !errors.Is(err, stop) || policy.Budget().Used != 0 {
+		t.Fatal("cancelled read-ahead leaked", err, policy.Budget())
+	}
+	tiny, _ := workingkv.NewPolicy(workingkv.ModeRAM, 1, "")
+	err = index.ForAllIndexesWorkers(workingkv.WithPolicy(t.Context(), tiny), repo, repo, 2, func(vaultic.ID, *index.Index, error) error { return nil })
+	if !errors.Is(err, workingkv.ErrWorkingMemoryLimitExceeded) || tiny.Budget().Used != 0 {
+		t.Fatal("admission failure became success", err, tiny.Budget())
+	}
 }
 
 func (loader delayedIndexLoader) LoadUnpacked(ctx context.Context, fileType vaultic.FileType, id vaultic.ID) ([]byte, error) {

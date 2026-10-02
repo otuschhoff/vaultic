@@ -256,6 +256,7 @@ type ExportResult struct {
 }
 
 type CheckResult struct {
+	findingBudget             *findingBudget
 	Coverage                  CheckCoverage    `json:"coverage"`
 	Consistency               CheckConsistency `json:"consistency"`
 	Resources                 CheckResources   `json:"resources"`
@@ -801,6 +802,20 @@ func CheckWithOptions(
 			Workers: workers, RPCConcurrency: rpcConcurrency,
 		},
 	}
+	if policy := workingkv.PolicyFrom(ctx); policy != nil {
+		var cancel context.CancelCauseFunc
+		ctx, cancel = context.WithCancelCause(ctx)
+		account := &findingBudget{policy: policy, cancel: cancel}
+		result.findingBudget = account
+		defer func() {
+			account.mutex.Lock()
+			err = errors.Join(err, account.err)
+			policy.Release(account.charged)
+			account.mutex.Unlock()
+			result.findingBudget = nil
+			cancel(nil)
+		}()
+	}
 	result.Consistency.SchemaVersion = schema.Version
 	result.Consistency.OptionsDigest = optionsDigest
 	progress.set("inventory")
@@ -826,6 +841,7 @@ func CheckWithOptions(
 	if err != nil {
 		return result, err
 	}
+	defer func() { err = errors.Join(err, legacy.close()) }()
 	var legacyPacks *locationSpool
 	if !options.SlateDBOnly && !options.LegacyOnly {
 		legacyPacks, err = newLocationMultisetSpool(ctx, scratch, spoolMemory, 32)
@@ -833,6 +849,7 @@ func CheckWithOptions(
 			return result, err
 		}
 		legacyPacks.packSummaries = true
+		defer func() { err = errors.Join(err, legacyPacks.close()) }()
 		if spoolMemory/uint64(max(workers, 1))/16 >= locationRunBufferSize {
 			if err := legacy.partitionByBlob(16); err != nil {
 				return result, err
@@ -862,11 +879,13 @@ func CheckWithOptions(
 	if err != nil {
 		return result, err
 	}
+	defer func() { err = errors.Join(err, slatedb.close()) }()
 	slatedbPacks, err := newLocationMultisetSpool(ctx, scratch, spoolMemory, 32)
 	if err != nil {
 		return result, err
 	}
 	slatedbPacks.packSummaries = true
+	defer func() { err = errors.Join(err, slatedbPacks.close()) }()
 	for _, spool := range []*locationSpool{legacy, legacyPacks, slatedb, slatedbPacks} {
 		if spool != nil {
 			spool.mergeWorkers = int(min(workers, 4))
@@ -989,6 +1008,9 @@ func runValidationJobs(
 		return fmt.Errorf("checker memory limit is too small for %d parallel validation workers", parallel)
 	}
 	results := make([]CheckResult, len(jobs))
+	for index := range results {
+		results[index].findingBudget = result.findingBudget
+	}
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.SetLimit(parallel)
 	for index, job := range jobs {
@@ -2220,8 +2242,64 @@ func sortedPackIDs(packs map[vaultic.ID]schema.PackRecord) []vaultic.ID {
 	return ids
 }
 
+type findingBudget struct {
+	mutex   sync.Mutex
+	policy  *workingkv.Policy
+	charged uint64
+	err     error
+	cancel  context.CancelCauseFunc
+}
+
+func findingCharge(finding Finding) uint64 {
+	return uint64(len(finding.Kind)+len(finding.Key)+len(finding.Want)+len(finding.Got))*2 + 192
+}
+
 func addFinding(result *CheckResult, maximum uint, finding Finding) {
 	index, _ := slices.BinarySearchFunc(result.Findings, finding, compareFinding)
+	if account := result.findingBudget; account != nil {
+		account.mutex.Lock()
+		defer account.mutex.Unlock()
+		if account.err != nil {
+			return
+		}
+		full := maximum != 0 && uint(len(result.Findings)) >= maximum
+		if full && index == len(result.Findings) {
+			return
+		}
+		charge := findingCharge(finding)
+		grow := !full && len(result.Findings) == cap(result.Findings)
+		capacity := max(8, cap(result.Findings)*2)
+		if grow {
+			charge += uint64(capacity)*96 + 64
+		}
+		if err := account.policy.Reserve(charge); err != nil {
+			account.err = err
+			account.cancel(err)
+			return
+		}
+		account.charged += charge
+		if grow {
+			previous := uint64(cap(result.Findings)) * 96
+			if cap(result.Findings) > 0 {
+				previous += 64
+			}
+			findings := make([]Finding, len(result.Findings), capacity)
+			copy(findings, result.Findings)
+			result.Findings = findings
+			account.policy.Release(previous)
+			account.charged -= previous
+		}
+		if full {
+			discarded := findingCharge(result.Findings[len(result.Findings)-1])
+			copy(result.Findings[index+1:], result.Findings[index:len(result.Findings)-1])
+			result.Findings[index] = finding
+			account.policy.Release(discarded)
+			account.charged -= discarded
+		} else {
+			result.Findings = slices.Insert(result.Findings, index, finding)
+		}
+		return
+	}
 	if maximum == 0 || uint(len(result.Findings)) < maximum {
 		result.Findings = slices.Insert(result.Findings, index, finding)
 		return

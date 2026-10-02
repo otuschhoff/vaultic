@@ -418,7 +418,7 @@ func TestArchiverSave(t *testing.T) {
 }
 
 func TestM3BackupParity(t *testing.T) {
-	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV} {
+	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV, workingkv.ModeAuto} {
 		t.Run(string(mode), func(t *testing.T) {
 			source := TestDir{"file": TestFile{Content: "backup working-state parity\x00"}, "nested": TestDir{"binary": TestFile{Content: string(rtest.Random(7, 128<<10))}}, "omit": TestDir{"hidden": TestFile{Content: "excluded"}}}
 			root, repo := prepareTempdirRepoSrc(t, source)
@@ -455,6 +455,9 @@ func TestM3BackupParity(t *testing.T) {
 				}
 			}
 			if err := markers.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := repo.Close(); err != nil {
 				t.Fatal(err)
 			}
 			entries, err := os.ReadDir(scratch)

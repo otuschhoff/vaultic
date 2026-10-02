@@ -1,0 +1,11 @@
+Enhancement: Select bounded RAM, KV, or automatic working state for backup, import and check
+
+Vaultic now accepts --working-memory-mode=ram|kv|auto on backup, check,
+index import and index check, with shared RAM, scratch and disk budgets and
+equivalent profile/environment settings. Automatic mode uses verified,
+one-way fallback for disposable working state. Strict RAM never spills
+working state; unsafe limits and exhaustion return actionable errors.
+
+The budget covers managed working state, not whole-process RSS. Configure
+co-resident reserves for other workloads. Omitting these controls preserves
+existing behavior; metadata authority and publication semantics are unchanged.

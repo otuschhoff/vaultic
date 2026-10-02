@@ -264,7 +264,7 @@ func TestAuthoritativeCatalogLoadStreamsAndCleansUp(t *testing.T) {
 }
 
 func TestCachedAuthoritativeLookupWithPublishedOverlay(t *testing.T) {
-	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV} {
+	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV, workingkv.ModeAuto} {
 		t.Run(string(mode), func(t *testing.T) { testCachedAuthoritativeLookupWithPublishedOverlay(t, mode) })
 	}
 }

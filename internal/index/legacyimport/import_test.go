@@ -3621,7 +3621,7 @@ func TestM3ImportParity(t *testing.T) {
 	}
 	source := &memorySource{indexes: map[vaultic.ID][]byte{indexID: encoded.Bytes()}}
 	var baseline map[string][]byte
-	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV} {
+	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV, workingkv.ModeAuto} {
 		t.Run(string(mode), func(t *testing.T) {
 			root := t.TempDir()
 			policy, _ := workingkv.NewPolicy(mode, 4<<20, root)
@@ -3663,7 +3663,7 @@ func TestM3SplitImportParity(t *testing.T) {
 	source := &memorySource{indexes: map[vaultic.ID][]byte{indexID: encodedIndexWithPacks(t, packIDs)}}
 	var baseline map[string][]byte
 	var baselineOrder []uint64
-	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV} {
+	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV, workingkv.ModeAuto} {
 		t.Run(string(mode), func(t *testing.T) {
 			policy, _ := workingkv.NewPolicy(mode, 4<<20, t.TempDir())
 			store := newSplitStore()

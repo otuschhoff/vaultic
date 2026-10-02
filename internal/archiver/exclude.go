@@ -14,6 +14,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/debug"
 	"github.com/otuschhoff/vaultic/internal/errors"
 	"github.com/otuschhoff/vaultic/internal/fs"
+	"github.com/otuschhoff/vaultic/internal/workingkv"
 )
 
 // RejectByNameFunc is a function that takes a filename of a
@@ -97,6 +98,10 @@ func (rc *rejectionCache) Get(dir string) (bool, bool) {
 // rc.Lock and rc.Unlock before using this method, otherwise data races may
 // occur.
 func (rc *rejectionCache) Store(dir string, rejected bool) {
+	if rc.store != nil && workingkv.PolicyFrom(rc.store.ctx) != nil {
+		rc.store.spill(rc.prefix, map[string]bool{dir: rejected})
+		return
+	}
 	if rc.store != nil && len(rc.m) >= rc.store.limit {
 		rc.store.spill(rc.prefix, rc.m)
 		clear(rc.m)

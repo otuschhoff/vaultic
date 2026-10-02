@@ -208,7 +208,7 @@ func newCheckScratchWithScenario(ctx context.Context, parent string, maxBytes ui
 func (scratch *checkScratch) ensureDirLocked() error {
 	if policy := workingkv.PolicyFrom(scratch.ctx); policy != nil && policy.Mode() == workingkv.ModeRAM {
 		state := policy.Budget()
-		return &workingkv.MemoryLimitError{Limit: state.Limit, Used: state.Used, Requested: state.Limit - state.Used + 1}
+		return &workingkv.MemoryLimitError{Limit: state.Limit, Used: state.Used, Requested: 1}
 	}
 	if scratch.dir != "" {
 		return nil
@@ -239,6 +239,9 @@ func (scratch *checkScratch) ensureDirLocked() error {
 		return fmt.Errorf("write checker scratch marker: %w", err)
 	}
 	scratch.dir = dir
+	if policy := workingkv.PolicyFrom(scratch.ctx); policy != nil {
+		policy.MarkFallback()
+	}
 	return nil
 }
 
@@ -249,7 +252,19 @@ func (scratch *checkScratch) reserve(bytes uint64) error {
 		return fmt.Errorf("checker scratch accounting exceeds configured limit")
 	}
 	if bytes > scratch.maxBytes-scratch.used {
+		if workingkv.PolicyFrom(scratch.ctx) != nil {
+			return &workingkv.ScratchLimitError{Limit: scratch.maxBytes, Used: scratch.used, Requested: bytes}
+		}
 		return fmt.Errorf("checker scratch limit exceeded: need %d bytes with %d of %d bytes used", bytes, scratch.used, scratch.maxBytes)
+	}
+	if policy := workingkv.PolicyFrom(scratch.ctx); policy != nil {
+		if policy.Mode() == workingkv.ModeRAM {
+			state := policy.Budget()
+			return &workingkv.MemoryLimitError{Limit: state.Limit, Used: state.Used, Requested: bytes}
+		}
+		if err := policy.ReserveDisk(bytes); err != nil {
+			return err
+		}
 	}
 	scratch.used += bytes
 	scratch.peak = max(scratch.peak, scratch.used)
@@ -259,7 +274,11 @@ func (scratch *checkScratch) reserve(bytes uint64) error {
 func (scratch *checkScratch) release(bytes uint64) {
 	scratch.mu.Lock()
 	defer scratch.mu.Unlock()
-	scratch.used = scratch.used - min(scratch.used, bytes)
+	released := min(scratch.used, bytes)
+	scratch.used -= released
+	if policy := workingkv.PolicyFrom(scratch.ctx); policy != nil {
+		policy.ReleaseDisk(released)
+	}
 }
 
 func (scratch *checkScratch) nextPath() (string, [4]byte, error) {
@@ -322,7 +341,31 @@ func (scratch *checkScratch) close() error {
 	request := scratch.telemetry.startScratch()
 	err = os.RemoveAll(dir)
 	settleDependency(request, err)
+	if err == nil {
+		scratch.mu.Lock()
+		released := scratch.used
+		scratch.used = 0
+		scratch.dir = ""
+		scratch.mu.Unlock()
+		if policy := workingkv.PolicyFrom(scratch.ctx); policy != nil {
+			policy.ReleaseDisk(released)
+		}
+	}
 	return err
+}
+
+func reserveCheckBuffer(ctx context.Context, preferred, minimum int) (int, func(), error) {
+	policy := workingkv.PolicyFrom(ctx)
+	if policy == nil {
+		return preferred, func() {}, nil
+	}
+	size := max(minimum, int(min(uint64(preferred), 128<<10, policy.Available()/4)))
+	charge := uint64(size)*2 + 4096
+	if err := policy.Reserve(charge); err != nil {
+		return 0, nil, err
+	}
+	var once sync.Once
+	return size, func() { once.Do(func() { policy.Release(charge) }) }, nil
 }
 
 func (scratch *checkScratch) remove(path string) error {
@@ -343,8 +386,42 @@ func (scratch *checkScratch) run(method string, bytes uint64, operation func() e
 }
 
 type checkRun struct {
-	path string
-	size uint64
+	path   string
+	size   uint64
+	charge *checkRunCharge
+}
+
+type checkRunCharge struct {
+	policy               *workingkv.Policy
+	memory               uint64
+	memoryOnce, diskOnce sync.Once
+}
+
+func (scratch *checkScratch) newRunCharge() (*checkRunCharge, error) {
+	policy := workingkv.PolicyFrom(scratch.ctx)
+	if policy == nil {
+		return nil, nil
+	}
+	memory := uint64(len(scratch.parent))*2 + 512
+	if err := policy.Reserve(memory); err != nil {
+		return nil, err
+	}
+	return &checkRunCharge{policy: policy, memory: memory}, nil
+}
+func (charge *checkRunCharge) releaseMemory() {
+	if charge != nil {
+		charge.memoryOnce.Do(func() { charge.policy.Release(charge.memory) })
+	}
+}
+func (scratch *checkScratch) releaseRun(run checkRun, removed bool) {
+	if run.charge != nil {
+		run.charge.releaseMemory()
+		if removed {
+			run.charge.diskOnce.Do(func() { scratch.release(run.size) })
+		}
+	} else if removed {
+		scratch.release(run.size)
+	}
 }
 
 type locationSpool struct {
@@ -409,6 +486,23 @@ func (spool *locationSpool) allocateBuffer() error {
 		}
 	}
 	if policy := workingkv.PolicyFrom(spool.ctx); policy != nil {
+		available := policy.Available()
+		if available < locationCapacityCharge(uint64(capacity)) && policy.Mode() != workingkv.ModeRAM && len(spool.memoryRuns) > 0 {
+			if err := spool.spillMemoryRuns(); err != nil {
+				return err
+			}
+			available = policy.Available()
+		}
+		if available < locationCapacityCharge(uint64(capacity)) {
+			if available <= 64 {
+				state := policy.Budget()
+				return &workingkv.MemoryLimitError{Limit: state.Limit, Used: state.Used, Requested: locationCapacityCharge(uint64(capacity))}
+			}
+			capacity = int(min(uint64(capacity), (available-64)*4/5/locationTupleMemorySize))
+			if capacity == 0 {
+				return workingkv.ErrWorkingMemoryLimitExceeded
+			}
+		}
 		charge := locationCapacityCharge(uint64(capacity))
 		if err := policy.Reserve(charge); err != nil {
 			return err
@@ -549,6 +643,20 @@ func (spool *locationSpool) spillMemoryRuns() error {
 }
 
 func (spool *locationSpool) writeRun(records []locationTuple) (run checkRun, err error) {
+	charge, err := spool.scratch.newRunCharge()
+	if err != nil {
+		return checkRun{}, err
+	}
+	defer func() {
+		if err != nil {
+			charge.releaseMemory()
+		}
+	}()
+	bufferSize, release, err := reserveCheckBuffer(spool.ctx, locationRunBufferSize, 4+locationBlockTuples*locationTupleSize+16)
+	if err != nil {
+		return checkRun{}, err
+	}
+	defer release()
 	block, err := aes.NewCipher(spool.scratch.key[:])
 	if err != nil {
 		return checkRun{}, err
@@ -575,12 +683,14 @@ func (spool *locationSpool) writeRun(records []locationTuple) (run checkRun, err
 		return checkRun{}, err
 	}
 	succeeded := false
-	buffered := bufio.NewWriterSize(&scratchOutputWriter{scratch: spool.scratch, request: request, writer: file}, locationRunBufferSize)
+	buffered := bufio.NewWriterSize(&scratchOutputWriter{scratch: spool.scratch, request: request, writer: file}, bufferSize)
 	defer func() {
 		_ = file.Close() // Preserve the primary write or sync error.
 		if !succeeded {
-			_ = spool.scratch.remove(path) // Preserve the primary run-creation error.
-			spool.scratch.release(predicted)
+			removeErr := spool.scratch.remove(path)
+			if removeErr == nil || errors.Is(removeErr, os.ErrNotExist) {
+				spool.scratch.release(predicted)
+			}
 		}
 	}()
 	header := append(checkRunMagic[:], prefix[:]...)
@@ -646,7 +756,7 @@ func (spool *locationSpool) writeRun(records []locationTuple) (run checkRun, err
 		return checkRun{}, err
 	}
 	succeeded = true
-	return checkRun{path: path, size: predicted}, nil
+	return checkRun{path: path, size: predicted, charge: charge}, nil
 }
 
 func writeAll(writer io.Writer, value []byte) error {
@@ -750,8 +860,8 @@ func (spool *locationSpool) mergePass() error {
 		if err != nil {
 			for _, output := range outputs {
 				if output.path != "" {
-					_ = spool.scratch.remove(output.path)
-					spool.scratch.release(output.size)
+					removeErr := spool.scratch.remove(output.path)
+					spool.scratch.releaseRun(output, removeErr == nil || errors.Is(removeErr, os.ErrNotExist))
 				}
 			}
 			return err
@@ -765,7 +875,7 @@ func (spool *locationSpool) mergePass() error {
 				spool.runs = append(spool.runs, inputs[index:]...)
 				return fmt.Errorf("remove merged checker run: %w", err)
 			}
-			spool.scratch.release(input.size)
+			spool.scratch.releaseRun(input, true)
 		}
 		completed += started
 	}
@@ -819,6 +929,8 @@ func (spool *locationSpool) adopt(source *locationSpool) error {
 }
 
 type locationRunWriter struct {
+	charge   *checkRunCharge
+	release  func()
 	spool    *locationSpool
 	file     *os.File
 	buffered *bufio.Writer
@@ -838,6 +950,24 @@ func (spool *locationSpool) newRunWriter(reserved uint64) (_ *locationRunWriter,
 	defer func() {
 		if err != nil {
 			spool.scratch.release(reserved)
+		}
+	}()
+	charge, err := spool.scratch.newRunCharge()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			charge.releaseMemory()
+		}
+	}()
+	bufferSize, release, err := reserveCheckBuffer(spool.ctx, locationRunBufferSize, 4+locationBlockTuples*locationTupleSize+16)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			release()
 		}
 	}()
 	block, err := aes.NewCipher(spool.scratch.key[:])
@@ -860,8 +990,8 @@ func (spool *locationSpool) newRunWriter(reserved uint64) (_ *locationRunWriter,
 		return nil, err
 	}
 	writer := &locationRunWriter{
-		spool: spool, file: file, buffered: bufio.NewWriterSize(&scratchOutputWriter{scratch: spool.scratch, request: request, writer: file}, locationRunBufferSize), path: path,
-		aead: aead, prefix: prefix, reserved: reserved, size: checkRunHeaderSize, request: request,
+		spool: spool, file: file, buffered: bufio.NewWriterSize(&scratchOutputWriter{scratch: spool.scratch, request: request, writer: file}, bufferSize), path: path, release: release,
+		aead: aead, prefix: prefix, reserved: reserved, size: checkRunHeaderSize, request: request, charge: charge,
 	}
 	header := append(checkRunMagic[:], writer.prefix[:]...)
 	if err := writeAll(writer.buffered, header); err != nil {
@@ -927,6 +1057,7 @@ func (writer *locationRunWriter) close() (checkRun, error) {
 		return checkRun{}, fmt.Errorf("checker run writer is closed")
 	}
 	writer.closed = true
+	defer writer.release()
 	if err := writer.flushBlock(); err != nil {
 		writer.abortFile()
 		return checkRun{}, err
@@ -946,7 +1077,7 @@ func (writer *locationRunWriter) close() (checkRun, error) {
 	settleDependency(writer.request, nil)
 	writer.spool.scratch.release(writer.reserved - writer.size)
 	writer.reserved = writer.size
-	return checkRun{path: writer.path, size: writer.size}, nil
+	return checkRun{path: writer.path, size: writer.size, charge: writer.charge}, nil
 }
 
 func (writer *locationRunWriter) abort() {
@@ -958,12 +1089,18 @@ func (writer *locationRunWriter) abort() {
 }
 
 func (writer *locationRunWriter) abortFile() {
+	writer.charge.releaseMemory()
+	if writer.release != nil {
+		writer.release()
+	}
 	if writer.request != nil {
 		writer.request.Failed()
 		writer.request.Done()
 	}
-	_ = writer.spool.scratch.remove(writer.path) // Session cleanup removes any remaining run.
-	writer.spool.scratch.release(writer.reserved)
+	removeErr := writer.spool.scratch.remove(writer.path)
+	if removeErr == nil || errors.Is(removeErr, os.ErrNotExist) {
+		writer.spool.scratch.release(writer.reserved)
+	}
 	writer.reserved = 0
 }
 
@@ -1015,6 +1152,7 @@ func (spool *locationSpool) mergeRuns(runs []checkRun, reserved uint64) (merged 
 }
 
 type locationRunReader struct {
+	release    func()
 	file       *scratchReadFile
 	reader     *bufio.Reader
 	aead       cipher.AEAD
@@ -1025,12 +1163,21 @@ type locationRunReader struct {
 	blockBytes int
 }
 
-func openLocationRun(run checkRun, scratch *checkScratch) (*locationRunReader, error) {
+func openLocationRun(run checkRun, scratch *checkScratch) (_ *locationRunReader, err error) {
+	bufferSize, release, err := reserveCheckBuffer(scratch.ctx, locationRunBufferSize, 4+locationBlockTuples*locationTupleSize+16)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			release()
+		}
+	}()
 	file, err := scratch.open(run.path)
 	if err != nil {
 		return nil, err
 	}
-	reader := bufio.NewReaderSize(file, locationRunBufferSize)
+	reader := bufio.NewReaderSize(file, bufferSize)
 	header := make([]byte, checkRunHeaderSize)
 	if _, err := io.ReadFull(reader, header); err != nil {
 		_ = file.Close() // Preserve the header-read error.
@@ -1054,7 +1201,7 @@ func openLocationRun(run checkRun, scratch *checkScratch) (*locationRunReader, e
 		_ = file.Close()
 		return nil, fmt.Errorf("invalid checker run size")
 	}
-	result := &locationRunReader{file: file, reader: reader, aead: aead, remaining: run.size - checkRunHeaderSize}
+	result := &locationRunReader{file: file, reader: reader, aead: aead, remaining: run.size - checkRunHeaderSize, release: release}
 	copy(result.nonce[:4], header[8:])
 	return result, nil
 }
@@ -1110,7 +1257,12 @@ func (reader *locationRunReader) nextTuple() (locationTuple, bool, error) {
 	return tuple, err == nil, err
 }
 
-func (reader *locationRunReader) close() error { return reader.file.Close() }
+func (reader *locationRunReader) close() error {
+	if reader.release != nil {
+		reader.release()
+	}
+	return reader.file.Close()
+}
 
 type locationMemoryReader struct {
 	records []locationTuple
@@ -1215,11 +1367,11 @@ func (spool *locationSpool) close() error {
 	}
 	spool.blobPartitions = nil
 	for _, run := range spool.runs {
-		if err := spool.scratch.remove(run.path); err != nil && !errors.Is(err, os.ErrNotExist) && first == nil {
-			first = err
-			continue
+		removeErr := spool.scratch.remove(run.path)
+		if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) && first == nil {
+			first = removeErr
 		}
-		spool.scratch.release(run.size)
+		spool.scratch.releaseRun(run, removeErr == nil || errors.Is(removeErr, os.ErrNotExist))
 	}
 	spool.runs = nil
 	spool.buffer = nil
@@ -1487,6 +1639,9 @@ func compareLocationPartitions(legacy, slatedb *locationSpool, result *CheckResu
 	workers := max(1, min(legacy.mergeWorkers, 4, int(min(legacy.memoryBytes, slatedb.memoryBytes)/uint64((legacy.fanIn+slatedb.fanIn+2)*locationRunBufferSize))))
 	group.SetLimit(workers)
 	results := make([]CheckResult, len(legacy.blobPartitions))
+	for index := range results {
+		results[index].findingBudget = result.findingBudget
+	}
 	stride := len(slatedb.blobPartitions) / len(legacy.blobPartitions)
 	defer func() {
 		for _, partition := range legacy.blobPartitions {

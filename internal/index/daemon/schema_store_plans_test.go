@@ -35,9 +35,9 @@ func TestFreshImportLookupHintsNeverForgetCommittedIDs(t *testing.T) {
 }
 
 func TestM3FreshImportPolicyFallback(t *testing.T) {
-	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV} {
+	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV, workingkv.ModeAuto} {
 		t.Run(string(mode), func(t *testing.T) {
-			policy, _ := workingkv.NewPolicy(mode, 1024, "")
+			policy, _ := workingkv.NewPolicy(mode, 1024, t.TempDir())
 			store := &SchemaStore{}
 			store.EnableFreshLegacyImportContext(workingkv.WithPolicy(context.Background(), policy))
 			stats := store.freshImportSeen.stats()

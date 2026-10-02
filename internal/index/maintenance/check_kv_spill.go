@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"sync"
 
 	monitor "github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/workingkv"
@@ -85,7 +86,15 @@ func (spool *checkKVSpool) add(key, value []byte, sequence uint64) error {
 	if policy := workingkv.PolicyFrom(spool.ctx); policy != nil {
 		charge := size*2 + 128
 		if err := policy.Reserve(charge); err != nil {
-			return err
+			if policy.Mode() == workingkv.ModeRAM || len(spool.buffer) == 0 {
+				return err
+			}
+			if err := spool.flush(); err != nil {
+				return err
+			}
+			if err := policy.Reserve(charge); err != nil {
+				return err
+			}
 		}
 		spool.charged += charge
 	}
@@ -196,9 +205,11 @@ func (spool *checkKVSpool) merge(runs []checkRun) (merged checkRun, err error) {
 	}
 	for _, run := range runs {
 		if err := spool.scratch.remove(run.path); err != nil {
+			removeErr := spool.scratch.remove(merged.path)
+			spool.scratch.releaseRun(merged, removeErr == nil || errors.Is(removeErr, os.ErrNotExist))
 			return checkRun{}, err
 		}
-		spool.scratch.release(run.size)
+		spool.scratch.releaseRun(run, true)
 	}
 	return merged, nil
 }
@@ -216,10 +227,11 @@ func (spool *checkKVSpool) iterator() (*checkKVIterator, error) {
 func (spool *checkKVSpool) close() error {
 	var first error
 	for _, run := range spool.runs {
-		if err := spool.scratch.remove(run.path); err != nil && !errors.Is(err, os.ErrNotExist) && first == nil {
-			first = err
+		removeErr := spool.scratch.remove(run.path)
+		if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) && first == nil {
+			first = removeErr
 		}
-		spool.scratch.release(run.size)
+		spool.scratch.releaseRun(run, removeErr == nil || errors.Is(removeErr, os.ErrNotExist))
 	}
 	spool.runs, spool.buffer = nil, nil
 	spool.bufferBytes = 0
@@ -228,6 +240,7 @@ func (spool *checkKVSpool) close() error {
 }
 
 type checkKVWriter struct {
+	charge   *checkRunCharge
 	spool    *checkKVSpool
 	file     *os.File
 	path     string
@@ -239,7 +252,16 @@ type checkKVWriter struct {
 	request  *monitor.DependencyGuard
 }
 
-func (spool *checkKVSpool) newWriter() (*checkKVWriter, error) {
+func (spool *checkKVSpool) newWriter() (_ *checkKVWriter, err error) {
+	charge, err := spool.scratch.newRunCharge()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			charge.releaseMemory()
+		}
+	}()
 	block, err := aes.NewCipher(spool.scratch.key[:])
 	if err != nil {
 		return nil, err
@@ -264,7 +286,7 @@ func (spool *checkKVSpool) newWriter() (*checkKVWriter, error) {
 		settleDependency(request, err)
 		return nil, err
 	}
-	writer := &checkKVWriter{spool: spool, file: file, path: path, aead: aead, prefix: prefix, reserved: checkRunHeaderSize, request: request}
+	writer := &checkKVWriter{spool: spool, file: file, path: path, aead: aead, prefix: prefix, reserved: checkRunHeaderSize, request: request, charge: charge}
 	if err := writeScratch(spool.scratch, request, file, append(checkRunMagic[:], prefix[:]...)); err != nil {
 		writer.abort()
 		return nil, err
@@ -273,6 +295,15 @@ func (spool *checkKVSpool) newWriter() (*checkKVWriter, error) {
 }
 
 func (writer *checkKVWriter) append(record checkKVRecord) error {
+	var release = func() {}
+	if policy := workingkv.PolicyFrom(writer.spool.ctx); policy != nil {
+		charge := uint64(len(record.key)+len(record.value))*4 + 4096
+		if err := policy.Reserve(charge); err != nil {
+			return err
+		}
+		release = func() { policy.Release(charge) }
+	}
+	defer release()
 	plain := make([]byte, checkKVRecordHeaderSize+len(record.key)+len(record.value))
 	binary.BigEndian.PutUint32(plain[:4], uint32(len(record.key)))
 	binary.BigEndian.PutUint64(plain[4:12], record.sequence)
@@ -310,7 +341,7 @@ func (writer *checkKVWriter) close() (checkRun, error) {
 		return checkRun{}, err
 	}
 	settleDependency(writer.request, nil)
-	return checkRun{path: writer.path, size: writer.reserved}, nil
+	return checkRun{path: writer.path, size: writer.reserved, charge: writer.charge}, nil
 }
 
 func (writer *checkKVWriter) abort() {
@@ -322,30 +353,44 @@ func (writer *checkKVWriter) abort() {
 }
 
 func (writer *checkKVWriter) abortFile() {
+	writer.charge.releaseMemory()
 	if writer.request != nil {
 		writer.request.Failed()
 		writer.request.Done()
 	}
-	_ = writer.spool.scratch.remove(writer.path) // Session cleanup removes any remaining run.
-	writer.spool.scratch.release(writer.reserved)
+	removeErr := writer.spool.scratch.remove(writer.path)
+	if removeErr == nil || errors.Is(removeErr, os.ErrNotExist) {
+		writer.spool.scratch.release(writer.reserved)
+	}
 	writer.reserved = 0
 }
 
 type checkKVReader struct {
-	file      *scratchReadFile
-	reader    *bufio.Reader
-	aead      cipher.AEAD
-	prefix    [4]byte
-	counter   uint64
-	maxRecord uint64
+	release       func()
+	releaseRecord func()
+	file          *scratchReadFile
+	reader        *bufio.Reader
+	aead          cipher.AEAD
+	prefix        [4]byte
+	counter       uint64
+	maxRecord     uint64
 }
 
-func openCheckKVReader(run checkRun, scratch *checkScratch, maxRecord uint64) (*checkKVReader, error) {
+func openCheckKVReader(run checkRun, scratch *checkScratch, maxRecord uint64) (_ *checkKVReader, err error) {
+	bufferSize, release, err := reserveCheckBuffer(scratch.ctx, 32<<10, 4096)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			release()
+		}
+	}()
 	file, err := scratch.open(run.path)
 	if err != nil {
 		return nil, err
 	}
-	reader := bufio.NewReaderSize(file, 32<<10)
+	reader := bufio.NewReaderSize(file, bufferSize)
 	header := make([]byte, checkRunHeaderSize)
 	if _, err := io.ReadFull(reader, header); err != nil || !bytes.Equal(header[:8], checkRunMagic[:]) {
 		_ = file.Close() // Preserve the invalid-header error.
@@ -361,12 +406,16 @@ func openCheckKVReader(run checkRun, scratch *checkScratch, maxRecord uint64) (*
 		_ = file.Close() // Preserve the AEAD-construction error.
 		return nil, err
 	}
-	result := &checkKVReader{file: file, reader: reader, aead: aead, maxRecord: maxRecord}
+	result := &checkKVReader{file: file, reader: reader, aead: aead, maxRecord: maxRecord, release: release}
 	copy(result.prefix[:], header[8:])
 	return result, nil
 }
 
 func (reader *checkKVReader) next() (checkKVRecord, bool, error) {
+	if reader.releaseRecord != nil {
+		defer reader.releaseRecord()
+		reader.releaseRecord = nil
+	}
 	var length [4]byte
 	if _, err := io.ReadFull(reader.reader, length[:]); err != nil {
 		if errors.Is(err, io.EOF) {
@@ -377,6 +426,14 @@ func (reader *checkKVReader) next() (checkKVRecord, bool, error) {
 	sealedLength := uint64(binary.BigEndian.Uint32(length[:]))
 	if sealedLength < checkKVRecordHeaderSize+uint64(reader.aead.Overhead()) || sealedLength > reader.maxRecord+uint64(reader.aead.Overhead()) {
 		return checkKVRecord{}, false, fmt.Errorf("invalid checker key/value run record length")
+	}
+	if policy := workingkv.PolicyFrom(reader.file.scratch.ctx); policy != nil {
+		charge := sealedLength*4 + 4096
+		if err := policy.Reserve(charge); err != nil {
+			return checkKVRecord{}, false, err
+		}
+		var once sync.Once
+		reader.releaseRecord = func() { once.Do(func() { policy.Release(charge) }) }
 	}
 	sealed := make([]byte, sealedLength)
 	if _, err := io.ReadFull(reader.reader, sealed); err != nil {
@@ -400,7 +457,16 @@ func (reader *checkKVReader) next() (checkKVRecord, bool, error) {
 	}, true, nil
 }
 
-func (reader *checkKVReader) close() error { return reader.file.Close() }
+func (reader *checkKVReader) close() error {
+	if reader.release != nil {
+		reader.release()
+	}
+	if reader.releaseRecord != nil {
+		reader.releaseRecord()
+		reader.releaseRecord = nil
+	}
+	return reader.file.Close()
+}
 
 type checkKVHeapItem struct {
 	record checkKVRecord

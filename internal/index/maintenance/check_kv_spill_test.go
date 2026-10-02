@@ -148,7 +148,7 @@ func TestM3SorterParity(t *testing.T) {
 	for _, ordinal := range []uint64{1, 1, 2, 3} {
 		baselineKV = append(baselineKV, fmt.Sprintf("%x:%x:%d", []byte("key\x00"), []byte{byte(ordinal)}, ordinal))
 	}
-	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV} {
+	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV, workingkv.ModeAuto} {
 		t.Run(string(mode), func(t *testing.T) {
 			root := t.TempDir()
 			policy, _ := workingkv.NewPolicy(mode, 2<<20, root)
@@ -235,6 +235,83 @@ func TestM3SorterParity(t *testing.T) {
 			}
 			if policy.Budget().Used != 0 {
 				t.Fatal("sort reservation leaked")
+			}
+		})
+	}
+}
+
+func TestM4SorterAggregatePressure(t *testing.T) {
+	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeAuto} {
+		t.Run(string(mode), func(t *testing.T) {
+			root := t.TempDir()
+			policy, _ := workingkv.NewPolicy(mode, 1<<20, root)
+			ctx := workingkv.WithPolicy(t.Context(), policy)
+			scratch, err := newCheckScratchWithScenario(ctx, root, 1<<20, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer scratch.close()
+			spool, err := newLocationMultisetSpool(ctx, scratch, 512<<10, 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer spool.close()
+			spool.chunkItems = 1024
+			for ordinal := 0; ordinal < 1024; ordinal++ {
+				if err := spool.add(testLocation(byte(ordinal % 8))); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := spool.finishBuffer(); err != nil {
+				t.Fatal(err)
+			}
+			spool.chunkItems = 2048
+			blocker := policy.Available() - (160 << 10)
+			if err := policy.Reserve(blocker); err != nil {
+				t.Fatal(err)
+			}
+			if err := spool.add(testLocation(9)); err != nil {
+				t.Fatal(err)
+			}
+			policy.Release(blocker)
+			if mode == workingkv.ModeAuto && !spool.diskMode {
+				t.Fatal("aggregate pressure did not spill")
+			}
+			if mode == workingkv.ModeRAM {
+				files, _ := os.ReadDir(root)
+				if len(files) != 0 {
+					t.Fatal("RAM pressure spilled")
+				}
+			}
+			iterator, err := spool.iterator()
+			if err != nil {
+				t.Fatal(err)
+			}
+			count := 0
+			for {
+				_, found, err := iterator.next()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !found {
+					break
+				}
+				count++
+			}
+			if err := iterator.close(); err != nil {
+				t.Fatal(err)
+			}
+			if count != 1025 {
+				t.Fatal("migration lost duplicate tuples", count)
+			}
+			if err := spool.close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := scratch.close(); err != nil {
+				t.Fatal(err)
+			}
+			if policy.Budget().Used != 0 || policy.Snapshot("test", "test").Disk.Used != 0 {
+				t.Fatal("sort migration leaked", policy.Snapshot("test", "test"))
 			}
 		})
 	}

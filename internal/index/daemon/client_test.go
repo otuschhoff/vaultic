@@ -18,9 +18,72 @@ import (
 	vaulticdbv1 "github.com/otuschhoff/vaultic/internal/index/proto/vaulticdb/v1"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 	"github.com/otuschhoff/vaultic/internal/observability"
+	"github.com/otuschhoff/vaultic/internal/workingkv"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+func TestM4RPCAdmissionPreservesOutcome(t *testing.T) {
+	policy, _ := workingkv.NewPolicy(workingkv.ModeRAM, 32<<20, "")
+	ctx := workingkv.WithPolicy(t.Context(), policy)
+	calls := 0
+	invoke := func(context.Context, string, any, any, *grpc.ClientConn, ...grpc.CallOption) error {
+		calls++
+		if policy.Budget().Used == 0 {
+			t.Error("RPC invoked without capacity")
+		}
+		return status.Error(codes.Unavailable, "unknown publication outcome")
+	}
+	err := workingUnaryInterceptor(ctx, "Commit", &vaulticdbv1.Empty{}, &vaulticdbv1.Empty{}, nil, invoke)
+	if status.Code(err) != codes.Unavailable || calls != 1 || policy.Budget().Used != 0 {
+		t.Fatal("uncertainty changed or lease leaked", err, calls, policy.Budget())
+	}
+	if err := policy.Reserve(policy.Budget().Limit); err != nil {
+		t.Fatal(err)
+	}
+	err = workingUnaryInterceptor(ctx, "Commit", &vaulticdbv1.Empty{}, &vaulticdbv1.Empty{}, nil, invoke)
+	if !errors.Is(err, workingkv.ErrWorkingMemoryLimitExceeded) || calls != 1 {
+		t.Fatal("admission invoked publication", err, calls)
+	}
+	policy.Release(policy.Budget().Limit)
+	err = workingUnaryInterceptor(ctx, "Get", &vaulticdbv1.Empty{}, &vaulticdbv1.Empty{}, nil, func(context.Context, string, any, any, *grpc.ClientConn, ...grpc.CallOption) error {
+		return status.Error(codes.ResourceExhausted, "grpc: received message larger than max (2048 vs. 1024)")
+	})
+	if !errors.Is(err, workingkv.ErrWorkingMemoryLimitExceeded) || status.Code(err) != codes.ResourceExhausted || policy.Budget().Used != 0 {
+		t.Fatal(err, policy.Budget())
+	}
+}
+
+func TestM4ExhaustionStillRollsBack(t *testing.T) {
+	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV, workingkv.ModeAuto} {
+		t.Run(string(mode), func(t *testing.T) {
+			policy, _ := workingkv.NewPolicy(mode, 32<<20, t.TempDir())
+			ctx := workingkv.WithPolicy(t.Context(), policy)
+			client, err := Ensure(ctx, Options{Socket: testSocket(t), RepositoryID: "m4-exhaustion-cleanup", DaemonPath: daemonBinary(t), DataDir: t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close(context.Background())
+			transaction, err := client.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := policy.Reserve(policy.Budget().Limit); err != nil {
+				t.Fatal(err)
+			}
+			if err := transaction.Rollback(ctx); err != nil {
+				policy.Release(policy.Budget().Limit)
+				t.Fatal("memory exhaustion prevented rollback", err)
+			}
+			policy.Release(policy.Budget().Limit)
+			state, err := client.WriterStatus(ctx)
+			if err != nil || state.ActiveTransactions != 0 || state.ActiveWriteIntents != 0 || client.CommitRPCStats().Attempts != 0 {
+				t.Fatal("exhaustion changed publication/cleanup", state, err)
+			}
+		})
+	}
+}
 
 func TestEncryptionSecurityEventsRouteToSyslog(t *testing.T) {
 	listener, err := net.ListenPacket("udp", "127.0.0.1:0")

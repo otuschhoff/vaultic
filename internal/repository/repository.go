@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -21,6 +22,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	monitor "github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/workingstate"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -680,6 +682,76 @@ func (r *Repository) LoadLegacyUnpacked(ctx context.Context, t vaultic.FileType,
 		return nil, err
 	}
 	if t != vaultic.ConfigFile {
+		if available, selected := workingstate.Available(ctx); selected && r.cfg.Version >= 2 && len(plaintext) > 0 && plaintext[0] == 2 {
+			var header zstd.Header
+			if err := header.Decode(plaintext[1:]); err != nil {
+				return nil, err
+			}
+			window := header.WindowSize
+			if header.SingleSegment {
+				window = header.FrameContentSize
+			}
+			if window > available || available-window <= 128<<10 {
+				return nil, workingstate.ErrMemoryLimitExceeded
+			}
+			limit := available - window - (128 << 10)
+			if header.HasFCS {
+				limit = header.FrameContentSize
+			}
+			if limit > uint64(^uint(0)>>1)-1 || limit > ^uint64(0)/3 {
+				return nil, workingstate.ErrMemoryLimitExceeded
+			}
+			release, err := workingstate.Reserve(ctx, window+(128<<10))
+			if err != nil {
+				return nil, err
+			}
+			defer release()
+			decoder, err := zstd.NewReader(bytes.NewReader(plaintext[1:]), zstd.WithDecoderConcurrency(1), zstd.WithDecoderLowmem(true), zstd.WithDecoderMaxMemory(max(uint64(1), window+limit)))
+			if err != nil {
+				return nil, err
+			}
+			defer decoder.Close()
+			var decoded []byte
+			var bufferRelease func()
+			defer func() {
+				if bufferRelease != nil {
+					bufferRelease()
+				}
+			}()
+			for {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				if len(decoded) == cap(decoded) {
+					next := min(max(uint64(8192), uint64(cap(decoded))*2), limit+1)
+					if next <= uint64(cap(decoded)) {
+						return nil, workingstate.ErrMemoryLimitExceeded
+					}
+					release, err := workingstate.Reserve(ctx, next*3+64)
+					if err != nil {
+						return nil, err
+					}
+					grown := make([]byte, len(decoded), int(next))
+					copy(grown, decoded)
+					if bufferRelease != nil {
+						bufferRelease()
+					}
+					bufferRelease = release
+					decoded = grown
+				}
+				read, err := decoder.Read(decoded[len(decoded):cap(decoded)])
+				decoded = decoded[:len(decoded)+read]
+				if uint64(len(decoded)) > limit {
+					return nil, workingstate.ErrMemoryLimitExceeded
+				}
+				if err == io.EOF {
+					return decoded, nil
+				}
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
 		return r.decompressUnpacked(plaintext)
 	}
 

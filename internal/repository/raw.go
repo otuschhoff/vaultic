@@ -3,11 +3,13 @@ package repository
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
 	"github.com/otuschhoff/vaultic/internal/backend"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/workingstate"
 )
 
 // LoadRaw reads all data stored in the backend for the file with id and filetype t.
@@ -35,6 +37,9 @@ func (r *Repository) LoadRaw(ctx context.Context, t vaultic.FileType, id vaultic
 	}
 
 	buf, err = load()
+	if errors.Is(err, workingstate.ErrMemoryLimitExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return nil, err
+	}
 
 	// retry loading damaged data only once. If a file fails to download correctly
 	// the second time, then it is likely corrupted at the backend.
@@ -61,6 +66,32 @@ func (r *Repository) LoadRaw(ctx context.Context, t vaultic.FileType, id vaultic
 }
 
 func loadRaw(ctx context.Context, be backend.Backend, h backend.Handle) (buf []byte, err error) {
+	if _, selected := workingstate.Available(ctx); selected && (h.Type == backend.IndexFile || h.Type == backend.SnapshotFile) {
+		info, err := be.Stat(ctx, h)
+		if err != nil {
+			return nil, err
+		}
+		if info.Size < 0 || uint64(info.Size) > uint64(^uint(0)>>1)-1 || uint64(info.Size) > (^uint64(0)-4096)/3 {
+			return nil, workingstate.ErrMemoryLimitExceeded
+		}
+		release, err := workingstate.Reserve(ctx, uint64(info.Size)*3+4096)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+		err = be.Load(ctx, h, 0, 0, func(reader io.Reader) error {
+			loaded, err := io.ReadAll(io.LimitReader(reader, info.Size+1))
+			if err != nil {
+				return err
+			}
+			if int64(len(loaded)) > info.Size {
+				return workingstate.ErrMemoryLimitExceeded
+			}
+			buf = loaded
+			return ctx.Err()
+		})
+		return buf, err
+	}
 	err = be.Load(ctx, h, 0, 0, func(rd io.Reader) error {
 		wr := new(bytes.Buffer)
 		_, cerr := io.Copy(wr, rd)

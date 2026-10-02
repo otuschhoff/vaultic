@@ -57,9 +57,30 @@ type Index struct {
 	byType [vaultic.NumBlobTypes]indexMap
 	packs  vaultic.IDs
 
-	final   bool        // set to true for all indexes read from the backend ("finalized")
-	ids     vaultic.IDs // set to the IDs of the contained finalized indexes
-	created time.Time
+	final           bool        // set to true for all indexes read from the backend ("finalized")
+	ids             vaultic.IDs // set to the IDs of the contained finalized indexes
+	created         time.Time
+	workingReleases []func()
+	workingRetained bool
+}
+
+func (idx *Index) attachWorking(release func(), retained bool) {
+	idx.m.Lock()
+	defer idx.m.Unlock()
+	idx.workingReleases = append(idx.workingReleases, release)
+	idx.workingRetained = idx.workingRetained || retained
+}
+func (idx *Index) releaseWorking(force bool) {
+	idx.m.Lock()
+	var releases []func()
+	if force || !idx.workingRetained {
+		releases = idx.workingReleases
+		idx.workingReleases = nil
+	}
+	idx.m.Unlock()
+	for _, release := range releases {
+		release()
+	}
 }
 
 // NewIndex returns a new index.
@@ -599,6 +620,9 @@ func (idx *Index) merge(idx2 *Index) error {
 	}
 
 	idx.ids = append(idx.ids, idx2.ids...)
+	idx.workingReleases = append(idx.workingReleases, idx2.workingReleases...)
+	idx2.workingReleases = nil
+	idx.workingRetained = true
 
 	return nil
 }

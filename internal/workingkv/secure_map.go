@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"sync"
 )
@@ -39,7 +40,9 @@ func OpenSecureMap(ctx context.Context, parent, prefix string) (*SecureMap, erro
 	if err != nil {
 		return nil, err
 	}
-	return &SecureMap{WorkingStore: store, aead: aead, key: key[32:], domain: []byte("vaultic-working/v1/" + prefix)}, nil
+	result := &SecureMap{WorkingStore: store, aead: aead, key: key[32:], domain: []byte("vaultic-working/v1/" + prefix)}
+	store.SetVerifier(func(key, value []byte) error { _, err := result.decode(key, value); return err })
+	return result, nil
 }
 
 func (store *SecureMap) token(key []byte) []byte {
@@ -58,14 +61,24 @@ func (store *SecureMap) encode(key, value []byte) ([]byte, error) {
 
 func (store *SecureMap) decode(key, value []byte) ([]byte, error) {
 	if len(value) < store.aead.NonceSize() {
-		return nil, fmt.Errorf("truncated working-state ciphertext")
+		return nil, errors.Join(ErrWorkingStateCorrupt, fmt.Errorf("truncated working-state ciphertext"))
 	}
-	return store.aead.Open(nil, value[:store.aead.NonceSize()], value[store.aead.NonceSize():], append(append([]byte(nil), store.domain...), key...))
+	decoded, err := store.aead.Open(nil, value[:store.aead.NonceSize()], value[store.aead.NonceSize():], append(append([]byte(nil), store.domain...), key...))
+	if err != nil {
+		return nil, errors.Join(ErrWorkingStateCorrupt, err)
+	}
+	return decoded, nil
 }
 
 func (store *SecureMap) PutValue(ctx context.Context, key, value []byte) error {
 	store.mutex.Lock()
 	defer store.mutex.Unlock()
+	charge := ramCharge(uint64(min(len(value), secureChunkBytes))*3 + uint64(len(key)) + 1024)
+	release, err := store.WorkingStore.reserveCopies(ctx, charge)
+	if err != nil {
+		return err
+	}
+	defer release()
 	root := store.token(key)
 	var header []byte
 	if len(value) <= secureChunkBytes {
@@ -106,6 +119,11 @@ func (store *SecureMap) GetValue(ctx context.Context, key []byte) ([]byte, bool,
 	if err != nil || !found {
 		return nil, found, err
 	}
+	decodeRelease, err := store.WorkingStore.reserveCopies(ctx, ramCharge(uint64(len(encoded))*3+uint64(len(key))+1024))
+	if err != nil {
+		return nil, false, err
+	}
+	defer decodeRelease()
 	header, err := store.decode(root, encoded)
 	if err != nil {
 		return nil, false, err
@@ -123,6 +141,14 @@ func (store *SecureMap) GetValue(ctx context.Context, key []byte) ([]byte, bool,
 	if size > uint64(^uint(0)>>1) {
 		return nil, false, ErrBatchLimit
 	}
+	if size > ^uint64(0)/3 {
+		return nil, false, ErrBatchLimit
+	}
+	release, err := store.WorkingStore.reserveCopies(ctx, ramCharge(size*3+2*secureChunkBytes))
+	if err != nil {
+		return nil, false, err
+	}
+	defer release()
 	var value []byte
 	for ordinal := uint64(0); uint64(len(value)) < size; ordinal++ {
 		chunkKey := append(append([]byte(nil), root...), header[9:]...)

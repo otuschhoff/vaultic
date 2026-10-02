@@ -10,6 +10,8 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/otuschhoff/cwalk"
 	"github.com/otuschhoff/vaultic/internal/fs"
+	"github.com/otuschhoff/vaultic/internal/workingkv"
+	"github.com/otuschhoff/vaultic/internal/workingstate"
 )
 
 type directoryResult struct {
@@ -17,20 +19,35 @@ type directoryResult struct {
 	names       []string
 	directories []string
 	err         error
+	release     func()
+	once        sync.Once
+}
+
+func (result *directoryResult) releaseWorking() {
+	result.once.Do(func() {
+		if result.release != nil {
+			result.release()
+		}
+	})
 }
 
 type DirectoryStream struct {
-	filesystem    fs.FS
-	ctx           context.Context
-	cancel        context.CancelFunc
-	jobs          chan string
-	slots         chan struct{}
-	group         sync.WaitGroup
-	mutex         sync.Mutex
-	pending       map[string]*directoryResult
-	capacity      int
-	metadata      *lru.Cache[string, fs.ReadDirEntry]
-	metadataBytes int
+	filesystem        fs.FS
+	ctx               context.Context
+	cancel            context.CancelFunc
+	jobs              chan string
+	slots             chan struct{}
+	group             sync.WaitGroup
+	mutex             sync.Mutex
+	pending           map[string]*directoryResult
+	capacity          int
+	metadata          *lru.Cache[string, fs.ReadDirEntry]
+	metadataBytes     int
+	metadataLimit     int
+	metadataCharge    uint64
+	queueRelease      func()
+	unregisterEvictor func()
+	closeOnce         sync.Once
 }
 
 func NewDirectoryStream(ctx context.Context, workers, capacity int) (*DirectoryStream, error) {
@@ -44,13 +61,33 @@ func NewDirectoryStreamWithFS(ctx context.Context, workers, capacity int, filesy
 	if workers < 1 || capacity < 1 {
 		return nil, fmt.Errorf("cwalk workers and lookahead capacity must be positive")
 	}
+	metadataLimit := 8 << 20
+	policy := workingkv.PolicyFrom(ctx)
+	if policy != nil {
+		metadataLimit = int(min(uint64(metadataLimit), policy.Budget().Limit/8))
+	}
+	queueRelease, err := workingstate.Reserve(ctx, uint64(capacity)*256+uint64(workers)*1024)
+	if err != nil {
+		return nil, err
+	}
+	metadataRelease, err := workingstate.Reserve(ctx, uint64(metadataLimit))
+	if err != nil {
+		queueRelease()
+		return nil, err
+	}
 	metadata, err := lru.New[string, fs.ReadDirEntry](min(capacity, 64) * 128)
 	if err != nil {
+		queueRelease()
+		metadataRelease()
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	stream := &DirectoryStream{filesystem: filesystem, ctx: ctx, cancel: cancel, jobs: make(chan string, capacity),
-		slots: make(chan struct{}, workers), pending: make(map[string]*directoryResult), capacity: capacity, metadata: metadata}
+		slots: make(chan struct{}, workers), pending: make(map[string]*directoryResult), capacity: capacity, metadata: metadata, metadataLimit: metadataLimit, queueRelease: queueRelease}
+	if policy != nil {
+		stream.metadataCharge = uint64(metadataLimit)
+		stream.unregisterEvictor = policy.RegisterEvictor(stream.evictMetadata)
+	}
 	for worker := 0; worker < workers; worker++ {
 		stream.group.Go(func() {
 			for {
@@ -62,12 +99,12 @@ func NewDirectoryStreamWithFS(ctx context.Context, workers, capacity int, filesy
 					result := stream.pending[path]
 					stream.mutex.Unlock()
 					if result != nil {
-						result.names, result.directories, result.err = stream.read(path)
+						result.names, result.directories, result.release, result.err = stream.readWorking(path)
 						bytes := 0
 						for _, name := range result.names {
 							bytes += len(name) + 16
 						}
-						if bytes > 1<<20 {
+						if bytes > 1<<20 && policy == nil {
 							stream.mutex.Lock()
 							delete(stream.pending, path)
 							stream.mutex.Unlock()
@@ -82,17 +119,34 @@ func NewDirectoryStreamWithFS(ctx context.Context, workers, capacity int, filesy
 }
 
 func (stream *DirectoryStream) read(path string) ([]string, []string, error) {
+	names, directories, release, err := stream.readWorking(path)
+	if release != nil {
+		release()
+	}
+	return names, directories, err
+}
+
+func (stream *DirectoryStream) readWorking(path string) ([]string, []string, func(), error) {
 	select {
 	case stream.slots <- struct{}{}:
 		defer func() { <-stream.slots }()
 	case <-stream.ctx.Done():
-		return nil, nil, stream.ctx.Err()
+		return nil, nil, nil, stream.ctx.Err()
 	}
 	var names, directories []string
 	var readErr error
+	var readRelease func()
 	callbacks := cwalk.Callbacks{OnReadDir: func(_ string, entries []os.DirEntry, err error) {
 		readErr = err
 		if err != nil {
+			return
+		}
+		charge := uint64(len(entries))*128 + uint64(min(len(entries), stream.capacity))*(uint64(len(path))*3+128) + 1024
+		for _, entry := range entries {
+			charge += uint64(len(entry.Name())) * 3
+		}
+		readRelease, readErr = workingstate.Reserve(stream.ctx, charge)
+		if readErr != nil {
 			return
 		}
 		names = make([]string, len(entries))
@@ -137,15 +191,24 @@ func (stream *DirectoryStream) read(path string) ([]string, []string, error) {
 	close(monitorDone)
 	<-monitorExited
 	if stream.ctx.Err() != nil {
-		return nil, nil, stream.ctx.Err()
+		if readRelease != nil {
+			readRelease()
+		}
+		return nil, nil, nil, stream.ctx.Err()
 	}
 	if err != nil {
-		return nil, nil, err
+		if readRelease != nil {
+			readRelease()
+		}
+		return nil, nil, nil, err
 	}
 	if readErr != nil {
-		return nil, nil, readErr
+		if readRelease != nil {
+			readRelease()
+		}
+		return nil, nil, nil, readErr
 	}
-	return names, directories, nil
+	return names, directories, readRelease, nil
 }
 
 func (stream *DirectoryStream) Names(path string) ([]string, bool, error) {
@@ -175,11 +238,32 @@ func (stream *DirectoryStream) Names(path string) ([]string, bool, error) {
 		stream.mutex.Lock()
 		delete(stream.pending, path)
 		stream.mutex.Unlock()
+		defer result.releaseWorking()
 	} else {
-		names, directories, err = stream.read(path)
+		var release func()
+		names, directories, release, err = stream.readWorking(path)
+		if release != nil {
+			defer release()
+		}
 	}
 	if err != nil {
 		return nil, false, err
+	}
+	if _, selected := workingstate.Available(stream.ctx); selected {
+		charge := uint64(len(names)+len(directories))*64 + 1024
+		for _, name := range names {
+			charge += uint64(len(name)) * 2
+		}
+		for _, directory := range directories {
+			charge += uint64(len(directory)) * 2
+		}
+		release, err := workingstate.Reserve(stream.ctx, charge)
+		if err != nil {
+			return nil, false, err
+		}
+		defer release()
+		names = append([]string(nil), names...)
+		directories = append([]string(nil), directories...)
 	}
 	stream.mutex.Lock()
 	defer stream.mutex.Unlock()
@@ -195,6 +279,7 @@ func (stream *DirectoryStream) Names(path string) ([]string, bool, error) {
 				select {
 				case <-oldResult.done:
 					delete(stream.pending, oldPath)
+					oldResult.releaseWorking()
 				default:
 				}
 				if len(stream.pending) < stream.capacity {
@@ -221,19 +306,22 @@ func retainedEntryBytes(name string, entry fs.ReadDirEntry) int {
 
 func (stream *DirectoryStream) rememberMetadata(name string, entry fs.ReadDirEntry) {
 	size := retainedEntryBytes(name, entry)
-	if size > 1<<20 {
-		return
-	}
 	stream.mutex.Lock()
 	defer stream.mutex.Unlock()
+	if size > min(1<<20, stream.metadataLimit) {
+		return
+	}
 	if stream.ctx.Err() != nil {
+		return
+	}
+	if stream.metadata == nil {
 		return
 	}
 	if previous, found := stream.metadata.Peek(name); found {
 		stream.metadataBytes -= retainedEntryBytes(name, previous)
 		stream.metadata.Remove(name)
 	}
-	for stream.metadata.Len() >= min(stream.capacity, 64)*128 || stream.metadataBytes+size > 8<<20 {
+	for stream.metadata.Len() >= min(stream.capacity, 64)*128 || stream.metadataBytes+size > stream.metadataLimit {
 		oldName, previous, found := stream.metadata.RemoveOldest()
 		if !found {
 			break
@@ -254,7 +342,11 @@ func (stream *DirectoryStream) OpenMetadata(name string) (fs.File, bool, error) 
 		stream.mutex.Unlock()
 		return nil, false, err
 	}
-	entry, found := stream.metadata.Get(name)
+	var entry fs.ReadDirEntry
+	var found bool
+	if stream.metadata != nil {
+		entry, found = stream.metadata.Get(name)
+	}
 	if found {
 		stream.metadata.Remove(name)
 		stream.metadataBytes -= retainedEntryBytes(name, entry)
@@ -270,13 +362,42 @@ func (stream *DirectoryStream) OpenMetadata(name string) (fs.File, bool, error) 
 }
 
 func (stream *DirectoryStream) Close() error {
-	stream.mutex.Lock()
-	stream.cancel()
-	stream.mutex.Unlock()
-	stream.group.Wait()
-	stream.mutex.Lock()
-	stream.metadata.Purge()
-	stream.metadataBytes = 0
-	stream.mutex.Unlock()
+	stream.closeOnce.Do(func() {
+		stream.mutex.Lock()
+		stream.cancel()
+		stream.mutex.Unlock()
+		stream.group.Wait()
+		if stream.unregisterEvictor != nil {
+			stream.unregisterEvictor()
+		}
+		stream.evictMetadata()
+		stream.mutex.Lock()
+		for path, result := range stream.pending {
+			result.releaseWorking()
+			delete(stream.pending, path)
+		}
+		stream.mutex.Unlock()
+		if stream.queueRelease != nil {
+			stream.queueRelease()
+		}
+	})
 	return nil
+}
+
+func (stream *DirectoryStream) evictMetadata() {
+	stream.mutex.Lock()
+	defer stream.mutex.Unlock()
+	if workingkv.PolicyFrom(stream.ctx) == nil {
+		if stream.metadata != nil {
+			stream.metadata.Purge()
+		}
+	} else {
+		stream.metadata = nil
+	}
+	stream.metadataBytes = 0
+	stream.metadataLimit = 0
+	if policy := workingkv.PolicyFrom(stream.ctx); policy != nil && stream.metadataCharge != 0 {
+		policy.Release(stream.metadataCharge)
+		stream.metadataCharge = 0
+	}
 }

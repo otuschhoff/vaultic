@@ -56,6 +56,7 @@ Exit status is 11 if the repository is already locked.
 Exit status is 12 if the password is incorrect.
 `,
 		PreRunE: func(_ *cobra.Command, _ []string) error {
+			options.workingMemorySelected = globalOptions.WorkingMemory.Mode != ""
 			return options.Finalize()
 		},
 		GroupID:           "default",
@@ -64,16 +65,23 @@ Exit status is 12 if the password is incorrect.
 			if len(args) == 0 && globalOptions.Profile != nil && len(globalOptions.Profile.Snapshots) != 0 {
 				return runProfileBackupJobs(cmd.Context(), options, *globalOptions, globalOptions.Term, cmd.Flags())
 			}
-			return runBackup(cmd.Context(), options, *globalOptions, globalOptions.Term, args)
+			ctx, stop, err := globalOptions.PrepareWorkingMemory(cmd.Context(), cmd.Flags(), globalOptions.Term)
+			if err != nil {
+				return err
+			}
+			defer stop()
+			return global.WorkingMemoryError(runBackup(ctx, options, *globalOptions, globalOptions.Term, args), ctx)
 		},
 	}
 
 	options.AddFlags(cmd.Flags())
+	globalOptions.AddWorkingMemoryFlags(cmd.Flags())
 	return cmd
 }
 
 // backupOptions bundles all options for the backup command.
 type backupOptions struct {
+	workingMemorySelected bool
 	filter.ExcludePatternOptions
 
 	Parent                    string
@@ -328,6 +336,7 @@ func runProfileBackupJob(
 	jobFlags := pflag.NewFlagSet("profile backup", pflag.ContinueOnError)
 	jobFlags.SetInterspersed(true)
 	jobOptions.AddFlags(jobFlags)
+	globalOptions.AddWorkingMemoryFlags(jobFlags)
 	envOverrides := func(name string) bool {
 		_, ok := env.Lookup(strings.ToUpper(strings.ReplaceAll(name, "-", "_")))
 		return ok
@@ -347,6 +356,7 @@ func runProfileBackupJob(
 	if setFlagErr != nil {
 		return fmt.Errorf("apply command-line profile overrides: %w", setFlagErr)
 	}
+	jobOptions.workingMemorySelected = globalOptions.WorkingMemory.Mode != ""
 	if err := jobOptions.Finalize(); err != nil {
 		return err
 	}
@@ -362,7 +372,12 @@ func runProfileBackupJob(
 	if err := runner.Run(ctx, hooks.Before, []configfile.Hooks{job.Hooks}, values); err != nil {
 		return err
 	}
-	err := runBackup(ctx, jobOptions, globalOptions, term, job.Sources)
+	ctx, stop, err := globalOptions.PrepareWorkingMemory(ctx, jobFlags, term)
+	if err != nil {
+		return err
+	}
+	defer stop()
+	err = global.WorkingMemoryError(runBackup(ctx, jobOptions, globalOptions, term, job.Sources), ctx)
 	phase := hooks.After
 	if err != nil {
 		phase = hooks.Failed
@@ -566,7 +581,7 @@ func (options backupOptions) validateDeferred() error {
 
 func (options backupOptions) validateParent() error {
 	if options.MetadataOnDemand {
-		if options.MetadataScratch == "" {
+		if options.MetadataScratch == "" && !options.workingMemorySelected {
 			return errors.Fatal("--metadata-on-demand requires --metadata-scratch")
 		}
 		if options.AllowDeferredCommit || options.DryRun {

@@ -1092,7 +1092,7 @@ func dial(ctx context.Context, options Options) (*Client, error) {
 			return netDialer.DialContext(ctx, "tcp", address)
 		}
 	}
-	interceptors := []grpc.UnaryClientInterceptor{classifyUnaryClientError}
+	interceptors := []grpc.UnaryClientInterceptor{workingUnaryInterceptor, classifyUnaryClientError}
 	if options.ResponseDeliveryForTesting != nil {
 		interceptors = append(interceptors, responseDeliveryInterceptor(options.ResponseDeliveryForTesting))
 	}
@@ -1100,6 +1100,7 @@ func dial(ctx context.Context, options Options) (*Client, error) {
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithContextDialer(dialer),
 		grpc.WithChainUnaryInterceptor(interceptors...),
+		grpc.WithChainStreamInterceptor(workingStreamInterceptor),
 		grpc.WithBlock(),
 	)
 	if err != nil {

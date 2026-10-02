@@ -20,6 +20,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/textfile"
 	"github.com/otuschhoff/vaultic/internal/ui"
 	"github.com/otuschhoff/vaultic/internal/ui/progress"
+	"github.com/otuschhoff/vaultic/internal/workingkv"
 	"github.com/spf13/pflag"
 
 	"github.com/otuschhoff/vaultic/internal/errors"
@@ -42,8 +43,9 @@ type BackendWrapper func(r backend.Backend) (backend.Backend, error)
 type Options struct {
 	// UseProfiles selects local TOML profiles. Profiles are loaded by the root
 	// command after Cobra has parsed flags and before command pre-runs execute.
-	UseProfiles []string
-	Profile     *configfile.Profile
+	UseProfiles   []string
+	Profile       *configfile.Profile
+	WorkingMemory workingkv.Configuration
 
 	Repo                       string
 	RepositoryFile             string

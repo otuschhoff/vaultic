@@ -71,6 +71,17 @@ func (metric *WorkingStateMetric) Activate() {
 	}
 }
 
+func (metric *WorkingStateMetric) SetBackend(backend string) {
+	switch backend {
+	case "pebble", "bbolt", "ram", "encrypted_sort", "streaming":
+	default:
+		return
+	}
+	metric.mutex.Lock()
+	defer metric.mutex.Unlock()
+	metric.state.Backend = backend
+}
+
 func (metric *WorkingStateMetric) ObserveBuffer(bytes uint64) {
 	metric.mutex.Lock()
 	defer metric.mutex.Unlock()

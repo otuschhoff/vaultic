@@ -437,7 +437,7 @@ func TestBuildDirectoryManifest(t *testing.T) {
 }
 
 func TestM3ManifestParity(t *testing.T) {
-	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV} {
+	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV, workingkv.ModeAuto} {
 		t.Run(string(mode), func(t *testing.T) {
 			source, scratch := t.TempDir(), t.TempDir()
 			var expected []string

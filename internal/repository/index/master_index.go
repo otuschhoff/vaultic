@@ -10,6 +10,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/debug"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/workingstate"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -42,6 +43,11 @@ func NewMasterIndex() *MasterIndex {
 }
 
 func (mi *MasterIndex) clear() {
+	for _, idx := range mi.idx {
+		if idx != nil {
+			idx.releaseWorking(true)
+		}
+	}
 	// Always add an empty final index, such that MergeFinalIndexes can merge into this.
 	mi.idx = []*Index{NewIndex()}
 	mi.idx[0].Finalize()
@@ -168,17 +174,29 @@ func (mi *MasterIndex) Packs(packBlacklist vaultic.IDSet) vaultic.IDSet {
 func (mi *MasterIndex) Insert(idx *Index) {
 	mi.idxMutex.Lock()
 	defer mi.idxMutex.Unlock()
+	idx.m.Lock()
+	idx.workingRetained = true
+	idx.m.Unlock()
 
 	mi.idx = append(mi.idx, idx)
 }
 
 // StorePack remembers the id and pack in the index.
 func (mi *MasterIndex) StorePack(ctx context.Context, id vaultic.ID, blobs pack.Blobs, r vaultic.SaverUnpacked[vaultic.FileType]) error {
-	mi.storePack(id, blobs)
+	if workingstate.PolicyFrom(ctx) == nil {
+		mi.storePack(id, blobs)
+		return mi.saveFullIndex(ctx, r)
+	}
+	release, err := workingstate.Reserve(ctx, uint64(len(blobs))*512+1024)
+	if err != nil {
+		return err
+	}
+	idx := mi.storePack(id, blobs)
+	idx.attachWorking(release, true)
 	return mi.saveFullIndex(ctx, r)
 }
 
-func (mi *MasterIndex) storePack(id vaultic.ID, blobs pack.Blobs) {
+func (mi *MasterIndex) storePack(id vaultic.ID, blobs pack.Blobs) *Index {
 	mi.idxMutex.Lock()
 	defer mi.idxMutex.Unlock()
 
@@ -190,13 +208,14 @@ func (mi *MasterIndex) storePack(id vaultic.ID, blobs pack.Blobs) {
 	for _, idx := range mi.idx {
 		if !idx.Final() {
 			idx.StorePack(id, blobs)
-			return
+			return idx
 		}
 	}
 
 	newIdx := NewIndex()
 	newIdx.StorePack(id, blobs)
 	mi.idx = append(mi.idx, newIdx)
+	return newIdx
 }
 
 // finalizeNotFinalIndexes finalizes all indexes that
@@ -793,6 +812,7 @@ func (mi *MasterIndex) saveIndex(ctx context.Context, r vaultic.SaverUnpacked[va
 					copy(mi.idx[ordinal:], mi.idx[ordinal+1:])
 					mi.idx[len(mi.idx)-1] = nil
 					mi.idx = mi.idx[:len(mi.idx)-1]
+					idx.releaseWorking(true)
 					break
 				}
 			}
@@ -809,6 +829,17 @@ func (mi *MasterIndex) saveIndex(ctx context.Context, r vaultic.SaverUnpacked[va
 // Flush saves all new indexes in the backend.
 func (mi *MasterIndex) Flush(ctx context.Context, r vaultic.SaverUnpacked[vaultic.FileType]) error {
 	return mi.saveIndex(ctx, r, mi.finalizeNotFinalIndexes()...)
+}
+
+func (mi *MasterIndex) Close() error {
+	mi.idxMutex.Lock()
+	defer mi.idxMutex.Unlock()
+	for _, idx := range mi.idx {
+		if idx != nil {
+			idx.releaseWorking(true)
+		}
+	}
+	return nil
 }
 
 // saveFullIndex saves all full indexes in the backend.

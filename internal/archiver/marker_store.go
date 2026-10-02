@@ -29,7 +29,7 @@ func NewMarkerCacheStoreContext(ctx context.Context, limit int) *MarkerCacheStor
 	backend := "pebble"
 	if policy := workingkv.PolicyFrom(ctx); policy != nil {
 		backend = "bbolt"
-		if policy.Mode() == workingkv.ModeRAM {
+		if policy.Mode() == workingkv.ModeRAM || policy.Mode() == workingkv.ModeAuto {
 			backend = "ram"
 		}
 	}
@@ -103,6 +103,7 @@ func (store *MarkerCacheStore) WorkingState() telemetry.WorkingStateSnapshot {
 	if store.database == nil {
 		return store.metrics.Snapshot(0, store.path == "" && !store.cleanupFailed)
 	}
+	store.metrics.SetBackend(store.database.Backend())
 	size, known := store.database.ScratchBytes()
 	return store.metrics.Snapshot(size, known)
 }

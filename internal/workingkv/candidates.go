@@ -17,9 +17,16 @@ var bucket = []byte("working-state")
 type boltEngine struct{ database *bolt.DB }
 
 func openBolt(path string) (engine, error) {
-	db, err := bolt.Open(filepath.Join(path, "state.db"), 0600, &bolt.Options{Timeout: time.Second, NoSync: true, NoFreelistSync: true})
+	return openBoltLimited(path, 0)
+}
+
+func openBoltLimited(path string, limit int) (engine, error) {
+	db, err := bolt.Open(filepath.Join(path, "state.db"), 0600, &bolt.Options{Timeout: time.Second, NoSync: true, NoFreelistSync: true, MaxSize: limit})
 	if err != nil {
 		return nil, err
+	}
+	if limit != 0 {
+		db.AllocSize = 4096
 	}
 	if err := db.Update(func(tx *bolt.Tx) error { _, err := tx.CreateBucketIfNotExists(bucket); return err }); err != nil {
 		return nil, errors.Join(err, db.Close())
@@ -87,6 +94,42 @@ func (impl *boltEngine) scan(ctx context.Context, prefix, after []byte, limit in
 }
 
 func (impl *boltEngine) close() error { return impl.database.Close() }
+
+func (impl *boltEngine) copySize(ctx context.Context, prefix, after []byte, limit int, exact bool) (uint64, error) {
+	var size uint64
+	err := impl.database.View(func(tx *bolt.Tx) error {
+		cursor := tx.Bucket(bucket).Cursor()
+		start := prefix
+		if bytes.Compare(after, start) > 0 {
+			start = after
+		}
+		count := 0
+		for key, value := cursor.Seek(start); key != nil && bytes.HasPrefix(key, prefix); key, value = cursor.Next() {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if exact && !bytes.Equal(key, prefix) {
+				break
+			}
+			if !exact && len(after) > 0 && bytes.Compare(key, after) <= 0 {
+				continue
+			}
+			if len(value) > MaxBatchBytes {
+				return ErrBatchLimit
+			}
+			size += uint64(len(key) + len(value) + 48)
+			if size > MaxScanBytes {
+				return ErrBatchLimit
+			}
+			count++
+			if count == limit || exact {
+				break
+			}
+		}
+		return nil
+	})
+	return size, err
+}
 
 type badgerEngine struct{ database *badger.DB }
 

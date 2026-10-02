@@ -14,6 +14,7 @@ import (
 	"github.com/otuschhoff/cwalk"
 	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/workingkv"
+	"github.com/otuschhoff/vaultic/internal/workingstate"
 )
 
 type DirectoryManifest struct {
@@ -27,8 +28,9 @@ type DirectoryManifest struct {
 }
 
 type directoryRecord struct {
-	path  string
-	names []string
+	path    string
+	names   []string
+	release func()
 }
 
 type ManifestProgress struct {
@@ -87,11 +89,16 @@ func BuildDirectoryManifestWithProgress(
 		}
 	}
 	emitProgress(false, false)
-	walkCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	walkCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	queueRelease, err := workingstate.Reserve(ctx, uint64(queueCapacity)*64)
+	if err != nil {
+		return nil, errors.Join(err, manifest.Close())
+	}
+	defer queueRelease()
 	records := make(chan directoryRecord, queueCapacity)
 	writeDone := make(chan error, 1)
-	go writeDirectoryRecords(walkCtx, database, records, writeDone, cancel, manifest.metrics)
+	go writeDirectoryRecords(walkCtx, database, records, writeDone, func() { cancel(context.Canceled) }, manifest.metrics)
 
 	var walkersMu sync.Mutex
 	var walkers []*cwalk.Walker
@@ -132,6 +139,9 @@ func BuildDirectoryManifestWithProgress(
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		if cause := context.Cause(walkCtx); cause != nil && !errors.Is(cause, context.Canceled) {
+			return nil, cause
+		}
 		if writeErr != nil && !errors.Is(writeErr, context.Canceled) {
 			return nil, fmt.Errorf("write cwalk manifest: %w", writeErr)
 		}
@@ -150,6 +160,12 @@ func writeDirectoryRecords(ctx context.Context, database *workingkv.SecureMap, r
 		done <- resultErr
 	}()
 	for record := range records {
+		if resultErr != nil {
+			if record.release != nil {
+				record.release()
+			}
+			continue
+		}
 		encoded, err := json.Marshal(record.names)
 		if err == nil {
 			metrics.ObserveBuffer(uint64(len(manifestKey(record.path)) + len(encoded)))
@@ -158,17 +174,20 @@ func writeDirectoryRecords(ctx context.Context, database *workingkv.SecureMap, r
 		if err == nil {
 			metrics.Committed(1, uint64(len(manifestKey(record.path))+len(encoded)))
 		}
+		if record.release != nil {
+			record.release()
+		}
 		if err != nil {
 			cancel()
 			resultErr = err
-			return
+			continue
 		}
 	}
 }
 
 func walkManifestRoots(
 	ctx context.Context,
-	cancel context.CancelFunc,
+	cancel context.CancelCauseFunc,
 	roots []string,
 	workers int,
 	ignore func(string, os.FileInfo) bool,
@@ -199,7 +218,7 @@ func walkManifestRoots(
 				if err := walkManifestRootBatch(ctx, cancel, roots[index:index+1], budget, ignore, records, walkersMu, walkers, counters); err != nil {
 					failOnce.Do(func() {
 						firstErr = err
-						cancel()
+						cancel(err)
 					})
 					return
 				}
@@ -215,7 +234,7 @@ func walkManifestRoots(
 
 func walkManifestRootBatch(
 	ctx context.Context,
-	cancel context.CancelFunc,
+	cancel context.CancelCauseFunc,
 	roots []string,
 	workers int,
 	ignore func(string, os.FileInfo) bool,
@@ -258,7 +277,7 @@ func walkManifestRootBatch(
 
 func newManifestWalker(
 	ctx context.Context,
-	cancel context.CancelFunc,
+	cancel context.CancelCauseFunc,
 	root string,
 	workers int,
 	ignore func(string, os.FileInfo) bool,
@@ -275,7 +294,7 @@ func newManifestWalker(
 		if relative == "" {
 			resizeOnce.Do(func() {
 				if resizeErr := walker.ResizeWorkers(workers); resizeErr != nil {
-					cancel()
+					cancel(resizeErr)
 				}
 			})
 		}
@@ -284,13 +303,25 @@ func newManifestWalker(
 		}
 		counters.entries.Add(uint64(len(entries)))
 		counters.directories.Add(1)
+		path := filepath.Join(root, filepath.FromSlash(relative))
+		charge := uint64(len(path))*8 + uint64(len(entries))*128 + 1024
+		for _, entry := range entries {
+			charge += uint64(len(entry.Name())) * 8
+		}
+		release, reserveErr := workingstate.Reserve(ctx, charge)
+		if reserveErr != nil {
+			cancel(reserveErr)
+			walker.Stop()
+			return
+		}
 		names := make([]string, len(entries))
 		for index, entry := range entries {
 			names[index] = entry.Name()
 		}
 		select {
-		case records <- directoryRecord{path: filepath.Join(root, filepath.FromSlash(relative)), names: names}:
+		case records <- directoryRecord{path: path, names: names, release: release}:
 		case <-ctx.Done():
+			release()
 			walker.Stop()
 		}
 	}}
@@ -313,6 +344,11 @@ func (manifest *DirectoryManifest) Names(directory string) ([]string, bool, erro
 	if err != nil || !found {
 		return nil, found, err
 	}
+	release, err := workingstate.Reserve(manifest.ctx, uint64(len(value))*3+1024)
+	if err != nil {
+		return nil, false, err
+	}
+	defer release()
 	var names []string
 	if err := json.Unmarshal(value, &names); err != nil {
 		return nil, false, fmt.Errorf("decode cwalk directory %q: %w", directory, err)
@@ -337,6 +373,7 @@ func (manifest *DirectoryManifest) Close() error {
 func (manifest *DirectoryManifest) WorkingState() telemetry.WorkingStateSnapshot {
 	manifest.mutex.Lock()
 	defer manifest.mutex.Unlock()
+	manifest.metrics.SetBackend(manifest.database.Backend())
 	if manifest.closed {
 		return manifest.metrics.Snapshot(0, !manifest.cleanupFailed)
 	}

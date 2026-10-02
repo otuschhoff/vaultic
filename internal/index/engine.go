@@ -233,8 +233,8 @@ func (e *LegacyEngine) ExportLegacy(ctx context.Context, sink LegacySink) error 
 	return sink.Close()
 }
 
-func (*LegacyEngine) Close() error {
-	return nil
+func (engine *LegacyEngine) Close() error {
+	return engine.master.Close()
 }
 
 // Resolve inspects the dedicated backend namespace and validates the manifest.

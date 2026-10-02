@@ -2,10 +2,12 @@ package index
 
 import (
 	"context"
+	"errors"
 	"runtime"
 	"sync"
 
 	"github.com/otuschhoff/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/workingstate"
 )
 
 // ForAllIndexes loads all index files in parallel and calls the given callback.
@@ -26,6 +28,9 @@ func ForAllIndexesWorkers(ctx context.Context, lister vaultic.Lister, repo vault
 	if workerCount == 0 {
 		workerCount = 1
 	}
+	if available, selected := workingstate.Available(ctx); selected {
+		workerCount = min(workerCount, uint(max(uint64(1), available/(16<<20))))
+	}
 	var m sync.Mutex
 	return vaultic.ParallelList(ctx, lister, vaultic.IndexFile, workerCount, func(ctx context.Context, id vaultic.ID, _ int64) error {
 		var err error
@@ -33,7 +38,13 @@ func ForAllIndexesWorkers(ctx context.Context, lister vaultic.Lister, repo vault
 
 		buf, err := repo.LoadUnpacked(ctx, vaultic.IndexFile, id)
 		if err == nil {
-			idx, err = DecodeIndex(buf, id)
+			idx, err = decodeWorkingIndex(ctx, buf, id)
+		}
+		if idx != nil {
+			defer idx.releaseWorking(false)
+		}
+		if errors.Is(err, workingstate.ErrMemoryLimitExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
 		}
 
 		m.Lock()
@@ -57,7 +68,19 @@ func ForAllIndexesInOrder(ctx context.Context, lister vaultic.Lister, repo vault
 	}
 
 	var listed []listedIndex
+	var listedCharge uint64
+	defer func() {
+		if policy, ok := workingstate.PolicyFrom(ctx).(interface{ Release(uint64) }); ok {
+			policy.Release(listedCharge)
+		}
+	}()
 	if err := lister.List(ctx, vaultic.IndexFile, func(id vaultic.ID, size int64) error {
+		if policy, ok := workingstate.PolicyFrom(ctx).(interface{ Reserve(uint64) error }); ok {
+			if err := policy.Reserve(256); err != nil {
+				return err
+			}
+			listedCharge += 256
+		}
 		listed = append(listed, listedIndex{id: id, size: size})
 		return nil
 	}); err != nil {
@@ -68,6 +91,9 @@ func ForAllIndexesInOrder(ctx context.Context, lister vaultic.Lister, repo vault
 	}
 
 	workerCount := min(int(repo.Connections()+uint(runtime.GOMAXPROCS(0))), len(listed))
+	if available, selected := workingstate.Available(ctx); selected {
+		workerCount = min(workerCount, int(max(uint64(1), available/(16<<20))))
+	}
 	workerCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	jobs := make(chan int)
@@ -95,11 +121,14 @@ func ForAllIndexesInOrder(ctx context.Context, lister vaultic.Lister, repo vault
 				buf, err := repo.LoadUnpacked(workerCtx, vaultic.IndexFile, entry.id)
 				var idx *Index
 				if err == nil {
-					idx, err = DecodeIndex(buf, entry.id)
+					idx, err = decodeWorkingIndex(workerCtx, buf, entry.id)
 				}
 				select {
 				case results[sequence] <- loadedIndex{index: idx, err: err}:
 				case <-workerCtx.Done():
+					if idx != nil {
+						idx.releaseWorking(false)
+					}
 					return
 				}
 			}
@@ -117,11 +146,34 @@ func ForAllIndexesInOrder(ctx context.Context, lister vaultic.Lister, repo vault
 			}
 		}
 	}()
+	defer func() {
+		cancel()
+		workers.Wait()
+		for _, result := range results {
+			select {
+			case loaded := <-result:
+				if loaded.index != nil {
+					loaded.index.releaseWorking(false)
+				}
+			default:
+			}
+		}
+	}()
 
 	for sequence, entry := range listed {
 		select {
 		case loaded := <-results[sequence]:
-			if err := fn(entry.id, loaded.index, loaded.err); err != nil {
+			if errors.Is(loaded.err, workingstate.ErrMemoryLimitExceeded) || errors.Is(loaded.err, context.Canceled) || errors.Is(loaded.err, context.DeadlineExceeded) {
+				if loaded.index != nil {
+					loaded.index.releaseWorking(false)
+				}
+				return loaded.err
+			}
+			err := fn(entry.id, loaded.index, loaded.err)
+			if loaded.index != nil {
+				loaded.index.releaseWorking(false)
+			}
+			if err != nil {
 				cancel()
 				workers.Wait()
 				return err
@@ -134,4 +186,21 @@ func ForAllIndexesInOrder(ctx context.Context, lister vaultic.Lister, repo vault
 	}
 	workers.Wait()
 	return nil
+}
+
+func decodeWorkingIndex(ctx context.Context, encoded []byte, id vaultic.ID) (*Index, error) {
+	if workingstate.PolicyFrom(ctx) == nil {
+		return DecodeIndex(encoded, id)
+	}
+	release, err := workingstate.ReserveJSON(ctx, encoded)
+	if err != nil {
+		return nil, err
+	}
+	idx, err := DecodeIndex(encoded, id)
+	if err != nil {
+		release()
+		return nil, err
+	}
+	idx.attachWorking(release, false)
+	return idx, nil
 }

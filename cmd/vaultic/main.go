@@ -260,7 +260,13 @@ func applyProfile(cmd *cobra.Command, globalOptions *global.Options) error {
 	if err := apply("repository", persistentFlags); err != nil {
 		return err
 	}
-	return apply(cmd.Name(), cmd.Flags())
+	if err := apply(cmd.Name(), cmd.Flags()); err != nil {
+		return err
+	}
+	if cmd.Flags().Lookup("working-memory-mode") != nil {
+		return apply("working_memory", cmd.Flags())
+	}
+	return nil
 }
 
 // Distinguish commands that need the password from those that work without,

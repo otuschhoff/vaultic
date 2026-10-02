@@ -41,6 +41,10 @@ type Store struct {
 }
 
 func Open(backend, path string) (*Store, error) {
+	return openLimited(backend, path, 0)
+}
+
+func openLimited(backend, path string, mapLimit int) (*Store, error) {
 	if backend != "pebble" && backend != "bbolt" && backend != "badger" {
 		return nil, ErrInvalid
 	}
@@ -69,7 +73,7 @@ func Open(backend, path string) (*Store, error) {
 	case "pebble":
 		impl, err = openPebble(path)
 	case "bbolt":
-		impl, err = openBolt(path)
+		impl, err = openBoltLimited(path, mapLimit)
 	case "badger":
 		impl, err = openBadger(path)
 	default:

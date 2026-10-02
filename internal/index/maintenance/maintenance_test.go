@@ -1061,7 +1061,7 @@ func TestM3CheckParity(t *testing.T) {
 	}
 	baseline.Resources = (CheckResult{}).Resources
 	baseline.Consistency.OptionsDigest = ""
-	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV} {
+	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV, workingkv.ModeAuto} {
 		t.Run(string(mode), func(t *testing.T) {
 			policy, _ := workingkv.NewPolicy(mode, 64<<20, t.TempDir())
 			ctx := workingkv.WithPolicy(t.Context(), policy)
@@ -1093,6 +1093,30 @@ func TestPackTypeSummaryMatchesClassifier(t *testing.T) {
 			t.Fatalf("types=%v got=%v want=%v", types, got, want)
 		}
 	}
+}
+
+func TestM4FindingsAdmissionAndReplacement(t *testing.T) {
+	policy, _ := workingkv.NewPolicy(workingkv.ModeRAM, 4096, "")
+	ctx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+	account := &findingBudget{policy: policy, cancel: cancel}
+	result := CheckResult{findingBudget: account}
+	for number := 999; number >= 0; number-- {
+		addFinding(&result, 2, Finding{Kind: "test", Key: fmt.Sprintf("%04d", number)})
+	}
+	if account.err != nil || len(result.Findings) != 2 || result.Findings[0].Key != "0000" || result.Findings[1].Key != "0001" {
+		t.Fatal(result.Findings, account.err)
+	}
+	for number := 0; number < 100; number++ {
+		addFinding(&result, 0, Finding{Key: fmt.Sprint(number)})
+	}
+	if !errors.Is(account.err, workingkv.ErrWorkingMemoryLimitExceeded) || !errors.Is(context.Cause(ctx), workingkv.ErrWorkingMemoryLimitExceeded) {
+		t.Fatal("unlimited findings silently succeeded", account.err)
+	}
+	if account.charged != policy.Budget().Used || policy.Budget().Peak > policy.Budget().Limit {
+		t.Fatal("findings accounting diverged", policy.Budget(), account.charged)
+	}
+	policy.Release(account.charged)
 }
 
 func TestAddFindingSelectsCanonicalBoundedPrefix(t *testing.T) {

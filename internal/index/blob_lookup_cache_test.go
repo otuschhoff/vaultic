@@ -664,7 +664,7 @@ func TestM3OverlayParity(t *testing.T) {
 	for _, offset := range []uint{0, 64, 128} {
 		idx.StorePack(vaultic.NewRandomID(), pack.Blobs{{BlobHandle: handle, Offset: offset, Length: 32, UncompressedLength: 64}})
 	}
-	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV} {
+	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV, workingkv.ModeAuto} {
 		t.Run(string(mode), func(t *testing.T) {
 			root := t.TempDir()
 			policy, _ := workingkv.NewPolicy(mode, 4<<20, root)
@@ -708,7 +708,7 @@ func TestM3OverlayParity(t *testing.T) {
 }
 
 func TestM3LookupCapacity(t *testing.T) {
-	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV} {
+	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV, workingkv.ModeAuto} {
 		t.Run(string(mode), func(t *testing.T) {
 			root := t.TempDir()
 			policy, _ := workingkv.NewPolicy(mode, 4<<20, root)
@@ -730,6 +730,36 @@ func TestM3LookupCapacity(t *testing.T) {
 				t.Fatal("lookup reservation leaked")
 			}
 		})
+	}
+}
+
+func TestM4LookupPressureReleasesOnlyCache(t *testing.T) {
+	root := t.TempDir()
+	policy, _ := workingkv.NewPolicy(workingkv.ModeRAM, 4<<20, root)
+	ctx := workingkv.WithPolicy(t.Context(), policy)
+	lookup, _, err := NewSpillingBlobLookupContext(ctx, &testBlobLookupSession{ctx: ctx}, root, 64<<20, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lookup.Close()
+	idx := legacyindex.NewIndex()
+	handle := vaultic.NewRandomBlobHandle()
+	idx.StorePack(vaultic.NewRandomID(), pack.Blobs{{BlobHandle: handle, Length: 4}})
+	if err := lookup.written.StoreIndex(ctx, idx); err != nil {
+		t.Fatal(err)
+	}
+	before := policy.Budget().Used
+	lookup.evictWorkingCache()
+	if policy.Budget().Used >= before {
+		t.Fatal("eviction released no capacity")
+	}
+	locations, err := lookup.written.lookup(ctx, handle, false)
+	if err != nil || len(locations) != 1 {
+		t.Fatal("eviction lost sole-copy overlay", err)
+	}
+	lookup.Close()
+	if policy.Budget().Used != 0 {
+		t.Fatal("evicted cache close double release/leak", policy.Budget())
 	}
 }
 

@@ -52,14 +52,19 @@ Exit status is 12 if the password is incorrect.
 		GroupID:           cmdGroupDefault,
 		DisableAutoGenTag: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			summary, err := runCheck(cmd.Context(), options, *globalOptions, args, globalOptions.Term)
+			ctx, stop, err := globalOptions.PrepareWorkingMemory(cmd.Context(), cmd.Flags(), globalOptions.Term)
+			if err != nil {
+				return err
+			}
+			defer stop()
+			summary, err := runCheck(ctx, options, *globalOptions, args, globalOptions.Term)
 			if globalOptions.JSON {
 				if err != nil && summary.NumErrors == 0 {
 					summary.NumErrors = 1
 				}
 				globalOptions.Term.Print(ui.ToJSONString(summary))
 			}
-			return err
+			return global.WorkingMemoryError(err, ctx)
 		},
 		PreRunE: func(_ *cobra.Command, _ []string) error {
 			finalizeSnapshotFilter(&options.SnapshotFilter)
@@ -67,6 +72,7 @@ Exit status is 12 if the password is incorrect.
 		},
 	}
 	options.AddFlags(cmd.Flags())
+	globalOptions.AddWorkingMemoryFlags(cmd.Flags())
 	return cmd
 }
 

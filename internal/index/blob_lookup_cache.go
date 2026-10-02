@@ -14,6 +14,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 	"github.com/otuschhoff/vaultic/internal/workingkv"
+	"github.com/otuschhoff/vaultic/internal/workingstate"
 )
 
 const blobLookupCacheEntryBytes = 192
@@ -29,28 +30,32 @@ type blobLookupResult struct {
 }
 
 type blobLookupBatch struct {
-	done  chan struct{}
-	sizes []vaultic.BlobSize
-	err   error
+	done    chan struct{}
+	sizes   []vaultic.BlobSize
+	err     error
+	release func()
 }
 
 type CachedBlobLookup struct {
-	ctx       context.Context
-	cancel    context.CancelCauseFunc
-	session   blobLookupSession
-	local     *LegacyEngine
-	cache     *lru.Cache[vaultic.BlobHandle, vaultic.BlobSize]
-	slots     chan struct{}
-	mutex     sync.Mutex
-	pending   map[vaultic.BlobHandle]blobLookupResult
-	workers   sync.WaitGroup
-	written   *writtenBlobStore
-	stats     blobLookupCounters
-	capacity  int
-	policy    *workingkv.Policy
-	charge    uint64
-	closeOnce sync.Once
-	closeErr  error
+	ctx               context.Context
+	cancel            context.CancelCauseFunc
+	session           blobLookupSession
+	local             *LegacyEngine
+	cache             *lru.Cache[vaultic.BlobHandle, vaultic.BlobSize]
+	cacheMutex        sync.RWMutex
+	cacheCharge       uint64
+	slots             chan struct{}
+	mutex             sync.Mutex
+	pending           map[vaultic.BlobHandle]blobLookupResult
+	workers           sync.WaitGroup
+	written           *writtenBlobStore
+	stats             blobLookupCounters
+	capacity          int
+	policy            *workingkv.Policy
+	charge            uint64
+	closeOnce         sync.Once
+	closeErr          error
+	unregisterEvictor func()
 }
 
 type blobLookupCounters struct {
@@ -99,6 +104,12 @@ func (lookup *CachedBlobLookup) Stats() BlobLookupStats {
 }
 
 func (lookup *CachedBlobLookup) cachedSize(handle vaultic.BlobHandle) (vaultic.BlobSize, bool) {
+	lookup.cacheMutex.RLock()
+	defer lookup.cacheMutex.RUnlock()
+	if lookup.cache == nil {
+		lookup.stats.misses.Add(1)
+		return vaultic.BlobSize{}, false
+	}
 	size, found := lookup.cache.Get(handle)
 	if found {
 		lookup.stats.hits.Add(1)
@@ -112,6 +123,11 @@ func (lookup *CachedBlobLookup) cachedSize(handle vaultic.BlobHandle) (vaultic.B
 }
 
 func (lookup *CachedBlobLookup) cacheSize(handle vaultic.BlobHandle, size vaultic.BlobSize) {
+	lookup.cacheMutex.RLock()
+	defer lookup.cacheMutex.RUnlock()
+	if lookup.cache == nil {
+		return
+	}
 	if lookup.cache.Add(handle, size) {
 		lookup.stats.evictions.Add(1)
 	}
@@ -338,9 +354,25 @@ func NewCachedBlobLookupContext(parent context.Context, session blobLookupSessio
 		owner = workingkv.WithPolicy(owner, policy)
 	}
 	ctx, cancel := context.WithCancelCause(owner)
-	return &CachedBlobLookup{ctx: ctx, cancel: cancel, session: session, local: local, cache: cache,
+	lookup := &CachedBlobLookup{ctx: ctx, cancel: cancel, session: session, local: local, cache: cache,
 		slots: make(chan struct{}, concurrency), pending: make(map[vaultic.BlobHandle]blobLookupResult),
-		capacity: budgetBytes / blobLookupCacheEntryBytes, policy: policy, charge: charge}, nil
+		capacity: budgetBytes / blobLookupCacheEntryBytes, policy: policy, charge: charge}
+	if policy != nil {
+		lookup.cacheCharge = uint64(lookup.capacity) * blobLookupCacheEntryBytes
+		lookup.unregisterEvictor = policy.RegisterEvictor(lookup.evictWorkingCache)
+	}
+	return lookup, nil
+}
+
+func (lookup *CachedBlobLookup) evictWorkingCache() {
+	lookup.cacheMutex.Lock()
+	defer lookup.cacheMutex.Unlock()
+	lookup.cache = nil
+	if lookup.policy != nil && lookup.cacheCharge != 0 {
+		lookup.policy.Release(lookup.cacheCharge)
+		lookup.charge -= lookup.cacheCharge
+		lookup.cacheCharge = 0
+	}
 }
 
 func (lookup *CachedBlobLookup) LookupSizesContext(ctx context.Context, handles []vaultic.BlobHandle) ([]vaultic.BlobSize, error) {
@@ -350,6 +382,11 @@ func (lookup *CachedBlobLookup) LookupSizesContext(ctx context.Context, handles 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	release, err := workingstate.Reserve(lookup.ctx, uint64(len(handles))*512+1024)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	lookup.mutex.Lock()
 	if err := context.Cause(lookup.ctx); err != nil {
 		lookup.mutex.Unlock()
@@ -403,6 +440,12 @@ func (lookup *CachedBlobLookup) LookupSizesContext(ctx context.Context, handles 
 		<-lookup.slots
 		return nil, err
 	}
+	missingRelease, reserveErr := workingstate.Reserve(lookup.ctx, uint64(len(handles))*512+1024)
+	if reserveErr != nil {
+		lookup.mutex.Unlock()
+		<-lookup.slots
+		return nil, reserveErr
+	}
 	for ordinal, handle := range handles {
 		if results[ordinal].Found {
 			continue
@@ -414,7 +457,7 @@ func (lookup *CachedBlobLookup) LookupSizesContext(ctx context.Context, handles 
 		result, found := lookup.pending[handle]
 		if !found {
 			if batch == nil {
-				batch = &blobLookupBatch{done: make(chan struct{})}
+				batch = &blobLookupBatch{done: make(chan struct{}), release: missingRelease}
 			}
 			result = blobLookupResult{batch: batch, ordinal: len(missing)}
 			lookup.pending[handle] = result
@@ -426,6 +469,7 @@ func (lookup *CachedBlobLookup) LookupSizesContext(ctx context.Context, handles 
 		lookup.workers.Add(1)
 		go lookup.fetch(missing, batch)
 	} else {
+		missingRelease()
 		<-lookup.slots
 	}
 	lookup.mutex.Unlock()
@@ -465,6 +509,9 @@ func (lookup *CachedBlobLookup) LookupSizesContext(ctx context.Context, handles 
 
 func (lookup *CachedBlobLookup) fetch(handles []vaultic.BlobHandle, batch *blobLookupBatch) {
 	defer lookup.workers.Done()
+	if batch.release != nil {
+		defer batch.release()
+	}
 	defer func() { <-lookup.slots }()
 	started := time.Now()
 	lookup.stats.sizeRPCs.Add(1)
@@ -531,13 +578,22 @@ func (lookup *CachedBlobLookup) Close() error {
 		lookup.cancel(context.Canceled)
 		lookup.mutex.Unlock()
 		lookup.workers.Wait()
-		lookup.cache.Purge()
+		if lookup.unregisterEvictor != nil {
+			lookup.unregisterEvictor()
+		}
+		lookup.cacheMutex.Lock()
+		if lookup.cache != nil {
+			lookup.cache.Purge()
+		}
 		if lookup.written != nil {
-			lookup.closeErr = lookup.written.Close()
+			lookup.closeErr = errors.Join(lookup.written.Close(), lookup.local.Close())
 		}
 		if lookup.policy != nil {
 			lookup.policy.Release(lookup.charge)
+			lookup.charge = 0
+			lookup.cacheCharge = 0
 		}
+		lookup.cacheMutex.Unlock()
 	})
 	return lookup.closeErr
 }

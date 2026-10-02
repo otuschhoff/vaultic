@@ -623,14 +623,20 @@ func newIndexImportCommand(globalOptions *global.Options) *cobra.Command {
 		Args:              cobra.NoArgs,
 		DisableAutoGenTag: true,
 		RunE: func(command *cobra.Command, _ []string) error {
-			result, err := runIndexImport(command.Context(), options, *globalOptions, globalOptions.Term)
+			ctx, stop, err := globalOptions.PrepareWorkingMemory(command.Context(), command.Flags(), globalOptions.Term)
+			if err != nil {
+				return err
+			}
+			defer stop()
+			result, err := runIndexImport(ctx, options, *globalOptions, globalOptions.Term)
 			if globalOptions.JSON {
 				globalOptions.Term.Print(ui.ToJSONString(result))
 			}
-			return err
+			return global.WorkingMemoryError(err, ctx)
 		},
 	}
 	flags := command.Flags()
+	globalOptions.AddWorkingMemoryFlags(flags)
 	options.Daemon.AddFlags(flags)
 	flags.BoolVar(&options.Resume, "resume", true, "skip sources with durable import checkpoints")
 	flags.BoolVar(
@@ -1318,13 +1324,19 @@ func newIndexCheckCommand(globalOptions *global.Options) *cobra.Command {
 		Args:              cobra.NoArgs,
 		DisableAutoGenTag: true,
 		RunE: func(command *cobra.Command, _ []string) error {
-			result, err := runIndexCheck(command.Context(), options, *globalOptions, globalOptions.Term)
+			ctx, stop, err := globalOptions.PrepareWorkingMemory(command.Context(), command.Flags(), globalOptions.Term)
+			if err != nil {
+				return err
+			}
+			defer stop()
+			result, err := runIndexCheck(ctx, options, *globalOptions, globalOptions.Term)
 			if globalOptions.JSON {
 				globalOptions.Term.Print(ui.ToJSONString(result))
 			}
-			return err
+			return global.WorkingMemoryError(err, ctx)
 		},
 	}
+	globalOptions.AddWorkingMemoryFlags(command.Flags())
 	options.Daemon.AddFlags(command.Flags())
 	command.Flags().UintVar(&options.MaxFindings, "max-findings", 100, "maximum detailed differences in the summary (zero is unlimited)")
 	command.Flags().StringVar(&options.Memory, "check-memory", "auto", "memory budget for index-check buffers (bytes or auto)")

@@ -149,6 +149,16 @@ func normalizeSection(name string, values map[string]any) error {
 		}
 	}
 	switch name {
+	case "working_memory":
+		allowed := map[string]string{"mode": "working-memory-mode", "ram_limit": "working-memory-ram-limit", "scratch": "working-memory-scratch", "disk_budget": "working-memory-disk-budget", "reserve": "working-memory-reserve"}
+		for key := range values {
+			if _, ok := allowed[key]; !ok {
+				return fmt.Errorf("unsupported working_memory field %q", key)
+			}
+		}
+		for from, to := range allowed {
+			alias(from, to)
+		}
 	case "repository":
 		alias("repository", "repo")
 		if value, ok := values["set-compression"]; ok {
@@ -359,6 +369,10 @@ func ApplyValues(values map[string]any, flags *pflag.FlagSet, envLookup func(str
 		if err := flag.Value.Set(text); err != nil {
 			return fmt.Errorf("option %s: %w", key, err)
 		}
+		if flag.Annotations == nil {
+			flag.Annotations = make(map[string][]string)
+		}
+		flag.Annotations["profile-explicit"] = []string{"true"}
 	}
 	return nil
 }
