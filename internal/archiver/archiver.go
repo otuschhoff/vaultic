@@ -18,6 +18,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/feature"
 	"github.com/otuschhoff/vaultic/internal/fs"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/workingkv"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -1062,7 +1063,10 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, snapshotOp
 	if err != nil {
 		return nil, vaultic.ID{}, nil, err
 	}
-	closeManifest := arch.prepareCWalkManifest(ctx, targets)
+	closeManifest, err := arch.prepareCWalkManifest(ctx, targets)
+	if err != nil {
+		return nil, vaultic.ID{}, nil, err
+	}
 	defer closeManifest()
 	if err := ctx.Err(); err != nil {
 		return nil, vaultic.ID{}, nil, err
@@ -1194,20 +1198,23 @@ func (arch *Archiver) saveSnapshotTree(ctx context.Context, tree *tree, snapshot
 	return rootTreeID, err
 }
 
-func (arch *Archiver) prepareCWalkManifest(ctx context.Context, targets []string) func() {
+func (arch *Archiver) prepareCWalkManifest(ctx context.Context, targets []string) (func(), error) {
 	if arch.Options.CWalkConcurrency <= 0 || (!fs.IsLocal(arch.FS) && !fs.IsNFS(arch.FS)) {
-		return func() {}
+		return func() {}, nil
 	}
 	if arch.Options.CWalkIncremental || !fs.IsLocal(arch.FS) {
 		stream, err := crawl.NewDirectoryStreamWithFS(ctx, arch.Options.CWalkConcurrency, min(64, arch.Options.CWalkConcurrency*2), arch.FS)
 		if err != nil {
-			return func() {}
+			if workingkv.PolicyFrom(ctx) != nil {
+				return nil, err
+			}
+			return func() {}, nil
 		}
 		arch.cwalkManifest = stream
 		return func() {
 			_ = stream.Close()
 			arch.cwalkManifest = nil
-		}
+		}, nil
 	}
 	queueCapacity := arch.Options.CWalkQueue
 	if queueCapacity <= 0 {
@@ -1247,12 +1254,15 @@ func (arch *Archiver) prepareCWalkManifest(ctx context.Context, targets []string
 		arch.Options.CWalkProgress,
 	)
 	if err != nil {
+		if workingkv.PolicyFrom(ctx) != nil {
+			return nil, err
+		}
 		debug.Log("cwalk manifest unavailable, using sequential traversal: %v", err)
-		return func() {}
+		return func() {}, nil
 	}
 	arch.cwalkManifest = manifest
 	return func() {
 		_ = manifest.Close() // The walk result is already fixed; manifest removal is temporary cleanup.
 		arch.cwalkManifest = nil
-	}
+	}, nil
 }

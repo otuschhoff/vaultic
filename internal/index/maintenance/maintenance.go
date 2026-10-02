@@ -24,6 +24,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	monitor "github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/workingkv"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -736,6 +737,9 @@ func CheckWithOptions(
 	if memoryBytes == 0 {
 		memoryBytes = 64 << 20
 	}
+	if policy := workingkv.PolicyFrom(ctx); policy != nil {
+		memoryBytes = min(memoryBytes, policy.Budget().Limit)
+	}
 	minimumMemory := locationTupleMemorySize
 	if !options.LegacyOnly && !options.SlateDBOnly {
 		minimumMemory *= 4
@@ -744,6 +748,10 @@ func CheckWithOptions(
 		minimumMemory = max(minimumMemory, uint64(analyticsWorkspaceSpools*(schema.MaxPathIndexPathBytes+1024)))
 	}
 	if memoryBytes < minimumMemory {
+		if policy := workingkv.PolicyFrom(ctx); policy != nil {
+			state := policy.Budget()
+			return CheckResult{}, &workingkv.MemoryLimitError{Limit: state.Limit, Used: state.Used, Requested: minimumMemory}
+		}
 		return CheckResult{}, fmt.Errorf("checker memory limit must be at least %d bytes", minimumMemory)
 	}
 	tempMaxBytes := options.TempMaxBytes

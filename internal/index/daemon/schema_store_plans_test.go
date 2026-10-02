@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"bytes"
+	"context"
+	"github.com/otuschhoff/vaultic/internal/workingkv"
 	"math"
 	"testing"
 
@@ -29,6 +31,26 @@ func TestFreshImportLookupHintsNeverForgetCommittedIDs(t *testing.T) {
 	}
 	if _, absent := hints.blobsAbsent[secondBlob]; !absent {
 		t.Fatal("new blob did not receive an absence hint")
+	}
+}
+
+func TestM3FreshImportPolicyFallback(t *testing.T) {
+	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV} {
+		t.Run(string(mode), func(t *testing.T) {
+			policy, _ := workingkv.NewPolicy(mode, 1024, "")
+			store := &SchemaStore{}
+			store.EnableFreshLegacyImportContext(workingkv.WithPolicy(context.Background(), policy))
+			stats := store.freshImportSeen.stats()
+			if !stats.FallbackToDatabase || stats.Bytes != 0 || stats.Layers != 0 {
+				t.Fatal("filter bypassed policy", stats)
+			}
+			if !store.freshImportSeen.possiblyContains(schema.ID{}) {
+				t.Fatal("authoritative read skipped")
+			}
+			if err := store.EnableDeferredLegacyImportCleanup(); err != nil {
+				t.Fatal("fresh import receipt semantics changed", err)
+			}
+		})
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/otuschhoff/vaultic/internal/workingkv"
 	"os"
 	"reflect"
 	"runtime/pprof"
@@ -1047,6 +1048,33 @@ func TestCheckWorkerCountsPreserveResults(t *testing.T) {
 		} else if !reflect.DeepEqual(result, baseline) {
 			t.Fatalf("workers=%d result differs\ngot:  %+v\nwant: %+v", workers, result, baseline)
 		}
+	}
+}
+
+func TestM3CheckParity(t *testing.T) {
+	store, _, _ := newMemoryStore(t, schema.PackPublished)
+	store.set(t, schema.PackAggregateKey(schema.AggregateAll), schema.PackAggregate{PackCount: 99})
+	store.set(t, schema.AnalyticsMetadataKey(), schema.AnalyticsMetadataRecord{Enabled: false})
+	baseline, err := CheckWithOptions(t.Context(), nil, store, CheckOptions{SlateDBOnly: true, MaxFindings: 10, Workers: 2, RPCConcurrency: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline.Resources = (CheckResult{}).Resources
+	baseline.Consistency.OptionsDigest = ""
+	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV} {
+		t.Run(string(mode), func(t *testing.T) {
+			policy, _ := workingkv.NewPolicy(mode, 64<<20, t.TempDir())
+			ctx := workingkv.WithPolicy(t.Context(), policy)
+			result, err := CheckWithOptions(ctx, nil, store, CheckOptions{SlateDBOnly: true, MaxFindings: 10, Workers: 2, RPCConcurrency: 2})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result.Resources = baseline.Resources
+			result.Consistency.OptionsDigest = ""
+			if !reflect.DeepEqual(result, baseline) {
+				t.Fatal("check findings differ", result, baseline)
+			}
+		})
 	}
 }
 func TestPackTypeSummaryMatchesClassifier(t *testing.T) {

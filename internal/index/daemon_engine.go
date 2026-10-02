@@ -276,7 +276,7 @@ func NewBackupDaemonEngine(ctx context.Context, client *daemon.Client, options B
 	if err != nil {
 		return nil, err
 	}
-	lookup, local, err := NewSpillingBlobLookup(session, options.ScratchDirectory, options.CacheBytes, options.Concurrency)
+	lookup, local, err := NewSpillingBlobLookupContext(ctx, session, options.ScratchDirectory, options.CacheBytes, options.Concurrency)
 	if err != nil {
 		return nil, errors.Join(err, session.Close(context.WithoutCancel(ctx)))
 	}

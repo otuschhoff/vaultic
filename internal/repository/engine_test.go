@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/otuschhoff/vaultic/internal/workingkv"
 	"os"
 	"sync/atomic"
 	"testing"
@@ -263,7 +264,18 @@ func TestAuthoritativeCatalogLoadStreamsAndCleansUp(t *testing.T) {
 }
 
 func TestCachedAuthoritativeLookupWithPublishedOverlay(t *testing.T) {
+	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV} {
+		t.Run(string(mode), func(t *testing.T) { testCachedAuthoritativeLookupWithPublishedOverlay(t, mode) })
+	}
+}
+
+func testCachedAuthoritativeLookupWithPublishedOverlay(t *testing.T, mode workingkv.Mode) {
 	ctx := t.Context()
+	policy, err := workingkv.NewPolicy(mode, 16<<20, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx = workingkv.WithPolicy(ctx, policy)
 	client, err := daemon.Ensure(ctx, daemon.Options{
 		Socket: gcTestSocket(t), RepositoryID: t.Name(), DaemonPath: testGCDaemonPath(t),
 		DataDir: t.TempDir(), ObjectStore: "memory",

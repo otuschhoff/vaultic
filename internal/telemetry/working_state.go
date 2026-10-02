@@ -44,7 +44,7 @@ func NewWorkingStateMetric(kind WorkingStateKind, backend string) *WorkingStateM
 		panic("unsupported working-state kind")
 	}
 	switch backend {
-	case "pebble", "encrypted_sort", "streaming":
+	case "pebble", "bbolt", "ram", "encrypted_sort", "streaming":
 	default:
 		panic("unsupported working-state backend")
 	}

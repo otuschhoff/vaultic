@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"sort"
@@ -28,6 +29,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	monitor "github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/workingkv"
 )
 
 type memorySource struct {
@@ -3606,6 +3608,87 @@ func TestImportClassifiesMixedPack(t *testing.T) {
 	if result.PacksImported != 1 || len(store.imports) != 1 || store.imports[0].Record.Type != schema.PackMixed ||
 		store.imports[0].Record.BlobCount != 2 {
 		t.Fatalf("mixed pack import = %#v, result=%#v", store.imports, result)
+	}
+}
+
+func TestM3ImportParity(t *testing.T) {
+	indexID, packID := vaultic.NewRandomID(), vaultic.NewRandomID()
+	idx := index.NewIndex()
+	idx.StorePack(packID, pack.Blobs{{BlobHandle: vaultic.NewRandomBlobHandle(), Length: 8}, {BlobHandle: vaultic.NewRandomBlobHandle(), Offset: 8, Length: 8}})
+	var encoded bytes.Buffer
+	if err := idx.Encode(&encoded); err != nil {
+		t.Fatal(err)
+	}
+	source := &memorySource{indexes: map[vaultic.ID][]byte{indexID: encoded.Bytes()}}
+	var baseline map[string][]byte
+	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV} {
+		t.Run(string(mode), func(t *testing.T) {
+			root := t.TempDir()
+			policy, _ := workingkv.NewPolicy(mode, 4<<20, root)
+			ctx := workingkv.WithPolicy(t.Context(), policy)
+			store := newMemoryStore()
+			result, err := Import(ctx, source, fixedStatter{size: 20}, store, Options{Resume: true})
+			if err != nil || result.PacksImported != 1 || result.BlobsImported != 2 {
+				t.Fatal(result, err)
+			}
+			if baseline == nil {
+				baseline = store.values
+			} else if !reflect.DeepEqual(baseline, store.values) {
+				t.Fatal("imported records/checkpoints differ")
+			}
+			result, err = Import(ctx, source, fixedStatter{size: 20}, store, Options{Resume: true})
+			if err != nil || result.IndexesResumed != 1 {
+				t.Fatal("resume mismatch", result, err)
+			}
+			entries, _ := os.ReadDir(root)
+			if len(entries) != 0 {
+				t.Fatal("streaming import used scratch")
+			}
+			if policy.Budget().Used != 0 {
+				t.Fatal("import reservation survived completion")
+			}
+		})
+	}
+	policy, _ := workingkv.NewPolicy(workingkv.ModeRAM, 1, "")
+	store := newMemoryStore()
+	_, err := Import(workingkv.WithPolicy(t.Context(), policy), source, fixedStatter{size: 20}, store, Options{})
+	if !errors.Is(err, workingkv.ErrWorkingMemoryLimitExceeded) || len(store.imports) != 0 {
+		t.Fatal("oversize import admitted", err)
+	}
+}
+
+func TestM3SplitImportParity(t *testing.T) {
+	indexID := vaultic.NewRandomID()
+	packIDs := []vaultic.ID{vaultic.NewRandomID(), vaultic.NewRandomID(), vaultic.NewRandomID(), vaultic.NewRandomID()}
+	source := &memorySource{indexes: map[vaultic.ID][]byte{indexID: encodedIndexWithPacks(t, packIDs)}}
+	var baseline map[string][]byte
+	var baselineOrder []uint64
+	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV} {
+		t.Run(string(mode), func(t *testing.T) {
+			policy, _ := workingkv.NewPolicy(mode, 4<<20, t.TempDir())
+			store := newSplitStore()
+			ctx := workingkv.WithPolicy(t.Context(), policy)
+			result, err := Import(ctx, source, fixedStatter{size: 16}, store, Options{Resume: true, PublicationLanes: 2, PacksPerTransaction: 1})
+			if err != nil || result.PacksImported != 4 || result.IndexesImported != 1 {
+				t.Fatal("split import", result, err)
+			}
+			if baseline == nil {
+				baseline = store.values
+			} else if !reflect.DeepEqual(store.values, baseline) {
+				t.Fatal("split records/checkpoint differ")
+			}
+			if len(store.reducedOrder) != 4 {
+				t.Fatal("reduction order incomplete")
+			}
+			if baselineOrder == nil {
+				baselineOrder = append([]uint64(nil), store.reducedOrder...)
+			} else if !slices.Equal(baselineOrder, store.reducedOrder) {
+				t.Fatal("reduction order differs between modes")
+			}
+			if policy.Budget().Used != 0 {
+				t.Fatal("split preparation reservation leaked")
+			}
+		})
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/workingkv"
 )
 
 const blobLookupCacheEntryBytes = 192
@@ -34,18 +35,22 @@ type blobLookupBatch struct {
 }
 
 type CachedBlobLookup struct {
-	ctx      context.Context
-	cancel   context.CancelCauseFunc
-	session  blobLookupSession
-	local    *LegacyEngine
-	cache    *lru.Cache[vaultic.BlobHandle, vaultic.BlobSize]
-	slots    chan struct{}
-	mutex    sync.Mutex
-	pending  map[vaultic.BlobHandle]blobLookupResult
-	workers  sync.WaitGroup
-	written  *writtenBlobStore
-	stats    blobLookupCounters
-	capacity int
+	ctx       context.Context
+	cancel    context.CancelCauseFunc
+	session   blobLookupSession
+	local     *LegacyEngine
+	cache     *lru.Cache[vaultic.BlobHandle, vaultic.BlobSize]
+	slots     chan struct{}
+	mutex     sync.Mutex
+	pending   map[vaultic.BlobHandle]blobLookupResult
+	workers   sync.WaitGroup
+	written   *writtenBlobStore
+	stats     blobLookupCounters
+	capacity  int
+	policy    *workingkv.Policy
+	charge    uint64
+	closeOnce sync.Once
+	closeErr  error
 }
 
 type blobLookupCounters struct {
@@ -132,12 +137,19 @@ func (lookup *CachedBlobLookup) Error() error {
 }
 
 func NewSpillingBlobLookup(session blobLookupSession, directory string, budgetBytes, concurrency int) (*CachedBlobLookup, *LegacyEngine, error) {
-	written, err := newWrittenBlobStore(directory)
+	if session == nil {
+		return nil, nil, workingkv.ErrInvalid
+	}
+	return NewSpillingBlobLookupContext(session.Context(), session, directory, budgetBytes, concurrency)
+}
+
+func NewSpillingBlobLookupContext(ctx context.Context, session blobLookupSession, directory string, budgetBytes, concurrency int) (*CachedBlobLookup, *LegacyEngine, error) {
+	written, err := newWrittenBlobStoreContext(ctx, directory)
 	if err != nil {
 		return nil, nil, err
 	}
 	local := NewLegacyEngine(legacyindex.NewSpillingMasterIndex(written.StoreIndex))
-	lookup, err := NewCachedBlobLookup(session, local, budgetBytes, concurrency)
+	lookup, err := NewCachedBlobLookupContext(ctx, session, local, budgetBytes, concurrency)
 	if err != nil {
 		return nil, nil, errors.Join(err, written.Close())
 	}
@@ -288,20 +300,47 @@ func (lookup *CachedBlobLookup) LookupContext(ctx context.Context, handle vaulti
 }
 
 func NewCachedBlobLookup(session blobLookupSession, local *LegacyEngine, budgetBytes, concurrency int) (*CachedBlobLookup, error) {
+	if session == nil {
+		return nil, workingkv.ErrInvalid
+	}
+	return NewCachedBlobLookupContext(session.Context(), session, local, budgetBytes, concurrency)
+}
+
+func NewCachedBlobLookupContext(parent context.Context, session blobLookupSession, local *LegacyEngine, budgetBytes, concurrency int) (*CachedBlobLookup, error) {
 	if session == nil || local == nil || budgetBytes < blobLookupCacheEntryBytes || concurrency < 1 {
 		return nil, fmt.Errorf("blob lookup cache requires a session, write index, positive budget and concurrency")
 	}
 	if err := context.Cause(session.Context()); err != nil {
 		return nil, err
 	}
+	policy := workingkv.PolicyFrom(parent)
+	var charge uint64
+	if policy != nil {
+		budgetBytes = int(min(uint64(budgetBytes), policy.Budget().Limit/8))
+		if budgetBytes < blobLookupCacheEntryBytes {
+			state := policy.Budget()
+			return nil, &workingkv.MemoryLimitError{Limit: state.Limit, Used: state.Used, Requested: blobLookupCacheEntryBytes}
+		}
+		charge = uint64(budgetBytes/blobLookupCacheEntryBytes)*blobLookupCacheEntryBytes + 512 + uint64(concurrency)*128
+		if err := policy.Reserve(charge); err != nil {
+			return nil, err
+		}
+	}
 	cache, err := lru.New[vaultic.BlobHandle, vaultic.BlobSize](budgetBytes / blobLookupCacheEntryBytes)
 	if err != nil {
+		if policy != nil {
+			policy.Release(charge)
+		}
 		return nil, err
 	}
-	ctx, cancel := context.WithCancelCause(session.Context())
+	owner := session.Context()
+	if policy != nil {
+		owner = workingkv.WithPolicy(owner, policy)
+	}
+	ctx, cancel := context.WithCancelCause(owner)
 	return &CachedBlobLookup{ctx: ctx, cancel: cancel, session: session, local: local, cache: cache,
 		slots: make(chan struct{}, concurrency), pending: make(map[vaultic.BlobHandle]blobLookupResult),
-		capacity: budgetBytes / blobLookupCacheEntryBytes}, nil
+		capacity: budgetBytes / blobLookupCacheEntryBytes, policy: policy, charge: charge}, nil
 }
 
 func (lookup *CachedBlobLookup) LookupSizesContext(ctx context.Context, handles []vaultic.BlobHandle) ([]vaultic.BlobSize, error) {
@@ -487,13 +526,18 @@ func (lookup *CachedBlobLookup) AddPendingContext(ctx context.Context, handle va
 }
 
 func (lookup *CachedBlobLookup) Close() error {
-	lookup.mutex.Lock()
-	lookup.cancel(context.Canceled)
-	lookup.mutex.Unlock()
-	lookup.workers.Wait()
-	lookup.cache.Purge()
-	if lookup.written != nil {
-		return lookup.written.Close()
-	}
-	return nil
+	lookup.closeOnce.Do(func() {
+		lookup.mutex.Lock()
+		lookup.cancel(context.Canceled)
+		lookup.mutex.Unlock()
+		lookup.workers.Wait()
+		lookup.cache.Purge()
+		if lookup.written != nil {
+			lookup.closeErr = lookup.written.Close()
+		}
+		if lookup.policy != nil {
+			lookup.policy.Release(lookup.charge)
+		}
+	})
+	return lookup.closeErr
 }

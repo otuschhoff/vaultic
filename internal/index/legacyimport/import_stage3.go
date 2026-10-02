@@ -113,9 +113,12 @@ func importPacksStage3Sources(
 			)
 		}()
 	}
-	go dispatchPackJobs(
-		workerCtx, jobs, released, packs, pipelineOptions.preparedBytes, pipelineOptions.packsPerTransaction,
-	)
+	dispatchDone := make(chan struct{})
+	go func() {
+		defer close(dispatchDone)
+		dispatchPackJobs(workerCtx, jobs, released, packs, pipelineOptions.preparedBytes, pipelineOptions.packsPerTransaction)
+	}()
+	defer func() { cancel(); group.Wait(); <-dispatchDone }()
 	go func() {
 		group.Wait()
 		close(prepared)

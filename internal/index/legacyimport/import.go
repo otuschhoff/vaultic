@@ -16,6 +16,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 	legacyindex "github.com/otuschhoff/vaultic/internal/repository/index"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/workingkv"
 )
 
 var (
@@ -184,6 +185,7 @@ type packPreparation struct {
 type packJob struct {
 	index         int
 	reservedBytes uint64
+	err           error
 }
 
 type packBatch struct {
@@ -249,6 +251,11 @@ type packPipelineStats struct {
 
 //nolint:funlen,gocognit,gocyclo,nestif // Existing domain flow is an explicit complexity exception; Stage 3 remains gated.
 func Import(ctx context.Context, source Source, statter PackStatter, store Store, options Options) (result Result, err error) {
+	if policy := workingkv.PolicyFrom(ctx); policy != nil {
+		limit := policy.Budget().Limit
+		options.PreparedImportBytes = min(resolvePositiveBytes(options.PreparedImportBytes, defaultPreparedImportBytes), limit)
+		options.ImportTransactionBytes = min(resolvePositiveBytes(options.ImportTransactionBytes, defaultImportTransactionBytes), limit)
+	}
 	ownsAction := options.Telemetry.startAction()
 	options.Telemetry.phase("source")
 	defer func() {
@@ -526,6 +533,13 @@ func Import(ctx context.Context, source Source, statter PackStatter, store Store
 	return result, nil
 }
 
+func resolvePositiveBytes(value, fallback uint64) uint64 {
+	if value == 0 {
+		return fallback
+	}
+	return value
+}
+
 func importPacks(
 	ctx context.Context,
 	statter PackStatter,
@@ -557,9 +571,12 @@ func importPacks(
 			)
 		}()
 	}
-	go dispatchPackJobs(
-		workerCtx, jobs, released, packs, pipelineOptions.preparedBytes, pipelineOptions.packsPerTransaction,
-	)
+	dispatchDone := make(chan struct{})
+	go func() {
+		defer close(dispatchDone)
+		dispatchPackJobs(workerCtx, jobs, released, packs, pipelineOptions.preparedBytes, pipelineOptions.packsPerTransaction)
+	}()
+	defer func() { cancel(); group.Wait(); <-dispatchDone }()
 	go func() {
 		group.Wait()
 		close(prepared)
@@ -793,7 +810,10 @@ func preparePackJobs(
 			if len(sourceIndexes) == len(packs) {
 				packSourceIndex = sourceIndexes[job.index]
 			}
-			outcome := preparePack(ctx, statter, packSourceIndex, packs[job.index], options, packTimeout)
+			outcome := packImportResult{err: job.err}
+			if job.err == nil {
+				outcome = preparePack(ctx, statter, packSourceIndex, packs[job.index], options, packTimeout)
+			}
 			counters.preparationNanos.Add(uint64(time.Since(started)))
 			currentPacks := counters.preparedPacks.Add(1)
 			currentBytes := counters.preparedBytes.Add(outcome.bytes)
@@ -847,17 +867,41 @@ func dispatchPackJobs(
 	limit uint64,
 	minimumInFlight uint,
 ) {
-	defer close(jobs)
+	closed := false
+	defer func() {
+		if !closed {
+			close(jobs)
+		}
+	}()
 	var queued uint64
 	var inFlight uint
+	policy := workingkv.PolicyFrom(ctx)
+	if policy != nil {
+		defer func() { policy.Release(queued) }()
+	}
+	release := func(amount uint64) {
+		queued -= amount
+		inFlight--
+		if policy != nil {
+			policy.Release(amount)
+		}
+	}
 	for index, indexedPack := range packs {
 		reserved := estimateIndexedPackBytes(indexedPack)
 		for inFlight >= minimumInFlight && queued > 0 && (reserved > limit || queued > limit-reserved) {
 			select {
 			case amount := <-released:
-				queued -= amount
-				inFlight--
+				release(amount)
 			case <-ctx.Done():
+				return
+			}
+		}
+		if policy != nil {
+			if err := policy.Reserve(reserved); err != nil {
+				select {
+				case jobs <- packJob{index: index, err: err}:
+				case <-ctx.Done():
+				}
 				return
 			}
 		}
@@ -866,7 +910,22 @@ func dispatchPackJobs(
 			queued += reserved
 			inFlight++
 		case <-ctx.Done():
+			if policy != nil {
+				policy.Release(reserved)
+			}
 			return
+		}
+	}
+	close(jobs)
+	closed = true
+	if policy != nil {
+		for inFlight > 0 {
+			select {
+			case amount := <-released:
+				release(amount)
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
 }

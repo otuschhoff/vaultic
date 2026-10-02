@@ -917,7 +917,7 @@ func configureBackupSelection(run *backupRun) (archiver.SelectByNameFunc, archiv
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	run.markerStore = archiver.NewMarkerCacheStore(4096)
+	run.markerStore = archiver.NewMarkerCacheStoreContext(run.ctx, 4096)
 	rejects, prefetch, err := collectRejectFuncsWithPrefetch(run.options, run.targets, run.targetFS, run.printer.E, run.markerStore)
 	if err != nil {
 		return nil, nil, nil, err

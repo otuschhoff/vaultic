@@ -13,16 +13,16 @@ import (
 	"os"
 	"sync"
 
-	"github.com/cockroachdb/pebble"
 	legacyindex "github.com/otuschhoff/vaultic/internal/repository/index"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/workingkv"
 )
 
 type writtenBlobStore struct {
 	mutex         sync.Mutex
-	database      *pebble.DB
+	database      *workingkv.WorkingStore
 	path          string
 	cipher        cipher.AEAD
 	tokenKey      []byte
@@ -32,7 +32,11 @@ type writtenBlobStore struct {
 }
 
 func newWrittenBlobStore(directory string) (*writtenBlobStore, error) {
-	if directory == "" {
+	return newWrittenBlobStoreContext(context.Background(), directory)
+}
+
+func newWrittenBlobStoreContext(ctx context.Context, directory string) (*writtenBlobStore, error) {
+	if directory == "" && workingkv.PolicyFrom(ctx) == nil {
 		return nil, fmt.Errorf("write overlay requires a scratch directory")
 	}
 	key := make([]byte, 64)
@@ -47,19 +51,13 @@ func newWrittenBlobStore(directory string) (*writtenBlobStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	path, err := os.MkdirTemp(directory, "vaultic-written-")
+	database, err := workingkv.OpenWorking(ctx, directory, "vaultic-written-")
 	if err != nil {
 		return nil, err
 	}
-	cache := pebble.NewCache(8 << 20)
-	database, err := pebble.Open(path, &pebble.Options{Cache: cache, MemTableSize: 4 << 20, MemTableStopWritesThreshold: 2})
-	cache.Unref()
-	if err != nil {
-		return nil, errors.Join(err, os.RemoveAll(path))
-	}
-	metrics := telemetry.NewWorkingStateMetric(telemetry.WorkingWrittenBlobs, "pebble")
+	metrics := telemetry.NewWorkingStateMetric(telemetry.WorkingWrittenBlobs, database.Backend())
 	metrics.Activate()
-	return &writtenBlobStore{database: database, path: path, cipher: aead, tokenKey: key[32:], metrics: metrics}, nil
+	return &writtenBlobStore{database: database, path: database.Path(), cipher: aead, tokenKey: key[32:], metrics: metrics}, nil
 }
 
 func (store *writtenBlobStore) token(value []byte) []byte {
@@ -92,10 +90,24 @@ func (store *writtenBlobStore) StoreIndex(ctx context.Context, index *legacyinde
 			store.err = fmt.Errorf("write overlay: %w", resultErr)
 		}
 	}()
-	batch := store.database.NewBatch()
-	defer batch.Close()
+	var batch []workingkv.Entry
+	size := 0
 	defer store.metrics.ObserveBuffer(0)
 	var entries, encodedBytes uint64
+	commit := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		if err := store.database.Put(ctx, batch); err != nil {
+			return err
+		}
+		store.metrics.Committed(entries, encodedBytes)
+		batch = batch[:0]
+		size = 0
+		entries = 0
+		encodedBytes = 0
+		return nil
+	}
 	for blob := range index.Values() {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -111,29 +123,21 @@ func (store *writtenBlobStore) StoreIndex(ctx context.Context, index *legacyinde
 			return err
 		}
 		value := store.cipher.Seal(nonce, nonce, encoded[:], key)
-		if err := batch.Set(key, value, nil); err != nil {
-			return err
-		}
-		entries++
-		encodedBytes += uint64(len(key) + len(value))
-		store.metrics.ObserveBuffer(uint64(len(batch.Repr())))
-		if len(batch.Repr()) >= 1<<20 {
-			if err := batch.Commit(pebble.NoSync); err != nil {
+		if size+len(key)+len(value)+16 > workingkv.MaxBatchBytes {
+			if err := commit(); err != nil {
 				return err
 			}
-			store.metrics.Committed(entries, encodedBytes)
-			entries, encodedBytes = 0, 0
-			batch.Reset()
 		}
+		batch = append(batch, workingkv.Entry{Key: key, Value: value})
+		size += len(key) + len(value) + 16
+		entries++
+		encodedBytes += uint64(len(key) + len(value))
+		store.metrics.ObserveBuffer(uint64(size))
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := batch.Commit(pebble.NoSync); err != nil {
-		return err
-	}
-	store.metrics.Committed(entries, encodedBytes)
-	return nil
+	return commit()
 }
 
 func (store *writtenBlobStore) WorkingState() telemetry.WorkingStateSnapshot {
@@ -142,7 +146,8 @@ func (store *writtenBlobStore) WorkingState() telemetry.WorkingStateSnapshot {
 	if store.database == nil {
 		return store.metrics.Snapshot(0, !store.cleanupFailed)
 	}
-	return store.metrics.Snapshot(store.database.Metrics().DiskSpaceUsage(), true)
+	size, known := store.database.ScratchBytes()
+	return store.metrics.Snapshot(size, known)
 }
 
 func (store *writtenBlobStore) lookup(ctx context.Context, handle vaultic.BlobHandle, firstOnly bool) (blobs []*pack.PackedBlob, resultErr error) {
@@ -160,57 +165,51 @@ func (store *writtenBlobStore) lookup(ctx context.Context, handle vaultic.BlobHa
 		}
 	}()
 	prefix := store.prefix(handle)
-	upper := append([]byte(nil), prefix...)
-	for ordinal := len(upper) - 1; ordinal >= 0; ordinal-- {
-		upper[ordinal]++
-		if upper[ordinal] != 0 {
-			upper = upper[:ordinal+1]
-			break
+	var after []byte
+	for {
+		limit := 128
+		if firstOnly {
+			limit = 1
 		}
-		if ordinal == 0 {
-			upper = nil
-		}
-	}
-	iterator, err := store.database.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: upper})
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		resultErr = errors.Join(resultErr, iterator.Close())
-		if resultErr != nil {
-			blobs = nil
-		}
-	}()
-	for valid := iterator.First(); valid; valid = iterator.Next() {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		value := iterator.Value()
-		nonceSize := store.cipher.NonceSize()
-		if len(value) < nonceSize {
-			return nil, fmt.Errorf("truncated encrypted overlay entry")
-		}
-		decoded, err := store.cipher.Open(nil, value[:nonceSize], value[nonceSize:], iterator.Key())
+		rows, err := store.database.Scan(ctx, prefix, after, limit)
 		if err != nil {
 			return nil, err
 		}
-		if len(decoded) != 56 {
-			return nil, fmt.Errorf("invalid overlay entry length")
-		}
-		blob := &pack.PackedBlob{Blob: pack.Blob{BlobHandle: handle}}
-		copy(blob.Pack[:], decoded[:32])
-		blob.Blob.Offset = uint(binary.LittleEndian.Uint64(decoded[32:40]))
-		blob.Blob.Length = uint(binary.LittleEndian.Uint64(decoded[40:48]))
-		blob.Blob.UncompressedLength = uint(binary.LittleEndian.Uint64(decoded[48:56]))
-		blobs = append(blobs, blob)
-		if firstOnly {
+		if len(rows) == 0 {
 			break
 		}
+		for _, row := range rows {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			value := row.Value
+			nonceSize := store.cipher.NonceSize()
+			if len(value) < nonceSize {
+				return nil, fmt.Errorf("truncated encrypted overlay entry")
+			}
+			decoded, err := store.cipher.Open(nil, value[:nonceSize], value[nonceSize:], row.Key)
+			if err != nil {
+				return nil, err
+			}
+			if len(decoded) != 56 {
+				return nil, fmt.Errorf("invalid overlay entry length")
+			}
+			blob := &pack.PackedBlob{Blob: pack.Blob{BlobHandle: handle}}
+			copy(blob.Pack[:], decoded[:32])
+			blob.Blob.Offset = uint(binary.LittleEndian.Uint64(decoded[32:40]))
+			blob.Blob.Length = uint(binary.LittleEndian.Uint64(decoded[40:48]))
+			blob.Blob.UncompressedLength = uint(binary.LittleEndian.Uint64(decoded[48:56]))
+			blobs = append(blobs, blob)
+			if firstOnly {
+				return blobs, nil
+			}
+		}
+		after = rows[len(rows)-1].Key
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return blobs, iterator.Error()
+	return blobs, nil
 }
 
 func (store *writtenBlobStore) Close() error {

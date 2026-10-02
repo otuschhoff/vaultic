@@ -14,6 +14,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/repository/crypto"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/workingstate"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -901,7 +902,15 @@ func (store *SchemaStore) MarkBulkImportComplete(ctx context.Context) error {
 // EnableFreshLegacyImport skips reads only for IDs not previously committed by
 // this store. It is safe only for a candidate reset to empty immediately before import.
 func (s *SchemaStore) EnableFreshLegacyImport() {
-	s.freshImportSeen = newIDSeenFilter(freshImportInitialCapacity, freshImportSeenMaxBytes, freshImportFalsePositive)
+	s.EnableFreshLegacyImportContext(context.Background())
+}
+
+func (s *SchemaStore) EnableFreshLegacyImportContext(ctx context.Context) {
+	if workingstate.PolicyFrom(ctx) == nil {
+		s.freshImportSeen = newIDSeenFilter(freshImportInitialCapacity, freshImportSeenMaxBytes, freshImportFalsePositive)
+	} else {
+		s.freshImportSeen = &idSeenFilter{fallbackToDatabase: true}
+	}
 	s.legacySplitMu.Lock()
 	if s.legacySplitAuth == nil {
 		s.legacySplitAuth = make(map[schema.ID]struct{})

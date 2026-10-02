@@ -15,6 +15,7 @@ import (
 	"sort"
 
 	monitor "github.com/otuschhoff/vaultic/internal/telemetry"
+	"github.com/otuschhoff/vaultic/internal/workingkv"
 )
 
 const checkKVRecordHeaderSize = 12
@@ -55,6 +56,7 @@ type checkKVSpool struct {
 	buffer      []checkKVRecord
 	runs        []checkRun
 	sealed      bool
+	charged     uint64
 }
 
 func newCheckKVSpool(ctx context.Context, scratch *checkScratch, memoryBytes uint64, fanIn int) (*checkKVSpool, error) {
@@ -68,15 +70,26 @@ func (spool *checkKVSpool) add(key, value []byte, sequence uint64) error {
 	if spool.sealed {
 		return fmt.Errorf("checker key/value spool is sealed")
 	}
-	record := checkKVRecord{key: append([]byte(nil), key...), value: append([]byte(nil), value...), sequence: sequence}
-	if record.size() > spool.memoryBytes {
-		return fmt.Errorf("checker key/value record requires %d bytes, exceeding %d-byte memory limit", record.size(), spool.memoryBytes)
+	size := uint64(checkKVRecordHeaderSize) + uint64(len(key)) + uint64(len(value))
+	if size > spool.memoryBytes {
+		if policy := workingkv.PolicyFrom(spool.ctx); policy != nil && policy.Mode() == workingkv.ModeRAM {
+			return &workingkv.MemoryLimitError{Limit: spool.memoryBytes, Used: spool.bufferBytes, Requested: size}
+		}
+		return fmt.Errorf("checker key/value record requires %d bytes, exceeding %d-byte memory limit", size, spool.memoryBytes)
 	}
-	if spool.bufferBytes != 0 && record.size() > spool.memoryBytes-spool.bufferBytes {
+	if spool.bufferBytes != 0 && size > spool.memoryBytes-spool.bufferBytes {
 		if err := spool.flush(); err != nil {
 			return err
 		}
 	}
+	if policy := workingkv.PolicyFrom(spool.ctx); policy != nil {
+		charge := size*2 + 128
+		if err := policy.Reserve(charge); err != nil {
+			return err
+		}
+		spool.charged += charge
+	}
+	record := checkKVRecord{key: append([]byte(nil), key...), value: append([]byte(nil), value...), sequence: sequence}
 	spool.buffer = append(spool.buffer, record)
 	spool.bufferBytes += record.size()
 	if len(spool.runs) > 0 && spool.bufferBytes >= spool.memoryBytes {
@@ -110,7 +123,15 @@ func (spool *checkKVSpool) flush() error {
 	}
 	spool.runs = append(spool.runs, run)
 	spool.buffer, spool.bufferBytes = nil, 0
+	spool.releaseBufferCharge()
 	return nil
+}
+
+func (spool *checkKVSpool) releaseBufferCharge() {
+	if policy := workingkv.PolicyFrom(spool.ctx); policy != nil {
+		policy.Release(spool.charged)
+	}
+	spool.charged = 0
 }
 
 func (spool *checkKVSpool) seal() error {
@@ -202,6 +223,7 @@ func (spool *checkKVSpool) close() error {
 	}
 	spool.runs, spool.buffer = nil, nil
 	spool.bufferBytes = 0
+	spool.releaseBufferCharge()
 	return first
 }
 

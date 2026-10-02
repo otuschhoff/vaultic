@@ -4,13 +4,15 @@
 
 [Previous: Phase 34](phase-34-operational-monitoring-and-metrics-export.md) | [Next: Phase 36](phase-36-native-smb-backup-source.md)
 
-**Status: M0-M2 complete; M3-M6 remain design specifications, not implemented.**
+**Status: M0-M3 complete; M4-M6 remain design specifications, not implemented.**
 
 [M0 inventory, frozen contracts, and validation evidence](phase-35-m0-contract.md)
 
 [M1 pinned bbolt selection, rejected alternative, and evidence](phase-35-m1-kv-selection.md)
 
 [M2 pointer-light RAM implementation and validation evidence](phase-35-m2-ram-backend.md)
+
+[M3 command-path integration, mode contracts, and validation evidence](phase-35-m3-integration.md)
 
 ## Goal
 

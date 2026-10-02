@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cockroachdb/pebble"
 	legacyindex "github.com/otuschhoff/vaultic/internal/repository/index"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/workingkv"
 )
 
 type testBlobLookupSession struct {
@@ -632,22 +632,19 @@ func TestWrittenBlobStoreEncryptionAndFailure(t *testing.T) {
 	if err := store.StoreIndex(t.Context(), index); err != nil {
 		t.Fatal(err)
 	}
-	iterator, err := store.database.NewIter(nil)
+	rows, err := store.database.Scan(t.Context(), nil, nil, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !iterator.First() {
+	if len(rows) != 1 {
 		t.Fatal("no encrypted entry")
 	}
-	key, value := bytes.Clone(iterator.Key()), bytes.Clone(iterator.Value())
+	key, value := rows[0].Key, rows[0].Value
 	if bytes.Contains(key, handle.ID[:]) || bytes.Contains(key, packID[:]) || bytes.Contains(value, packID[:]) {
 		t.Fatal("plaintext metadata in overlay")
 	}
-	if err := iterator.Close(); err != nil {
-		t.Fatal(err)
-	}
 	value[len(value)-1] ^= 1
-	if err := store.database.Set(key, value, pebble.NoSync); err != nil {
+	if err := store.database.Put(t.Context(), []workingkv.Entry{{Key: key, Value: value}}); err != nil {
 		t.Fatal(err)
 	}
 	if blobs, err := store.lookup(t.Context(), handle, false); err == nil || len(blobs) != 0 {
@@ -658,6 +655,81 @@ func TestWrittenBlobStoreEncryptionAndFailure(t *testing.T) {
 	}
 	if err := store.StoreIndex(t.Context(), index); err == nil {
 		t.Fatal("write after corruption succeeded")
+	}
+}
+
+func TestM3OverlayParity(t *testing.T) {
+	handle := vaultic.NewRandomBlobHandle()
+	idx := legacyindex.NewIndex()
+	for _, offset := range []uint{0, 64, 128} {
+		idx.StorePack(vaultic.NewRandomID(), pack.Blobs{{BlobHandle: handle, Offset: offset, Length: 32, UncompressedLength: 64}})
+	}
+	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV} {
+		t.Run(string(mode), func(t *testing.T) {
+			root := t.TempDir()
+			policy, _ := workingkv.NewPolicy(mode, 4<<20, root)
+			ctx := workingkv.WithPolicy(t.Context(), policy)
+			store, err := newWrittenBlobStoreContext(ctx, root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			if err := store.StoreIndex(ctx, idx); err != nil {
+				t.Fatal(err)
+			}
+			for range 2 {
+				if err := store.StoreIndex(ctx, idx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			blobs, err := store.lookup(ctx, handle, false)
+			if err != nil || len(blobs) != 3 {
+				t.Fatal("distinct/duplicate overlay locations", err, len(blobs))
+			}
+			for _, blob := range blobs {
+				if blob.Blob.Length != 32 || blob.Blob.UncompressedLength != 64 {
+					t.Fatal("location mismatch")
+				}
+			}
+			if mode == workingkv.ModeRAM {
+				entries, _ := os.ReadDir(root)
+				if len(entries) != 0 {
+					t.Fatal("RAM overlay used scratch")
+				}
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if policy.Budget().Used != 0 {
+				t.Fatal("overlay reservation leaked")
+			}
+		})
+	}
+}
+
+func TestM3LookupCapacity(t *testing.T) {
+	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV} {
+		t.Run(string(mode), func(t *testing.T) {
+			root := t.TempDir()
+			policy, _ := workingkv.NewPolicy(mode, 4<<20, root)
+			ctx := workingkv.WithPolicy(t.Context(), policy)
+			lookup, _, err := NewSpillingBlobLookupContext(ctx, &testBlobLookupSession{ctx: ctx}, root, 64<<20, 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lookup.Stats().AccountedCapacityBytes > (4<<20)/8 || policy.Budget().Used == 0 {
+				t.Fatal("LRU ignored shared envelope")
+			}
+			if err := lookup.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := lookup.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if policy.Budget().Used != 0 {
+				t.Fatal("lookup reservation leaked")
+			}
+		})
 	}
 }
 

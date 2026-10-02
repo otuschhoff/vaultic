@@ -777,7 +777,7 @@ func runIndexImport(
 	}
 	store := storeSession.Store
 	if options.ForceResetOldIndex {
-		store.EnableFreshLegacyImport()
+		store.EnableFreshLegacyImportContext(ctx)
 	}
 	monitorSource.SetStatsProvider(store)
 	if options.ImportDeferCleanup {

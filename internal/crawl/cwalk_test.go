@@ -16,6 +16,7 @@ import (
 
 	"github.com/otuschhoff/vaultic/internal/fs"
 	"github.com/otuschhoff/vaultic/internal/telemetry"
+	"github.com/otuschhoff/vaultic/internal/workingkv"
 )
 
 func TestDirectoryManifestWriterCompletionClearsObservedBuffer(t *testing.T) {
@@ -31,7 +32,7 @@ func TestDirectoryManifestWriterCompletionClearsObservedBuffer(t *testing.T) {
 	done := make(chan error)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	go writeDirectoryRecords(manifest.database, records, done, cancel, metrics)
+	go writeDirectoryRecords(ctx, manifest.database, records, done, cancel, metrics)
 	defer func() {
 		if err := <-done; err != nil {
 			t.Error(err)
@@ -432,5 +433,53 @@ func TestBuildDirectoryManifest(t *testing.T) {
 	}
 	if _, found, err := manifest.Names(filepath.Join(root, "ignored")); err != nil || found {
 		t.Fatalf("ignored directory was traversed: found=%v err=%v", found, err)
+	}
+}
+
+func TestM3ManifestParity(t *testing.T) {
+	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV} {
+		t.Run(string(mode), func(t *testing.T) {
+			source, scratch := t.TempDir(), t.TempDir()
+			var expected []string
+			for ordinal := range 1024 {
+				name := strconv.Itoa(ordinal) + strings.Repeat("x", 180)
+				expected = append(expected, name)
+				if err := os.WriteFile(filepath.Join(source, name), nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			policy, _ := workingkv.NewPolicy(mode, 4<<20, scratch)
+			ctx := workingkv.WithPolicy(t.Context(), policy)
+			manifest, err := BuildDirectoryManifest(ctx, []string{source}, 2, 4, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer manifest.Close()
+			names, found, err := manifest.Names(source)
+			if err != nil || !found {
+				t.Fatal(err)
+			}
+			sort.Strings(names)
+			sort.Strings(expected)
+			if strings.Join(names, "\x00") != strings.Join(expected, "\x00") {
+				t.Fatal("wide directory contents differ")
+			}
+			if mode == workingkv.ModeRAM {
+				entries, _ := os.ReadDir(scratch)
+				if len(entries) != 0 {
+					t.Fatal("RAM manifest used scratch")
+				}
+			}
+			if err := manifest.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if policy.Budget().Used != 0 {
+				t.Fatal("manifest retained reservation")
+			}
+			entries, err := os.ReadDir(scratch)
+			if err != nil || len(entries) != 0 {
+				t.Fatal("manifest cleanup", err)
+			}
+		})
 	}
 }

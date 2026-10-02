@@ -26,6 +26,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 	monitor "github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/workingkv"
 )
 
 const (
@@ -178,6 +179,13 @@ func newCheckScratchWithScenario(ctx context.Context, parent string, maxBytes ui
 	if maxBytes == 0 {
 		return nil, fmt.Errorf("checker scratch byte limit must be positive")
 	}
+	policy := workingkv.PolicyFrom(ctx)
+	if policy != nil && policy.Mode() == workingkv.ModeRAM {
+		return &checkScratch{ctx: ctx, parent: parent, maxBytes: maxBytes, scenario: scenario}, nil
+	}
+	if policy != nil && policy.ScratchDirectory() != "" {
+		parent = policy.ScratchDirectory()
+	}
 	if parent == "" {
 		parent = os.TempDir()
 	}
@@ -198,6 +206,10 @@ func newCheckScratchWithScenario(ctx context.Context, parent string, maxBytes ui
 }
 
 func (scratch *checkScratch) ensureDirLocked() error {
+	if policy := workingkv.PolicyFrom(scratch.ctx); policy != nil && policy.Mode() == workingkv.ModeRAM {
+		state := policy.Budget()
+		return &workingkv.MemoryLimitError{Limit: state.Limit, Used: state.Used, Requested: state.Limit - state.Used + 1}
+	}
 	if scratch.dir != "" {
 		return nil
 	}
@@ -336,6 +348,7 @@ type checkRun struct {
 }
 
 type locationSpool struct {
+	charged        uint64
 	ctx            context.Context
 	scratch        *checkScratch
 	memoryBytes    uint64
@@ -394,6 +407,13 @@ func (spool *locationSpool) allocateBuffer() error {
 		} else {
 			capacity = int(min(uint64(capacity), remaining))
 		}
+	}
+	if policy := workingkv.PolicyFrom(spool.ctx); policy != nil {
+		charge := locationCapacityCharge(uint64(capacity))
+		if err := policy.Reserve(charge); err != nil {
+			return err
+		}
+		spool.charged += charge
 	}
 	spool.buffer = make([]locationTuple, 0, capacity)
 	spool.memoryUsed += uint64(capacity) * locationTupleMemorySize
@@ -518,6 +538,11 @@ func (spool *locationSpool) spillMemoryRuns() error {
 		spool.runs = append(spool.runs, run)
 		spool.memoryRuns = spool.memoryRuns[1:]
 		spool.memoryUsed -= uint64(cap(records)) * locationTupleMemorySize
+		if policy := workingkv.PolicyFrom(spool.ctx); policy != nil {
+			charge := locationCapacityCharge(uint64(cap(records)))
+			policy.Release(charge)
+			spool.charged -= charge
+		}
 	}
 	spool.diskMode = true
 	return nil
@@ -785,6 +810,8 @@ func (spool *locationSpool) adopt(source *locationSpool) error {
 	spool.memoryRuns = append(spool.memoryRuns, source.memoryRuns...)
 	spool.runs = append(spool.runs, source.runs...)
 	spool.memoryUsed += source.memoryUsed
+	spool.charged += source.charged
+	source.charged = 0
 	source.memoryRuns = nil
 	source.runs = nil
 	source.memoryUsed = 0
@@ -1198,7 +1225,16 @@ func (spool *locationSpool) close() error {
 	spool.buffer = nil
 	spool.memoryRuns = nil
 	spool.memoryUsed = 0
+	if policy := workingkv.PolicyFrom(spool.ctx); policy != nil {
+		policy.Release(spool.charged)
+	}
+	spool.charged = 0
 	return first
+}
+
+func locationCapacityCharge(capacity uint64) uint64 {
+	size := capacity * locationTupleMemorySize
+	return size + size/4 + 64
 }
 
 func newLocationIterator(
@@ -1661,6 +1697,9 @@ func newPackContributionIterator(spool *locationSpool) (*packContributionIterato
 }
 
 func (spool *locationSpool) compactPackMemory() error {
+	if workingkv.PolicyFrom(spool.ctx) != nil {
+		return nil
+	}
 	if len(spool.memoryRuns) < 2 || spool.memoryUsed >= spool.memoryBytes {
 		return nil
 	}

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/otuschhoff/vaultic/internal/restorer"
+	"github.com/otuschhoff/vaultic/internal/workingkv"
 	"io"
 	"os"
 	"path/filepath"
@@ -78,7 +80,10 @@ func TestCWalkManifestSelectsOnlyDirectories(t *testing.T) {
 		return true
 	}
 	arch.MandatorySelect = arch.Select
-	cleanup := arch.prepareCWalkManifest(t.Context(), []string{root})
+	cleanup, err := arch.prepareCWalkManifest(t.Context(), []string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer cleanup()
 	if arch.cwalkManifest == nil {
 		t.Fatal("manifest was not built")
@@ -159,7 +164,15 @@ func testCWalkManifestOverlapsReads(t *testing.T, markers bool) {
 	}
 	arch.MandatorySelect = arch.Select
 	done := make(chan func(), 1)
-	go func() { done <- arch.prepareCWalkManifest(t.Context(), []string{root}) }()
+	go func() {
+		cleanup, err := arch.prepareCWalkManifest(t.Context(), []string{root})
+		if err != nil {
+			t.Error(err)
+			done <- func() {}
+			return
+		}
+		done <- cleanup
+	}()
 	defer func() {
 		close(release)
 		cleanup := <-done
@@ -401,6 +414,68 @@ func TestArchiverSave(t *testing.T) {
 				t.Errorf("wrong stats returned in DataBlobs, want 0, got %d", stats.DataBlobs)
 			}
 		})
+	}
+}
+
+func TestM3BackupParity(t *testing.T) {
+	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV} {
+		t.Run(string(mode), func(t *testing.T) {
+			source := TestDir{"file": TestFile{Content: "backup working-state parity\x00"}, "nested": TestDir{"binary": TestFile{Content: string(rtest.Random(7, 128<<10))}}, "omit": TestDir{"hidden": TestFile{Content: "excluded"}}}
+			root, repo := prepareTempdirRepoSrc(t, source)
+			scratch := t.TempDir()
+			policy, _ := workingkv.NewPolicy(mode, 16<<20, scratch)
+			ctx := workingkv.WithPolicy(t.Context(), policy)
+			markers := NewMarkerCacheStoreContext(ctx, 1)
+			defer markers.Close()
+			markers.spill("fixture", map[string]bool{filepath.Join(root, "omit"): true, filepath.Join(root, "nested"): false})
+			arch := New(repo, fs.NewLocal(), Options{CWalkConcurrency: 2, CWalkQueue: 4, SelectionError: markers.Error})
+			arch.Select = func(path string, info *fs.ExtendedFileInfo, _ fs.FS) bool {
+				if !info.Mode.IsDir() {
+					return true
+				}
+				rejected, found := markers.get("fixture", path)
+				return !found || !rejected
+			}
+			back := rtest.Chdir(t, root)
+			defer back()
+			snapshot, id, _, err := arch.Snapshot(ctx, []string{"."}, SnapshotOptions{Time: time.Unix(1000, 0)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			delete(source, "omit")
+			TestEnsureSnapshot(t, repo, id, source)
+			destination := t.TempDir()
+			if _, err := restorer.NewRestorer(repo, snapshot, restorer.Options{}).RestoreTo(ctx, destination); err != nil {
+				t.Fatal(err)
+			}
+			for path, want := range map[string]string{"file": "backup working-state parity\x00", "nested/binary": string(rtest.Random(7, 128<<10))} {
+				got, err := os.ReadFile(filepath.Join(destination, filepath.FromSlash(path)))
+				if err != nil || string(got) != want {
+					t.Fatal("restored bytes differ", path, err)
+				}
+			}
+			if err := markers.Close(); err != nil {
+				t.Fatal(err)
+			}
+			entries, err := os.ReadDir(scratch)
+			if err != nil || len(entries) != 0 {
+				t.Fatal("scratch survived snapshot", err)
+			}
+			if policy.Budget().Used != 0 {
+				t.Fatal("backup budget survived close")
+			}
+		})
+	}
+}
+
+func TestM3BackupExhaustionDoesNotFallback(t *testing.T) {
+	root, repo := prepareTempdirRepoSrc(t, TestDir{"file": TestFile{Content: "not published"}})
+	policy, _ := workingkv.NewPolicy(workingkv.ModeRAM, 1, "")
+	ctx := workingkv.WithPolicy(t.Context(), policy)
+	arch := New(repo, fs.NewLocal(), Options{CWalkConcurrency: 2})
+	_, id, _, err := arch.Snapshot(ctx, []string{root}, SnapshotOptions{})
+	if !errors.Is(err, workingkv.ErrWorkingMemoryLimitExceeded) || id != (vaultic.ID{}) {
+		t.Fatal("backup silently fell back", err)
 	}
 }
 

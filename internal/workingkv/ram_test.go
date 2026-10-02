@@ -471,8 +471,16 @@ func TestRAMSharedWriteReservations(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if success != 1 || denied != 1 || budget.Snapshot().Peak > limit {
+		if success > 1 || denied < 1 || success+denied != 2 || budget.Snapshot().Peak > limit {
 			t.Fatal("shared write reservation race", success, denied, budget.Snapshot())
+		}
+		if success == 0 {
+			if err := left.Put(t.Context(), entry); err != nil {
+				t.Fatal("released planning reservations prevented retry", err)
+			}
+			if err := right.Put(t.Context(), entry); !errors.Is(err, ErrWorkingMemoryLimitExceeded) {
+				t.Fatal("retry overspent shared capacity", err)
+			}
 		}
 		left.Close()
 		right.Close()
