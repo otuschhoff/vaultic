@@ -15,9 +15,9 @@ import (
 )
 
 func TestConformance(t *testing.T) {
-	for _, backend := range []string{"pebble", "bbolt", "badger"} {
+	for _, backend := range []string{"pebble", "bbolt", "badger", "ram"} {
 		t.Run(backend, func(t *testing.T) {
-			store, err := Open(backend, filepath.Join(t.TempDir(), "store"))
+			store, err := openConformanceStore(t, backend)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -64,9 +64,9 @@ func TestConformance(t *testing.T) {
 }
 
 func TestConcurrencyGrowthAndBounds(t *testing.T) {
-	for _, backend := range []string{"pebble", "bbolt", "badger"} {
+	for _, backend := range []string{"pebble", "bbolt", "badger", "ram"} {
 		t.Run(backend, func(t *testing.T) {
-			store, err := Open(backend, filepath.Join(t.TempDir(), "store"))
+			store, err := openConformanceStore(t, backend)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -254,9 +254,9 @@ func (ctx *cancelDuringCopy) Err() error {
 }
 
 func TestCancellationBeforeCommitAndOwnedInputs(t *testing.T) {
-	for _, backend := range []string{"pebble", "bbolt", "badger"} {
+	for _, backend := range []string{"pebble", "bbolt", "badger", "ram"} {
 		t.Run(backend, func(t *testing.T) {
-			store, err := Open(backend, filepath.Join(t.TempDir(), "store"))
+			store, err := openConformanceStore(t, backend)
 			if err != nil {
 				t.Fatal(err)
 			}

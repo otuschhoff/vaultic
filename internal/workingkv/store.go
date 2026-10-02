@@ -122,6 +122,9 @@ func (store *Store) Get(ctx context.Context, key []byte) ([]byte, bool, error) {
 	}
 	defer store.active.Done()
 	value, found, err := store.engine.get(key)
+	if cancelled := ctx.Err(); cancelled != nil {
+		return nil, false, cancelled
+	}
 	if err != nil {
 		return nil, false, backendError(err)
 	}
@@ -140,6 +143,9 @@ func (store *Store) Scan(ctx context.Context, prefix, after []byte, limit int) (
 	}
 	defer store.active.Done()
 	entries, err := store.engine.scan(ctx, prefix, after, limit)
+	if cancelled := ctx.Err(); cancelled != nil {
+		return nil, cancelled
+	}
 	if err != nil {
 		return nil, backendError(err)
 	}
@@ -174,7 +180,7 @@ func (store *Store) admit(ctx context.Context) error {
 }
 
 func backendError(err error) error {
-	if err == nil || errors.Is(err, ErrBatchLimit) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if err == nil || errors.Is(err, ErrBatchLimit) || errors.Is(err, ErrWorkingMemoryLimitExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
 	return errors.Join(ErrBackendIO, err)

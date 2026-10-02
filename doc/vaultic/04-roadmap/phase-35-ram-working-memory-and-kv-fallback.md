@@ -4,11 +4,13 @@
 
 [Previous: Phase 34](phase-34-operational-monitoring-and-metrics-export.md) | [Next: Phase 36](phase-36-native-smb-backup-source.md)
 
-**Status: M0-M1 complete; M2-M6 remain design specifications, not implemented.**
+**Status: M0-M2 complete; M3-M6 remain design specifications, not implemented.**
 
 [M0 inventory, frozen contracts, and validation evidence](phase-35-m0-contract.md)
 
 [M1 pinned bbolt selection, rejected alternative, and evidence](phase-35-m1-kv-selection.md)
+
+[M2 pointer-light RAM implementation and validation evidence](phase-35-m2-ram-backend.md)
 
 ## Goal
 
@@ -284,6 +286,10 @@ production switch. See the [M1 decision record](phase-35-m1-kv-selection.md).
   RSS/mmap, and I/O evidence. A failed selection gate blocks M2.
 
 ### M2: Implement the pointer-light RAM backend
+
+Completed: isolated RAM adapter, shared reservation budget, RAM/KV conformance,
+and measured layout/GC scaling. See the [M2 record](phase-35-m2-ram-backend.md).
+No production command paths switch backend in this milestone.
 
 - Reuse compact indexing where suitable; implement chunked arenas and bounded
   growth/iteration without per-entry heap objects. Add reservation-based budget
