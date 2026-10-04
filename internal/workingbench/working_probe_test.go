@@ -107,3 +107,32 @@ func TestM5ProbeOwnershipAndBounds(t *testing.T) {
 		t.Fatal("unbounded lookup latency retention")
 	}
 }
+
+func TestM5LargeLatencyHistogram(t *testing.T) {
+	var probe WorkingProbe
+	if err := probe.EnableLatencyHistogram(); err != nil {
+		t.Fatal(err)
+	}
+	for ordinal := range 100000 {
+		if err := probe.Latency(time.Duration(ordinal%1000) * time.Microsecond); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result := workingProbeHistogramLatency(probe.histogram)
+	if result.Count != 100000 || result.P99LowerSeconds > .000989 || result.P99Seconds < .000989 ||
+		result.P99Seconds-result.P99LowerSeconds > .000002 || len(probe.latencies) != 0 {
+		t.Fatal("unbounded or incorrect histogram quantiles", result)
+	}
+	for _, invalid := range []time.Duration{-1, 24*time.Hour + 1} {
+		if err := probe.Latency(invalid); err == nil {
+			t.Fatal("invalid histogram duration accepted", invalid)
+		}
+	}
+	if probe.histogram.TotalCount() != 100000 || probe.EnableLatencyHistogram() == nil {
+		t.Fatal("invalid observation or reconfiguration changed histogram")
+	}
+	probe.closed = true
+	if err := probe.Latency(time.Second); err == nil {
+		t.Fatal("histogram changed after finish")
+	}
+}

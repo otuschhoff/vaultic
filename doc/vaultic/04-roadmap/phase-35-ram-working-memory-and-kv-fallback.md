@@ -4,8 +4,8 @@
 
 [Previous: Phase 34](phase-34-operational-monitoring-and-metrics-export.md) | [Next: Phase 36](phase-36-native-smb-backup-source.md)
 
-**Status: M0-M4 complete; M5 benchmark protocol implemented, sealed execution
-blocked by competing host builds; M6 remains a design specification.**
+**Status: M0-M5 complete; reduced and extended NFS/large-state evidence sealed.
+Performance approval is not established; M6 remains a design specification.**
 
 [M0 inventory, frozen contracts, and validation evidence](phase-35-m0-contract.md)
 
@@ -17,7 +17,7 @@ blocked by competing host builds; M6 remains a design specification.**
 
 [M4 bounded automatic fallback, CLI policy, and validation evidence](phase-35-m4-fallback.md)
 
-[M5 implemented benchmark protocol, review repairs, and execution blocker](phase-35-m5-benchmarks.md)
+[M5 benchmark protocol, review repairs, and retained evidence](phase-35-m5-benchmarks.md)
 
 ## Goal
 
@@ -335,9 +335,13 @@ No production command paths switch backend in this milestone.
 
 ### M5: Realistic end-to-end and GC benchmarks
 
-Protocol and focused review repairs are implemented. Final repeated evidence
-is not accepted: monitored captures were invalidated by competing host builds.
-See the [M5 record](phase-35-m5-benchmarks.md). The exit gate remains pending;
+Protocol, review repairs and completion review are complete. Reduced 400-case
+and extended 416-case captures are sealed with independently reproduced analysis
+and explicit accepted/rejected/incomplete classifications. The extended NFS
+capture includes full tree/path import and actual 10/100 GB targets; all modes
+completed 10 GB, but candidate modes exhausted 140 GiB budgets near 60-62 GB
+instead of completing 100 GB. See the [M5 record](phase-35-m5-benchmarks.md).
+The evidence-collection exit gate is met, not production performance approval;
 there is no production recommendation or default change.
 
 - Run the benchmark matrix below against isolated immutable clones and source

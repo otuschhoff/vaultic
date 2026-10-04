@@ -725,9 +725,10 @@ func CheckWithOptions(
 		if !ok {
 			return CheckResult{}, fmt.Errorf("checker store does not validate the declared read session")
 		}
+		validationContext := ctx
 		defer func() {
 			if err == nil {
-				err = validator.Validate(ctx)
+				err = validator.Validate(validationContext)
 			}
 		}()
 	}

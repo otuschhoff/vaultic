@@ -22,6 +22,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/global"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/maintenance"
+	"github.com/otuschhoff/vaultic/internal/index/schema"
 	rtest "github.com/otuschhoff/vaultic/internal/test"
 	"github.com/otuschhoff/vaultic/internal/workingbench"
 	"github.com/otuschhoff/vaultic/internal/workingkv"
@@ -273,15 +274,20 @@ func TestM5Workflow(t *testing.T) {
 	}
 	var client *daemon.Client
 	var daemonArgs []string
-	if scenario == "import-indexes" || scenario == "check-full" || scenario == "check-legacy" {
+	importScenario := scenario == "import-indexes" || scenario == "import-full"
+	if importScenario || scenario == "check-full" || scenario == "check-legacy" {
 		binary := os.Getenv("VAULTICDB_TEST_BINARY")
 		if binary == "" {
 			t.Fatal("pinned private fixture daemon required")
 		}
 		defer feature.TestSetFlag(t, feature.Flag, feature.SlateDBAuthoritative, true)()
-		socket := filepath.Join(environment.base, "m5.sock")
+		control, err := os.MkdirTemp("/run", "v-m5-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(control) })
+		socket := filepath.Join(control, "m5.sock")
 		data := filepath.Join(environment.base, "daemon")
-		var err error
 		client, err = daemon.Ensure(t.Context(), daemon.Options{Socket: socket, RepositoryID: repositoryID(t, environment),
 			DaemonPath: binary, DataDir: data, WALDataDir: filepath.Join(data, "wal"), ObjectStore: "local"})
 		if err != nil {
@@ -293,7 +299,7 @@ func TestM5Workflow(t *testing.T) {
 			}
 		}()
 		daemonArgs = []string{"--daemon-socket=" + socket}
-		if scenario != "import-indexes" {
+		if !importScenario {
 			m5Command(t, environment.globalOptions, append([]string{"index", "import", "--from-legacy", "--resume", "--snapshot-depth=0"}, daemonArgs...)...)
 			m5Command(t, environment.globalOptions, append([]string{"index", "import", "--snapshot-metadata-only", "--resume"}, daemonArgs...)...)
 		}
@@ -343,8 +349,11 @@ func TestM5Workflow(t *testing.T) {
 	case "initial", "unchanged", "churn", "high-live-backup":
 		args := m5BackupArgs(source)
 		events, backupSummary, timedErr = m5Execute(t, environment.globalOptions, append(args[:len(args)-1], append(policyArgs, source)...)...)
-	case "import-indexes":
-		args := append([]string{"index", "import", "--from-legacy", "--resume", "--snapshot-depth=0"}, daemonArgs...)
+	case "import-indexes", "import-full":
+		args := append([]string{"index", "import", "--from-legacy", "--resume"}, daemonArgs...)
+		if scenario == "import-indexes" {
+			args = append(args, "--snapshot-depth=0")
+		}
 		events, _, timedErr = m5Execute(t, environment.globalOptions, append(args, policyArgs...)...)
 	case "check-full", "check-legacy":
 		args := append([]string{"index", "check", "--max-findings=100"}, daemonArgs...)
@@ -372,6 +381,10 @@ func TestM5Workflow(t *testing.T) {
 	}
 	if scenario == "unchanged" && timedErr == nil && (backupSummary.New != 0 || backupSummary.Changed != 0 || backupSummary.Unmodified != files) {
 		t.Fatalf("unchanged workflow was not actually unchanged: %+v files=%d", backupSummary, files)
+	}
+	var traversalDigest string
+	if scenario == "import-full" && timedErr == nil {
+		traversalDigest = m5TraversalDigest(t, client, source, files)
 	}
 	_, after := testRunSnapshots(t, environment.globalOptions)
 	for id := range prior {
@@ -407,7 +420,7 @@ func TestM5Workflow(t *testing.T) {
 			m5Command(t, environment.globalOptions, append([]string{"index", "import", "--snapshot-metadata-only", "--resume"}, daemonArgs...)...)
 		}
 		var result maintenance.CheckResult
-		if scenario == "import-indexes" && timedErr != nil {
+		if importScenario && timedErr != nil {
 			_ = m5CatalogDigest(t, client)
 		} else {
 			err := withTermStatus(t, environment.globalOptions, func(ctx context.Context, options global.Options) error {
@@ -419,7 +432,7 @@ func TestM5Workflow(t *testing.T) {
 				t.Fatalf("exact native comparison failed: error=%v clean=%t legacy=%d native=%d findings=%v", err, result.Clean(), result.LegacyLocations, result.SlateDBLocations, result.Findings)
 			}
 		}
-		if scenario == "import-indexes" && timedErr == nil {
+		if importScenario && timedErr == nil {
 			before := m5CatalogDigest(t, client)
 			if err := client.Close(context.Background()); err != nil {
 				t.Fatal(err)
@@ -431,9 +444,16 @@ func TestM5Workflow(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			m5Command(t, environment.globalOptions, append([]string{"index", "import", "--from-legacy", "--resume", "--snapshot-depth=0"}, daemonArgs...)...)
+			args := append([]string{"index", "import", "--from-legacy", "--resume"}, daemonArgs...)
+			if scenario == "import-indexes" {
+				args = append(args, "--snapshot-depth=0")
+			}
+			m5Command(t, environment.globalOptions, args...)
 			if m5CatalogDigest(t, client) != before {
 				t.Fatal("resume/reopen changed exact catalog entries")
+			}
+			if scenario == "import-full" && m5TraversalDigest(t, client, source, files) != traversalDigest {
+				t.Fatal("resume/reopen changed full traversal entries")
 			}
 		}
 	}
@@ -442,11 +462,16 @@ func TestM5Workflow(t *testing.T) {
 		t.Fatal("working scratch leaked", err)
 	}
 	semantic := map[string]any{"complete": true, "restore_verified": client == nil && timedErr == nil,
-		"exact_check_verified": client != nil && !(scenario == "import-indexes" && timedErr != nil),
+		"exact_check_verified": client != nil && !(importScenario && timedErr != nil),
 		"completed_workload":   timedErr == nil, "typed_exhaustion": timedErr != nil, "exhaustion_verified": timedErr != nil,
 		"input_sha256": digest, "files": files, "bytes": size, "prior_snapshots": len(prior), "snapshots": len(after), "scratch_clean": true}
 	if client != nil {
 		semantic["timed_import_scope"] = "legacy-indexes; snapshot JSON setup/verification outside interval; tree traversal excluded"
+		if scenario == "import-full" {
+			semantic["timed_import_scope"] = "full legacy indexes, snapshots, trees and paths"
+			semantic["traversal_verified"] = timedErr == nil
+			semantic["traversal_sha256"] = traversalDigest
+		}
 	}
 	encoded, _ := json.MarshalIndent(semantic, "", "  ")
 	if err := os.WriteFile(filepath.Join(output, "semantic.json"), append(encoded, '\n'), 0600); err != nil {
@@ -479,6 +504,82 @@ func m5CatalogDigest(t *testing.T, client *daemon.Client) string {
 				t.Fatal("nonprogressing verification scan")
 			}
 		}
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func m5TraversalDigest(t *testing.T, client *daemon.Client, source string, files uint64) string {
+	t.Helper()
+	hash := sha256.New()
+	store := daemon.NewSchemaStore(client)
+	var after []byte
+	var inodes uint64
+	paths := make(map[string]struct{})
+	for {
+		entries, done, err := store.ScanPrefix(t.Context(), nil, after, 256)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			after = entry.Key
+			parsed, err := schema.ParseKey(entry.Key)
+			if err != nil {
+				t.Fatal("malformed full traversal key", err)
+			}
+			switch parsed.Kind {
+			case schema.KeyCurrentInode, schema.KeyInodeRevision, schema.KeyCurrentDirectory, schema.KeyDirectoryRevision, schema.KeyPathVersion:
+				_, _ = fmt.Fprintf(hash, "%d:", len(entry.Key))
+				_, _ = hash.Write(entry.Key)
+				_, _ = fmt.Fprintf(hash, "%d:", len(entry.Value))
+				_, _ = hash.Write(entry.Value)
+			}
+			if parsed.Kind == schema.KeyCurrentInode {
+				inodes++
+			}
+			if parsed.Kind == schema.KeyDirectoryRevision {
+				directory, err := schema.UnmarshalDirectoryRevision(entry.Value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, child := range directory.Children {
+					if child.Type != schema.NodeFile {
+						continue
+					}
+					path := filepath.Join("/", directory.SourcePath, child.Name)
+					relative, err := filepath.Rel(source, path)
+					if err != nil || !filepath.IsLocal(relative) {
+						t.Fatal("imported file outside fixture", path, err)
+					}
+					for _, marker := range []string{".m5-skip", ".m5-skip2"} {
+						if _, err := os.Stat(filepath.Join(filepath.Dir(path), marker)); err == nil && child.Name != marker {
+							t.Fatal("excluded path imported", path)
+						}
+					}
+					info, err := os.Stat(path)
+					if err != nil || !info.Mode().IsRegular() {
+						t.Fatal("imported path not a source file", path, err)
+					}
+					value, found, err := store.Get(t.Context(), child.MetadataKey)
+					if err != nil || !found {
+						t.Fatal("missing child inode revision", path, err)
+					}
+					inode, err := schema.UnmarshalInodeRevision(value)
+					if err != nil || inode.Size != uint64(info.Size()) {
+						t.Fatal("imported path metadata differs", path, err)
+					}
+					paths[path] = struct{}{}
+				}
+			}
+		}
+		if done {
+			break
+		}
+		if len(entries) == 0 {
+			t.Fatal("nonprogressing full traversal scan")
+		}
+	}
+	if inodes != files || uint64(len(paths)) != files {
+		t.Fatalf("partial traversal: inodes=%d paths=%d expected files=%d", inodes, len(paths), files)
 	}
 	return hex.EncodeToString(hash.Sum(nil))
 }

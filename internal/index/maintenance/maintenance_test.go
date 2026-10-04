@@ -133,9 +133,9 @@ func (store *gatedScanStore) ScanPrefix(ctx context.Context, prefix, after []byt
 	}
 }
 
-func (store *validatingMemoryStore) Validate(context.Context) error {
+func (store *validatingMemoryStore) Validate(ctx context.Context) error {
 	store.validated = true
-	return store.validateErr
+	return errors.Join(ctx.Err(), store.validateErr)
 }
 
 func TestCheckResultTreatsQuorumBypassAsDirty(t *testing.T) {
@@ -198,6 +198,28 @@ func TestCheckValidatesDeclaredReadSession(t *testing.T) {
 	if !validating.validated {
 		t.Fatal("read session was not validated")
 	}
+	t.Run("canceled-parent", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		store := &validatingMemoryStore{memoryStore: &memoryStore{values: map[string][]byte{}}}
+		if _, err := CheckWithOptions(ctx, nil, store, options); !errors.Is(err, context.Canceled) {
+			t.Fatal("parent cancellation hidden by final validation", err)
+		}
+	})
+	t.Run("working-policy", func(t *testing.T) {
+		policy, err := workingkv.NewPolicy(workingkv.ModeRAM, 8<<30, t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		store := &validatingMemoryStore{memoryStore: &memoryStore{values: map[string][]byte{}}}
+		ctx := workingkv.WithPolicy(t.Context(), policy)
+		if _, err := CheckWithOptions(ctx, nil, store, options); err != nil {
+			t.Fatal("successful policy check invalidated its read-session context", err)
+		}
+		if !store.validated || ctx.Err() != nil || policy.Budget().Used != 0 {
+			t.Fatal("session validation skipped, parent canceled or reservations leaked")
+		}
+	})
 }
 
 func TestLoadSlateDBLocationsScansPartitionsConcurrently(t *testing.T) {

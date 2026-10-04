@@ -14,12 +14,46 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/workingbench"
 )
+
+func TestM5WorkingPolicyMeasurementBoundary(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		policy, err := NewPolicy(ModeRAM, 32<<20, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var calls atomic.Uint64
+		var unavailable atomic.Bool
+		stop := policy.Start(t.Context(), func() (Resources, error) {
+			calls.Add(1)
+			if unavailable.Load() {
+				return Resources{}, ErrInvalid
+			}
+			return Resources{HostLimit: 1 << 30, HostAvailable: 1 << 30, RSSKnown: true}, nil
+		}, func(PolicyEvent) {})
+		defer stop()
+		time.Sleep(2 * time.Second)
+		synctest.Wait()
+		if calls.Load() == 0 {
+			t.Fatal("live measurement policy never sampled resources")
+		}
+		stop()
+		endpoint, samples := policy.Budget(), calls.Load()
+		unavailable.Store(true)
+		time.Sleep(2 * time.Second)
+		synctest.Wait()
+		if policy.Budget() != endpoint || calls.Load() != samples {
+			t.Fatal("untimed verification mutated the measured policy endpoint")
+		}
+	})
+}
 
 func TestM5WorkingSet(t *testing.T) {
 	root := os.Getenv("VAULTIC_PHASE35_M5_ROOT")
@@ -49,8 +83,14 @@ func TestM5WorkingSet(t *testing.T) {
 	if policyMode == "pebble" {
 		policyMode = "ram"
 	}
+	diskBudget := "16GiB"
+	payloadSize, batchCount := 4096, 128
+	if target > 1_000_000_000 {
+		diskBudget = "512GiB"
+		payloadSize, batchCount = 32768, 31
+	}
 	policy, err := Resolve(Configuration{Mode: policyMode, RAMLimit: limit, Scratch: scratch,
-		DiskBudget: "16GiB", Reserve: "256MiB"}, resources)
+		DiskBudget: diskBudget, Reserve: "256MiB"}, resources)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +116,6 @@ func TestM5WorkingSet(t *testing.T) {
 		_, err := sealed.Open(nil, value[:sealed.NonceSize()], value[sealed.NonceSize():], key)
 		return err
 	})
-	const payloadSize, batchCount = 4096, 128
 	plain := make([]byte, payloadSize)
 	for index := range plain {
 		plain[index] = byte(index*37 + 11)
@@ -92,7 +131,7 @@ func TestM5WorkingSet(t *testing.T) {
 		return sealed.Seal(nonce, nonce, plain, key)
 	}
 	inputHash := sha256.New()
-	for ordinal := uint64(0); ordinal < (target+payloadSize-1)/payloadSize; ordinal++ {
+	for ordinal := uint64(0); ordinal < (target+uint64(payloadSize)-1)/uint64(payloadSize); ordinal++ {
 		value := encode(ordinal, keys[:8], values[:payloadSize+sealed.NonceSize()+sealed.Overhead()])
 		_, _ = inputHash.Write(keys[:8])
 		_, _ = inputHash.Write(value)
@@ -103,11 +142,16 @@ func TestM5WorkingSet(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _, _ = probe.Finish("incomplete", nil) })
+	if target > 1_000_000_000 {
+		if err := probe.EnableLatencyHistogram(); err != nil {
+			t.Fatal(err)
+		}
+	}
 	var committed uint64
 	var failure error
 	var migrationSeconds float64
-	count := (target + payloadSize - 1) / payloadSize
-	for first := uint64(0); first < count; first += batchCount {
+	count := (target + uint64(payloadSize) - 1) / uint64(payloadSize)
+	for first := uint64(0); first < count; first += uint64(batchCount) {
 		length := min(uint64(batchCount), count-first)
 		for ordinal := uint64(0); ordinal < length; ordinal++ {
 			key := keys[ordinal*8 : (ordinal+1)*8]
@@ -135,7 +179,7 @@ func TestM5WorkingSet(t *testing.T) {
 		committed += length
 	}
 	var concurrentBytes atomic.Uint64
-	if os.Getenv("VAULTIC_PHASE35_M5_SCENARIO") == "high-live" && failure == nil {
+	if strings.HasPrefix(os.Getenv("VAULTIC_PHASE35_M5_SCENARIO"), "high-live") && failure == nil {
 		finished := make(chan struct{})
 		allocated := make(chan struct{})
 		go func() {
@@ -156,7 +200,7 @@ func TestM5WorkingSet(t *testing.T) {
 		var lookupOrdinal uint64
 		for range allocated {
 			for range 2 {
-				binary.BigEndian.PutUint64(keys[:8], lookupOrdinal%committed)
+				binary.BigEndian.PutUint64(keys[:8], (lookupOrdinal*7919)%committed)
 				lookupOrdinal++
 				started := time.Now()
 				_, found, err := store.Get(ctx, keys[:8])
@@ -170,13 +214,17 @@ func TestM5WorkingSet(t *testing.T) {
 		}
 		<-finished
 	}
+	if stop != nil {
+		stop()
+	}
 	state := policy.Snapshot("benchmark", "endpoint")
 	if mode != "pebble" && state.Memory.Used > state.Memory.Limit {
 		t.Fatal("aggregate overspend")
 	}
 	actualBackend := store.Backend()
 	_, err = probe.Finish(inputDigest, map[string]any{"policy": state, "backend": actualBackend,
-		"requested_mode": mode, "target_payload_bytes": target, "achieved_payload_bytes": committed * payloadSize,
+		"requested_mode": mode, "target_payload_bytes": target, "achieved_payload_bytes": committed * uint64(payloadSize),
+		"payload_size": payloadSize, "batch_entries": batchCount,
 		"committed_entries": committed, "completed": failure == nil, "typed_exhaustion": failure != nil,
 		"migration_operation_seconds": migrationSeconds, "concurrent_allocated_bytes": concurrentBytes.Load()})
 	if err != nil {
@@ -185,26 +233,35 @@ func TestM5WorkingSet(t *testing.T) {
 	var after []byte
 	var scanned uint64
 	resultHash := sha256.New()
+	scanCount := 1
+	if target > 1_000_000_000 {
+		scanCount = 128
+	}
 	for {
-		rows, err := store.Scan(context.Background(), nil, after, 1)
+		rows, err := store.Scan(context.Background(), nil, after, scanCount)
+		if errors.Is(err, ErrWorkingMemoryLimitExceeded) && scanCount > 1 {
+			scanCount = max(1, scanCount/2)
+			continue
+		}
 		if err != nil {
 			t.Fatal("valid retained state unreadable after admission failure", err)
 		}
 		if len(rows) == 0 {
 			break
 		}
-		row := rows[0]
-		if len(row.Key) != 8 || binary.BigEndian.Uint64(row.Key) != scanned {
-			t.Fatal("duplicate, unordered or missing retained entry")
+		for _, row := range rows {
+			if len(row.Key) != 8 || binary.BigEndian.Uint64(row.Key) != scanned {
+				t.Fatal("duplicate, unordered or missing retained entry")
+			}
+			expected := encode(scanned, keys[:8], values[:payloadSize+sealed.NonceSize()+sealed.Overhead()])
+			if !bytes.Equal(row.Value, expected) {
+				t.Fatal("corrupt retained ciphertext")
+			}
+			_, _ = resultHash.Write(row.Key)
+			_, _ = resultHash.Write(row.Value)
+			after = row.Key
+			scanned++
 		}
-		expected := encode(scanned, keys[:8], values[:payloadSize+sealed.NonceSize()+sealed.Overhead()])
-		if !bytes.Equal(row.Value, expected) {
-			t.Fatal("corrupt retained ciphertext")
-		}
-		_, _ = resultHash.Write(row.Key)
-		_, _ = resultHash.Write(row.Value)
-		after = row.Key
-		scanned++
 	}
 	if scanned != committed || (failure == nil && hex.EncodeToString(resultHash.Sum(nil)) != inputDigest) {
 		t.Fatal("retained sequence digest mismatch")
@@ -221,7 +278,8 @@ func TestM5WorkingSet(t *testing.T) {
 	}
 	semantic := map[string]any{"complete": true, "input_sha256": inputDigest,
 		"retained_sha256": hex.EncodeToString(resultHash.Sum(nil)), "sequence_verified": true,
-		"completed_workload": failure == nil, "typed_exhaustion": failure != nil, "scratch_clean": true}
+		"verification_scan_rows": scanCount,
+		"completed_workload":     failure == nil, "typed_exhaustion": failure != nil, "scratch_clean": true}
 	encoded, _ := json.MarshalIndent(semantic, "", "  ")
 	if err := os.WriteFile(filepath.Join(output, "semantic.json"), append(encoded, '\n'), 0600); err != nil {
 		t.Fatal(err)

@@ -19,22 +19,39 @@ function overlappingExecutable(root, executable) {
   return /^(vaultic|go|cargo|rustc|compile|asm|link|.*\.test)$/.test(path.basename(executable));
 }
 
+function competingCapture(root, executable, cwd) {
+  const relative = path.relative(root, cwd);
+  return overlappingExecutable(root, executable) &&
+    (!relative || (!relative.startsWith('..' + path.sep) && relative !== '..' && !path.isAbsolute(relative)));
+}
+
 function overlapCheck(root) {
+  const external = {};
   for (const pid of fs.readdirSync('/proc')) {
     if (!/^\d+$/.test(pid)) continue;
     try {
       const executable = fs.readlinkSync(`/proc/${pid}/exe`).replace(/ \(deleted\)$/, '');
-      assert.ok(!overlappingExecutable(root, executable), `overlapping build/backup/test process: ${pid} ${path.basename(executable)}`);
+      if (!overlappingExecutable(root, executable)) continue;
+      const cwd = fs.readlinkSync(`/proc/${pid}/cwd`);
+      assert.ok(!competingCapture(root, executable, cwd), `competing capture process: ${pid} ${path.basename(executable)}`);
+      const name = path.basename(executable).endsWith('.test') ? 'test' : path.basename(executable);
+      external[name] = (external[name] || 0) + 1;
     } catch (error) {
       if (!['ENOENT', 'ESRCH', 'EINVAL'].includes(error.code)) throw error;
     }
   }
+  return external;
 }
 
 function watchOverlap(root) {
   let checks = 0;
+  const externalPeak = {};
   const inspect = () => {
-    try { overlapCheck(root); checks++; }
+    try {
+      const external = overlapCheck(root);
+      for (const [name, count] of Object.entries(external)) externalPeak[name] = Math.max(externalPeak[name] || 0, count);
+      checks++;
+    }
     catch (error) {
       write(path.join(root, 'overlap-violation.json'), {checks, reason: error.message});
       process.stderr.write(error.message + '\n');
@@ -44,22 +61,27 @@ function watchOverlap(root) {
   inspect();
   setInterval(inspect, 100);
   process.on('SIGTERM', () => {
-    write(path.join(root, 'overlap-monitor.json'), {checks, interval_milliseconds: 100, violation: false});
+    write(path.join(root, 'overlap-monitor.json'), {checks, interval_milliseconds: 100, violation: false,
+      scope: 'owned capture; unrelated host activity allowed by operator', external_process_peak_counts: externalPeak});
     process.exit(0);
   });
 }
 
-function plan(root, emit = true) {
+function plan(root, emit = true, profile = process.env.PHASE35_M5_PROFILE || 'reduced') {
+  assert.ok(['reduced', 'extended'].includes(profile));
   const repetitions = Number(process.env.PHASE35_M5_REPETITIONS || 4);
   assert.ok(Number.isInteger(repetitions) && repetitions >= 3 && repetitions <= 12);
   const orders = [['pebble', 'ram', 'kv', 'auto'], ['ram', 'auto', 'pebble', 'kv'],
     ['kv', 'pebble', 'auto', 'ram'], ['auto', 'kv', 'ram', 'pebble']];
   const groups = [];
-  for (const scenario of ['initial', 'unchanged', 'churn', 'high-live-backup', 'import-indexes', 'check-full', 'check-legacy']) {
-    for (const limit of ['32MiB', '128MiB', '512MiB']) groups.push({kind: 'workflow', scenario, limit});
+  const scenarios = ['initial', 'unchanged', 'churn', 'high-live-backup', 'import-indexes', 'check-full', 'check-legacy'];
+  if (profile === 'extended') scenarios.push('import-full');
+  for (const scenario of scenarios) {
+    for (const limit of profile === 'extended' ? ['32MiB', '512MiB', '8GiB'] : ['32MiB', '128MiB', '512MiB']) groups.push({kind: 'workflow', scenario, limit});
   }
-  for (const [scenario, limit, payload] of [['below', '32MiB', 1048576], ['near', '32MiB', 6291456],
-    ['above', '16MiB', 50331648], ['high-live', '8GiB', 1000000000]]) {
+  const working = profile === 'extended' ? [['high-live-10GB', '32GiB', 10000000000], ['high-live-100GB', '140GiB', 100000000000]] :
+    [['below', '32MiB', 1048576], ['near', '32MiB', 6291456], ['above', '16MiB', 50331648], ['high-live', '8GiB', 1000000000]];
+  for (const [scenario, limit, payload] of working) {
     groups.push({kind: 'working', scenario, limit, payload});
   }
   const cases = [];
@@ -70,20 +92,24 @@ function plan(root, emit = true) {
       cases.push({...group, mode, repeat, id});
     }
   }
-  const result = {milestone: '35-M5', repetitions, gomaxprocs: 4, gc: 'default', soft_limit: 'default',
-    storage: 'actual host VM vdisk; warm file cache; no global cache drop',
-    isolated_memory_max: '12G', isolated_swap_max: '0', sampler_milliseconds: 50,
+  const result = {milestone: '35-M5', profile, repetitions, scenario_groups: groups.length, gomaxprocs: 4, gc: 'default', soft_limit: 'default',
+    storage: profile === 'extended' ? 'operator-authorized disposable NFS source/repository/scratch; warm cache; no global cache drop' : 'actual host VM vdisk; warm file cache; no global cache drop',
+    isolated_memory_max: profile === 'extended' ? '200G' : '12G', isolated_memory_max_bytes: profile === 'extended' ? 214748364800 : 12884901888,
+    test_timeout: profile === 'extended' ? '24h' : '5m', isolated_swap_max: '0', sampler_milliseconds: 50,
     baseline: 'archived M4 parent, policy omitted, identical measurement-only overlay',
+    baseline_revision: 'c567dd4561d512162d823ccbfcb3d8578c9690a1',
+    activity_scope: 'owned capture; unrelated host activity allowed by operator',
     gates: {gc_share_increase: .02, assist_share_increase: .02, pause_floor_seconds: .01,
       pause_ratio: 1.25, operation_p99_ratio: 1.10, minimum_tail_observations: 100},
     exclusions: ['Pack staging and ordinary repository cache are not working-state spills',
       'Index-only timing excludes snapshot JSON setup/verification and full tree/path traversal',
       'Synthetic high-live probe is not an actual concurrent production backup'],
     pending: [
-      {case: 'full-snapshot-path-import', classification: 'incomplete', reason: 'retained isolated 2049-file full traversal exceeded the initial 120-second bound; not replaced by index-only timing'},
-      {case: 'NFS-source-and-HDD/NFS-scratch', classification: 'incomplete', reason: 'no separately approved disposable NFS/HDD fixture endpoint'},
+      ...(profile === 'reduced' ? [{case: 'full-snapshot-path-import', classification: 'incomplete', reason: 'covered separately by extended matrix'},
+        {case: 'NFS-source-and-scratch', classification: 'incomplete', reason: 'covered separately by extended matrix'},
+        {case: '10GB-and-100GB-retained-state', classification: 'incomplete', reason: 'covered separately by extended matrix'}] : []),
+      {case: 'HDD-scratch', classification: 'incomplete', reason: 'VM vdisk and NFS are measured; physical HDD media identity is not known'},
       {case: 'cold-cache', classification: 'incomplete', reason: 'no global kernel cache manipulation authorized; cloned/read inputs are warm'},
-      {case: '10GB-and-100GB-retained-state', classification: 'incomplete', reason: 'separately authorized large-scale matrix pending; no extrapolation from the measured 1GB synthetic state'},
       {case: 'real-legacy-distribution-damaged-input-duplicates-and-mismatch-scopes', classification: 'incomplete', reason: 'semantic regression fixtures retained separately; generated repository timing is not a real production distribution'},
       {case: 'production-operator-SLO', classification: 'incomplete', reason: 'no supplied operator SLO or production trial authorization'}
     ], cases};
@@ -96,15 +122,17 @@ function plan(root, emit = true) {
 function analyze(root) {
   const frozen = read(path.join(root, 'plan.json'));
   assert.equal(hash(fs.readFileSync(path.join(root, 'plan.json'))), fs.readFileSync(path.join(root, 'plan.sha256'), 'utf8').trim(), 'frozen plan changed');
-  assert.ok(frozen.repetitions >= 3 && frozen.cases.length === 25 * 4 * frozen.repetitions);
+  assert.ok(frozen.repetitions >= 3 && frozen.cases.length === frozen.scenario_groups * 4 * frozen.repetitions);
   assert.equal(new Set(frozen.cases.map(entry => entry.id)).size, frozen.cases.length);
+  assert.equal(fs.readFileSync(path.join(root, 'baseline-revision.txt'), 'utf8').trim(), frozen.baseline_revision);
   const events = filename => Object.fromEntries(fs.readFileSync(path.join(root, filename), 'utf8').trim().split('\n').map(line => line.split(' ')));
   const beforeEvents = events('cgroup-before.events'), afterEvents = events('cgroup-after.events');
   for (const name of ['oom', 'oom_kill', 'max']) assert.equal(Number(afterEvents[name]), Number(beforeEvents[name]), 'cgroup pressure/OOM gate: ' + name);
-  assert.equal(fs.readFileSync(path.join(root, 'cgroup-limits.txt'), 'utf8'), '12884901888\n0\n');
+  assert.equal(fs.readFileSync(path.join(root, 'cgroup-limits.txt'), 'utf8'), `${frozen.isolated_memory_max_bytes}\n0\n`);
   assert.ok(!fs.existsSync(path.join(root, 'overlap-violation.json')), 'competing workload observed');
   const monitor = read(path.join(root, 'overlap-monitor.json'));
   assert.ok(monitor.checks > 0 && monitor.interval_milliseconds === 100 && monitor.violation === false);
+  assert.equal(monitor.scope, frozen.activity_scope);
   const targets = ['linux/amd64', 'linux/arm64', 'linux/386', 'linux/arm', 'darwin/amd64', 'darwin/arm64',
     'windows/amd64', 'windows/arm64', 'freebsd/amd64', 'freebsd/arm64', 'openbsd/amd64', 'openbsd/arm64'];
   assert.deepEqual(fs.readFileSync(path.join(root, 'core-matrix.txt'), 'utf8').trim().split('\n'),
@@ -115,8 +143,8 @@ function analyze(root) {
     assert.ok(!records.some(record => record.Action === 'fail' || record.Action === 'skip'));
     const names = new Set(records.filter(record => record.Action === 'pass').map(record => record.Test));
     const required = filename === 'measurement-race.jsonl'
-      ? ['TestM5ProbeOwnershipAndBounds', 'TestM5WorkingRuntimeIntervals', 'TestWorkingRuntimeAvailabilityAndPrivacy']
-      : ['TestM3ImportParity', 'TestM3SplitImportParity', 'TestM3CheckParity', 'TestM4FindingsAdmissionAndReplacement', 'TestM4SorterAggregatePressure',
+      ? ['TestM5ProbeOwnershipAndBounds', 'TestM5LargeLatencyHistogram', 'TestM5WorkingRuntimeIntervals', 'TestWorkingRuntimeAvailabilityAndPrivacy', 'TestM5WorkingPolicyMeasurementBoundary']
+      : ['TestM3ImportParity', 'TestM3SplitImportParity', 'TestM3CheckParity', 'TestCheckValidatesDeclaredReadSession', 'TestCheckTelemetryIncludesFinalReadSessionValidation', 'TestM4FindingsAdmissionAndReplacement', 'TestM4SorterAggregatePressure',
         'TestCheckKVSpoolSortsDuplicatesAcrossMergePasses', 'TestLocationMultisetSpoolPreservesDuplicatesAcrossMergePasses',
         'TestLocationSpoolRejectsScratchOverflowAndCorruption', 'TestSnapshotTraversalLimitsLeaveNoCheckpoint'];
     for (const name of required) assert.ok(names.has(name), 'missing mandatory regression gate: ' + name);
@@ -153,6 +181,11 @@ function analyze(root) {
     }
     if (entry.kind === 'workflow') {
       assert.ok(semantic.restore_verified || semantic.exact_check_verified || (semantic.typed_exhaustion && semantic.exhaustion_verified));
+      if (entry.scenario === 'import-full' && semantic.completed_workload) {
+        assert.equal(semantic.traversal_verified, true);
+        assert.match(semantic.traversal_sha256, /^[a-f0-9]{64}$/);
+        assert.equal(semantic.timed_import_scope, 'full legacy indexes, snapshots, trees and paths');
+      }
       if (entry.scenario === 'unchanged' && semantic.completed_workload) {
         const summary = metric.working_state.backup_summary;
         assert.equal(summary.files_new, 0);
@@ -186,11 +219,17 @@ function analyze(root) {
         assert.ok(metric.working_state.migration_operation_seconds > 0);
       }
       if (entry.scenario === 'above' && entry.mode === 'ram') assert.equal(semantic.typed_exhaustion, true);
-      if (entry.scenario === 'high-live' && semantic.completed_workload) {
-        assert.ok(metric.working_state.achieved_payload_bytes >= 1000000000);
+      if (entry.scenario.startsWith('high-live') && semantic.completed_workload) {
+        assert.ok(metric.working_state.achieved_payload_bytes >= entry.payload);
         assert.equal(metric.working_state.concurrent_allocated_bytes, 3 * 1024 ** 3);
         assert.equal(metric.lookup_latency.count, 1536, 'missing interleaved high-live lookups');
         assert.ok(metric.runtime_delta.gc_cycles > 0, 'no high-live store GC observed');
+        if (entry.payload > 1000000000) {
+          assert.equal(metric.latency_histogram, true);
+          assert.equal(metric.working_state.payload_size, 32768);
+          assert.equal(metric.working_state.batch_entries, 31);
+          assert.ok(metric.latency_p99_lower_seconds <= metric.latency_p99_seconds);
+        }
       }
     }
     const key = [entry.kind, entry.scenario, entry.limit, entry.repeat].join('/');
@@ -226,7 +265,7 @@ function analyze(root) {
       } else {
         const tailAvailable = metric.latency_count >= frozen.gates.minimum_tail_observations &&
           baseline.metric.latency_count >= frozen.gates.minimum_tail_observations;
-        const lookupRequired = item.entry.kind === 'working' && item.entry.scenario === 'high-live';
+        const lookupRequired = item.entry.kind === 'working' && item.entry.scenario.startsWith('high-live');
         const lookupAvailable = !lookupRequired || (metric.lookup_latency.count >= frozen.gates.minimum_tail_observations &&
           baseline.metric.lookup_latency.count >= frozen.gates.minimum_tail_observations);
         const cpuAvailable = cpu > 0 && baselineCPU > 0 && !missing.some(name =>
@@ -242,11 +281,15 @@ function analyze(root) {
           frozen.gates.pause_ratio * baseline.metric.runtime_delta.gc_pause_p99_upper_seconds)) reasons.push('pause p99 exceeds frozen paired baseline');
         if (pauseAvailable && metric.after.gc_pause_p99_seconds_cumulative > Math.max(frozen.gates.pause_floor_seconds,
           frozen.gates.pause_ratio * baseline.metric.after.gc_pause_p99_seconds_cumulative)) reasons.push('cumulative pause p99 exceeds original M0 gate');
-        if (tailAvailable && metric.latency_p99_seconds > frozen.gates.operation_p99_ratio * baseline.metric.latency_p99_seconds) reasons.push('operation p99 exceeds frozen paired baseline');
+        const lower = metric.latency_histogram ? metric.latency_p99_lower_seconds : metric.latency_p99_seconds;
+        const baselineLower = baseline.metric.latency_histogram ? baseline.metric.latency_p99_lower_seconds : baseline.metric.latency_p99_seconds;
+        const uncertainTail = tailAvailable && metric.latency_p99_seconds > frozen.gates.operation_p99_ratio * baselineLower &&
+          lower <= frozen.gates.operation_p99_ratio * baseline.metric.latency_p99_seconds;
+        if (tailAvailable && lower > frozen.gates.operation_p99_ratio * baseline.metric.latency_p99_seconds) reasons.push('operation p99 exceeds frozen paired baseline');
         if (lookupRequired && lookupAvailable && metric.lookup_latency.p99_seconds >
           frozen.gates.operation_p99_ratio * baseline.metric.lookup_latency.p99_seconds) reasons.push('concurrent lookup p99 exceeds frozen paired baseline');
         if (reasons.length) classification = 'rejected';
-        if (missing.length || !cpuAvailable || !tailAvailable || !pauseAvailable || !lookupAvailable) {
+        if (missing.length || !cpuAvailable || !tailAvailable || !pauseAvailable || !lookupAvailable || uncertainTail) {
           if (classification !== 'rejected') classification = 'incomplete';
           reasons.push('unsupported/coarse metrics or insufficient operation-tail observations');
         }
@@ -284,7 +327,7 @@ function analyze(root) {
       median_baseline_wall_ratio: median(matched.map(item => item.baseline_wall_ratio))});
   }
   const result = {milestone: '35-M5', semantic_cases: cases.length, repetitions: frozen.repetitions,
-    actual_near_budget_migrations: frozen.repetitions,
+    actual_near_budget_migrations: frozen.cases.filter(entry => entry.scenario === 'near' && entry.mode === 'auto').length,
     accepted: cases.filter(item => item.classification === 'accepted').length,
     rejected: cases.filter(item => item.classification === 'rejected').length,
     incomplete: cases.filter(item => item.classification === 'incomplete').length,
@@ -295,6 +338,11 @@ function analyze(root) {
 }
 
 function selftest() {
+  assert.equal(competingCapture('/owned', '/usr/bin/go', '/owned'), true);
+  assert.equal(competingCapture('/owned', '/usr/bin/rustc', '/owned/scratch'), true);
+  assert.equal(competingCapture('/owned', '/usr/bin/rustc', '/unrelated'), false);
+  assert.equal(competingCapture('/owned', '/usr/bin/go', '/owned-other'), false);
+  assert.equal(competingCapture('/owned', '/owned/bin/candidate-working.test', '/owned/scratch'), false);
   assert.equal(overlappingExecutable('/owned', '/owned/bin/candidate-workflow.test'), false);
   assert.equal(overlappingExecutable('/owned', '/owned/bin-foreign/candidate-workflow.test'), true);
   assert.equal(overlappingExecutable('/owned', '/usr/bin/cargo'), true);
@@ -304,18 +352,19 @@ function selftest() {
   assert.throws(() => median([]));
   const root = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'vaultic-m5-analyzer-selftest-'));
   try {
-    const frozen = plan(root, false);
+    const frozen = plan(root, false, 'reduced');
+    fs.writeFileSync(path.join(root, 'baseline-revision.txt'), frozen.baseline_revision + '\n');
     fs.mkdirSync(path.join(root, 'logs'));
     fs.mkdirSync(path.join(root, 'results'));
     fs.writeFileSync(path.join(root, 'cgroup-before.events'), 'max 0\noom 0\noom_kill 0\n');
     fs.copyFileSync(path.join(root, 'cgroup-before.events'), path.join(root, 'cgroup-after.events'));
     fs.writeFileSync(path.join(root, 'cgroup-limits.txt'), '12884901888\n0\n');
-    write(path.join(root, 'overlap-monitor.json'), {checks: 100, interval_milliseconds: 100, violation: false});
+    write(path.join(root, 'overlap-monitor.json'), {checks: 100, interval_milliseconds: 100, violation: false, scope: frozen.activity_scope});
     fs.writeFileSync(path.join(root, 'core-matrix.txt'), ['linux/amd64', 'linux/arm64', 'linux/386', 'linux/arm',
       'darwin/amd64', 'darwin/arm64', 'windows/amd64', 'windows/arm64', 'freebsd/amd64', 'freebsd/arm64',
       'openbsd/amd64', 'openbsd/arm64'].map(target => `PASS ${target} CGO_ENABLED=0\n`).join(''));
-    const gates = ['TestM5ProbeOwnershipAndBounds', 'TestM5WorkingRuntimeIntervals', 'TestWorkingRuntimeAvailabilityAndPrivacy',
-      'TestM3ImportParity', 'TestM3SplitImportParity', 'TestM3CheckParity', 'TestM4FindingsAdmissionAndReplacement', 'TestM4SorterAggregatePressure',
+    const gates = ['TestM5ProbeOwnershipAndBounds', 'TestM5LargeLatencyHistogram', 'TestM5WorkingRuntimeIntervals', 'TestWorkingRuntimeAvailabilityAndPrivacy', 'TestM5WorkingPolicyMeasurementBoundary',
+      'TestM3ImportParity', 'TestM3SplitImportParity', 'TestM3CheckParity', 'TestCheckValidatesDeclaredReadSession', 'TestCheckTelemetryIncludesFinalReadSessionValidation', 'TestM4FindingsAdmissionAndReplacement', 'TestM4SorterAggregatePressure',
       'TestCheckKVSpoolSortsDuplicatesAcrossMergePasses', 'TestLocationMultisetSpoolPreservesDuplicatesAcrossMergePasses',
       'TestLocationSpoolRejectsScratchOverflowAndCorruption', 'TestSnapshotTraversalLimitsLeaveNoCheckpoint'];
     for (const filename of ['measurement-race.jsonl', 'semantic-regressions.jsonl']) {
@@ -378,6 +427,13 @@ function selftest() {
     assert.equal(classified.classification, 'rejected');
     assert.ok(classified.reasons.includes('GC CPU share exceeds frozen paired baseline'));
     assert.ok(classified.reasons.includes('unsupported/coarse metrics or insufficient operation-tail observations'));
+    fs.writeFileSync(measurementPath, originalMeasurement);
+    const uncertain = JSON.parse(originalMeasurement);
+    uncertain.latency_histogram = true;
+    uncertain.latency_p99_lower_seconds = .109;
+    uncertain.latency_p99_seconds = .111;
+    write(measurementPath, uncertain);
+    assert.equal(analyze(root).cases.find(entry => entry.id === candidate.id).classification, 'incomplete');
     fs.writeFileSync(measurementPath, originalMeasurement);
     const high = frozen.cases.find(entry => entry.kind === 'working' && entry.scenario === 'high-live' && entry.mode === 'kv');
     const highPath = path.join(root, 'results', high.id, 'measurement.json');

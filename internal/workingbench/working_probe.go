@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	hdr "github.com/HdrHistogram/hdrhistogram-go"
 	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/shirou/gopsutil/v4/process"
 )
@@ -38,34 +39,37 @@ type WorkingProbeOS struct {
 }
 
 type WorkingProbeResult struct {
-	WallSeconds       float64                          `json:"wall_seconds"`
-	Before            telemetry.WorkingRuntimeSnapshot `json:"before"`
-	After             telemetry.WorkingRuntimeSnapshot `json:"after"`
-	RuntimeDelta      telemetry.WorkingRuntimeInterval `json:"runtime_delta"`
-	OSBefore          WorkingProbeOS                   `json:"os_before"`
-	OSAfter           WorkingProbeOS                   `json:"os_after"`
-	Peak              WorkingProbeOS                   `json:"sampled_os_peak"`
-	PeakHeapBytes     uint64                           `json:"sampled_heap_peak_bytes"`
-	PeakRuntimeBytes  uint64                           `json:"sampled_runtime_peak_bytes"`
-	PeakScanBytes     uint64                           `json:"sampled_scan_peak_bytes"`
-	PeakObjects       uint64                           `json:"sampled_objects_peak"`
-	Samples           uint64                           `json:"samples"`
-	LatencyCount      int                              `json:"latency_count"`
-	LatencyP50Seconds float64                          `json:"latency_p50_seconds"`
-	LatencyP95Seconds float64                          `json:"latency_p95_seconds"`
-	LatencyP99Seconds float64                          `json:"latency_p99_seconds"`
-	LatencyMaxSeconds float64                          `json:"latency_max_seconds"`
-	LookupLatency     WorkingProbeLatency              `json:"lookup_latency"`
-	SemanticSHA256    string                           `json:"semantic_sha256"`
-	State             any                              `json:"working_state,omitempty"`
+	WallSeconds            float64                          `json:"wall_seconds"`
+	Before                 telemetry.WorkingRuntimeSnapshot `json:"before"`
+	After                  telemetry.WorkingRuntimeSnapshot `json:"after"`
+	RuntimeDelta           telemetry.WorkingRuntimeInterval `json:"runtime_delta"`
+	OSBefore               WorkingProbeOS                   `json:"os_before"`
+	OSAfter                WorkingProbeOS                   `json:"os_after"`
+	Peak                   WorkingProbeOS                   `json:"sampled_os_peak"`
+	PeakHeapBytes          uint64                           `json:"sampled_heap_peak_bytes"`
+	PeakRuntimeBytes       uint64                           `json:"sampled_runtime_peak_bytes"`
+	PeakScanBytes          uint64                           `json:"sampled_scan_peak_bytes"`
+	PeakObjects            uint64                           `json:"sampled_objects_peak"`
+	Samples                uint64                           `json:"samples"`
+	LatencyCount           int                              `json:"latency_count"`
+	LatencyP50Seconds      float64                          `json:"latency_p50_seconds"`
+	LatencyP95Seconds      float64                          `json:"latency_p95_seconds"`
+	LatencyP99Seconds      float64                          `json:"latency_p99_seconds"`
+	LatencyP99LowerSeconds float64                          `json:"latency_p99_lower_seconds"`
+	LatencyHistogram       bool                             `json:"latency_histogram"`
+	LatencyMaxSeconds      float64                          `json:"latency_max_seconds"`
+	LookupLatency          WorkingProbeLatency              `json:"lookup_latency"`
+	SemanticSHA256         string                           `json:"semantic_sha256"`
+	State                  any                              `json:"working_state,omitempty"`
 }
 
 type WorkingProbeLatency struct {
-	Count      int     `json:"count"`
-	P50Seconds float64 `json:"p50_seconds"`
-	P95Seconds float64 `json:"p95_seconds"`
-	P99Seconds float64 `json:"p99_seconds"`
-	MaxSeconds float64 `json:"max_seconds"`
+	Count           int     `json:"count"`
+	P50Seconds      float64 `json:"p50_seconds"`
+	P95Seconds      float64 `json:"p95_seconds"`
+	P99Seconds      float64 `json:"p99_seconds"`
+	P99LowerSeconds float64 `json:"p99_lower_seconds"`
+	MaxSeconds      float64 `json:"max_seconds"`
 }
 
 type WorkingProbe struct {
@@ -78,6 +82,7 @@ type WorkingProbe struct {
 	mutex        sync.Mutex
 	latencies    []time.Duration
 	lookups      []time.Duration
+	histogram    *hdr.Histogram
 	finishOnce   sync.Once
 	finished     WorkingProbeResult
 	finishErr    error
@@ -262,9 +267,25 @@ func (probe *WorkingProbe) LookupLatency(duration time.Duration) error {
 	return probe.recordLatency(&probe.lookups, duration)
 }
 
+func (probe *WorkingProbe) EnableLatencyHistogram() error {
+	probe.mutex.Lock()
+	defer probe.mutex.Unlock()
+	if probe.closed || len(probe.latencies) != 0 || probe.histogram != nil {
+		return errors.New("histogram must be enabled before latency observations")
+	}
+	probe.histogram = hdr.New(1, int64(24*time.Hour), 3)
+	return nil
+}
+
 func (probe *WorkingProbe) recordLatency(samples *[]time.Duration, duration time.Duration) error {
 	probe.mutex.Lock()
 	defer probe.mutex.Unlock()
+	if samples == &probe.latencies && probe.histogram != nil {
+		if probe.closed || duration < 0 || duration > 24*time.Hour {
+			return errors.New("invalid histogram latency observation")
+		}
+		return probe.histogram.RecordValue(int64(duration))
+	}
 	if probe.closed || duration < 0 || len(*samples) == cap(*samples) {
 		return errors.New("invalid or excess benchmark latency observations")
 	}
@@ -284,6 +305,32 @@ func workingProbeLatency(samples []time.Duration) WorkingProbeLatency {
 	}
 	result.P50Seconds, result.P95Seconds = percentile(50), percentile(95)
 	result.P99Seconds, result.MaxSeconds = percentile(99), percentile(100)
+	result.P99LowerSeconds = result.P99Seconds
+	return result
+}
+
+func workingProbeHistogramLatency(histogram *hdr.Histogram) WorkingProbeLatency {
+	total := histogram.TotalCount()
+	result := WorkingProbeLatency{Count: int(total)}
+	bars := histogram.Distribution()
+	for _, quantile := range []struct {
+		percent int64
+		upper   *float64
+	}{{50, &result.P50Seconds}, {95, &result.P95Seconds}, {99, &result.P99Seconds}, {100, &result.MaxSeconds}} {
+		target := total - total/100*(100-quantile.percent) - total%100*(100-quantile.percent)/100
+		var seen int64
+		for _, bar := range bars {
+			seen += bar.Count
+			if target == 0 || seen < target {
+				continue
+			}
+			*quantile.upper = time.Duration(bar.To).Seconds()
+			if quantile.percent == 99 {
+				result.P99LowerSeconds = time.Duration(bar.From).Seconds()
+			}
+			break
+		}
+	}
 	return result
 }
 
@@ -307,9 +354,14 @@ func (probe *WorkingProbe) finish(semanticSHA256 string, state any) (WorkingProb
 	probe.result.RuntimeDelta = telemetry.WorkingRuntimeDifference(probe.result.Before, probe.result.After)
 	probe.result.SemanticSHA256, probe.result.State = semanticSHA256, state
 	latency := workingProbeLatency(probe.latencies)
+	if probe.histogram != nil {
+		latency = workingProbeHistogramLatency(probe.histogram)
+		probe.result.LatencyHistogram = true
+	}
 	probe.result.LatencyCount, probe.result.LatencyP50Seconds = latency.Count, latency.P50Seconds
 	probe.result.LatencyP95Seconds, probe.result.LatencyP99Seconds = latency.P95Seconds, latency.P99Seconds
 	probe.result.LatencyMaxSeconds = latency.MaxSeconds
+	probe.result.LatencyP99LowerSeconds = latency.P99LowerSeconds
 	probe.result.LookupLatency = workingProbeLatency(probe.lookups)
 	pprof.StopCPUProfile()
 	err := probe.cpu.Close()
