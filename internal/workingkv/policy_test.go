@@ -8,11 +8,194 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	bolt "go.etcd.io/bbolt"
 )
+
+func TestKVLargeGrowthWithinBudget(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("64GiB mapping growth requires a 64-bit address space")
+	}
+	policy, err := NewPolicy(ModeKV, 140<<30, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &WorkingStore{policy: policy, mapLimit: 64 << 30,
+		memoryCharge: ramCharge((64 << 30) + (32 << 10)), diskCharge: 64 << 30,
+		store: &Store{engine: &boltEngine{database: &bolt.DB{}}}}
+	policy.disk, _ = NewBudget(512 << 30)
+	if err := policy.Reserve(store.memoryCharge); err != nil {
+		t.Fatal(err)
+	}
+	if err := policy.ReserveDisk(store.diskCharge); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.growLocked(); err != nil || store.mapLimit != 65<<30 {
+		t.Fatal("avoidable doubling cliff", err, store.mapLimit)
+	}
+	if policy.Budget().Used != store.memoryCharge || policy.disk.Snapshot().Used != store.diskCharge {
+		t.Fatal("mapping accounting mismatch")
+	}
+	beforeMemory, beforeDisk, beforeMap := policy.Budget(), policy.disk.Snapshot(), store.mapLimit
+	policy.disk.lower(beforeDisk.Used)
+	if err := store.growLocked(); !errors.Is(err, ErrWorkingScratchLimitExceeded) || store.mapLimit != beforeMap ||
+		policy.Budget().Used != beforeMemory.Used || policy.disk.Snapshot().Used != beforeDisk.Used {
+		t.Fatal("failed growth changed mapping or leaked reservation", err)
+	}
+	policy.budget.lower(beforeMemory.Used)
+	if err := store.growLocked(); !errors.Is(err, ErrWorkingMemoryLimitExceeded) || store.mapLimit != beforeMap {
+		t.Fatal("growth bypassed managed limit", err)
+	}
+	policy.Release(store.memoryCharge)
+	policy.ReleaseDisk(store.diskCharge)
+	if policy.Budget().Used != 0 || policy.disk.Snapshot().Used != 0 {
+		t.Fatal("growth release leaked reservations")
+	}
+}
+
+func TestPolicyResourceRecoveryBounded(t *testing.T) {
+	resources := Resources{HostLimit: 4 << 30, HostAvailable: 3 << 30,
+		CgroupKnown: true, CgroupLimit: 1 << 30, CgroupUsed: 256 << 20, RSS: 64 << 20, RSSKnown: true}
+	policy, err := Resolve(Configuration{Mode: "ram", RAMLimit: "256MiB"}, resources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial := policy.Budget().Limit
+	if err := policy.Reserve(16 << 20); err != nil {
+		t.Fatal(err)
+	}
+	defer policy.Release(16 << 20)
+	pressure := resources
+	pressure.CgroupUsed = 600 << 20
+	if err := policy.Observe(pressure); err != nil || policy.Budget().Limit >= initial {
+		t.Fatal("pressure did not immediately lower admission", err)
+	}
+	lowered := policy.Budget().Limit
+	for range 2 {
+		if err := policy.Observe(resources); err != nil || policy.Budget().Limit != lowered {
+			t.Fatal("single healthy sample bypassed recovery hysteresis", err)
+		}
+	}
+	if err := policy.Observe(pressure); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := policy.Observe(resources); err != nil || policy.Budget().Limit != lowered {
+			t.Fatal("pressure did not reset recovery", err)
+		}
+	}
+	if err := policy.Observe(resources); err != nil || policy.Budget().Limit != initial {
+		t.Fatal("sustained recovery did not restore safe initial limit", err)
+	}
+	unavailable := resources
+	unavailable.RSSKnown = false
+	if err := policy.Observe(unavailable); err == nil || policy.Budget().Limit != 0 {
+		t.Fatal("unknown envelope did not fail closed", err)
+	}
+	if err := policy.Reserve(1); !errors.Is(err, ErrWorkingMemoryLimitExceeded) {
+		t.Fatal("admission continued after unknown resources", err)
+	}
+	for range 2 {
+		if err := policy.Observe(resources); !errors.Is(err, ErrWorkingMemoryLimitExceeded) || policy.Budget().Limit != 0 {
+			t.Fatal("unknown envelope recovered prematurely", err)
+		}
+	}
+	if err := policy.Observe(resources); err != nil || policy.Budget().Limit != initial {
+		t.Fatal("valid resource observations did not recover", err)
+	}
+	resources.CgroupLimit, resources.HostAvailable = 4<<30, 4<<30
+	for range 5 {
+		if err := policy.Observe(resources); err != nil || policy.Budget().Limit > initial {
+			t.Fatal("recovery raised the configured startup ceiling", err)
+		}
+	}
+}
+
+func TestPolicyOwnedCacheAcrossRemap(t *testing.T) {
+	resources := Resources{HostLimit: 300 << 30, HostAvailable: 250 << 30,
+		CgroupKnown: true, CgroupLimit: 200 << 30, RSSKnown: true}
+	policy, err := Resolve(Configuration{Mode: "kv", RAMLimit: "140GiB", Scratch: t.TempDir(), Reserve: "256MiB"}, resources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := policy.Reserve(100 << 30); err != nil {
+		t.Fatal(err)
+	}
+	defer policy.Release(100 << 30)
+	resources.CgroupUsed, resources.RSS, resources.OwnedFileCache = 84<<30, 248<<20, 84<<30
+	if err := policy.Observe(resources); err != nil || policy.Budget().Limit != 140<<30 {
+		t.Fatal("owned page cache lost its admission credit after remap", err, policy.Snapshot("", ""))
+	}
+	resources.RSS = 84 << 30
+	capacity, _, err := envelope(resources, 256<<20)
+	if err != nil || capacity != (200<<30)-(256<<20) {
+		t.Fatal("RSS and owned cache were double counted", capacity, err)
+	}
+	resources.RSS, resources.CgroupUsed = 248<<20, 180<<30
+	if err := policy.Observe(resources); !errors.Is(err, ErrWorkingMemoryLimitExceeded) {
+		t.Fatal("owned cache credit masked unrelated cgroup pressure", err)
+	}
+	resources.OwnedFileCache = 0
+	capacity, _, err = envelope(resources, 256<<20)
+	if err != nil || capacity >= 21<<30 {
+		t.Fatal("unknown cache received admission credit", capacity, err)
+	}
+	resources.RSSKnown = false
+	if err := policy.Observe(resources); err == nil || policy.Budget().Limit != 0 {
+		t.Fatal("cache attribution bypassed unavailable RSS", err)
+	}
+}
+
+func TestPolicyCacheFileOwnership(t *testing.T) {
+	policy, err := NewPolicy(ModeKV, 64<<20, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenWorking(WithPolicy(t.Context(), policy), "", "cache-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if store.cacheFile == nil || len(policy.cacheFiles) != 1 {
+		t.Fatal("private KV file was not registered")
+	}
+	if store.store.engine.(*boltEngine).database.FreelistType != bolt.FreelistMapType {
+		t.Fatal("KV allocation fell back to the linear array freelist")
+	}
+	if err := store.Put(t.Context(), []Entry{{[]byte("key"), bytes.Repeat([]byte{1}, 128<<10)}}); err != nil {
+		t.Fatal(err)
+	}
+	cached, err := cachedFileBytes(store.cacheFile)
+	if err == nil {
+		if cached < 128<<10 || policy.ownedFileCacheBytes() != cached {
+			t.Fatal("owned cache census missing written pages", cached)
+		}
+	} else if policy.ownedFileCacheBytes() != 0 {
+		t.Fatal("failed cache probe received admission credit", err)
+	} else {
+		t.Log("cache census unavailable; conservative RSS-only admission:", err)
+	}
+	var sampling sync.WaitGroup
+	for range 4 {
+		sampling.Go(func() {
+			for range 64 {
+				_ = policy.ownedFileCacheBytes()
+			}
+		})
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	sampling.Wait()
+	if len(policy.cacheFiles) != 0 || policy.ownedFileCacheBytes() != 0 || policy.Budget().Used != 0 {
+		t.Fatal("closed file retained ownership or reservation")
+	}
+}
 
 func TestM4AtomicMigration(t *testing.T) {
 	root := t.TempDir()
@@ -42,6 +225,9 @@ func TestM4AtomicMigration(t *testing.T) {
 	if store.Backend() != "bbolt" {
 		t.Fatal("no migration")
 	}
+	if store.cacheFile == nil || len(policy.cacheFiles) != 1 {
+		t.Fatal("migration did not transfer owned cache attribution")
+	}
 	rows, err := store.Scan(ctx, nil, nil, 1024)
 	if err != nil || len(rows) != 32 {
 		t.Fatal("migration lost records", len(rows), err)
@@ -49,7 +235,7 @@ func TestM4AtomicMigration(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if policy.Budget().Used != 0 {
+	if policy.Budget().Used != 0 || len(policy.cacheFiles) != 0 {
 		t.Fatal("migration reservation leak", policy.Budget())
 	}
 }

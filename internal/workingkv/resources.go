@@ -23,14 +23,15 @@ type Configuration struct {
 }
 
 type Resources struct {
-	HostLimit     uint64 `json:"host_limit"`
-	HostAvailable uint64 `json:"host_available"`
-	CgroupLimit   uint64 `json:"cgroup_limit"`
-	CgroupUsed    uint64 `json:"cgroup_used"`
-	RSS           uint64 `json:"rss"`
-	RuntimeBytes  uint64 `json:"runtime_bytes"`
-	RSSKnown      bool   `json:"rss_known"`
-	CgroupKnown   bool   `json:"cgroup_known"`
+	HostLimit      uint64 `json:"host_limit"`
+	HostAvailable  uint64 `json:"host_available"`
+	CgroupLimit    uint64 `json:"cgroup_limit"`
+	CgroupUsed     uint64 `json:"cgroup_used"`
+	RSS            uint64 `json:"rss"`
+	OwnedFileCache uint64 `json:"owned_file_cache_bytes"`
+	RuntimeBytes   uint64 `json:"runtime_bytes"`
+	RSSKnown       bool   `json:"rss_known"`
+	CgroupKnown    bool   `json:"cgroup_known"`
 }
 
 type Resolution struct {
@@ -89,14 +90,15 @@ func envelope(resources Resources, reserve uint64) (uint64, uint64, error) {
 	}
 	available = min(resources.HostLimit, available+resources.RSS)
 	if resources.CgroupKnown {
+		resident := max(resources.RSS, resources.OwnedFileCache)
 		free := uint64(0)
 		if resources.CgroupUsed < resources.CgroupLimit {
 			free = resources.CgroupLimit - resources.CgroupUsed
 		}
-		if resources.RSS > ^uint64(0)-free {
+		if resident > ^uint64(0)-free {
 			return 0, 0, ErrWorkingPolicyConflict
 		}
-		available = min(available, resources.CgroupLimit, free+resources.RSS)
+		available = min(available, resources.CgroupLimit, free+resident)
 	}
 	if reserve >= available {
 		return 0, 0, ErrWorkingMemoryLimitExceeded
@@ -214,6 +216,29 @@ func (policy *Policy) RegisterEvictor(evict func()) func() {
 	return func() {}
 }
 
+func (policy *Policy) applyObservedLimit(limit uint64) bool {
+	policy.mutex.Lock()
+	defer policy.mutex.Unlock()
+	limit = min(limit, policy.ceiling, policy.configured)
+	if limit <= policy.Budget().Limit {
+		policy.budget.lower(limit)
+		policy.recoverySamples, policy.recoveryLimit = 0, 0
+		return false
+	}
+	if policy.recoverySamples == 0 {
+		policy.recoveryLimit = limit
+	} else {
+		policy.recoveryLimit = min(policy.recoveryLimit, limit)
+	}
+	policy.recoverySamples++
+	if policy.recoverySamples < 3 {
+		return false
+	}
+	policy.budget.setLimit(policy.recoveryLimit)
+	policy.recoverySamples, policy.recoveryLimit = 0, 0
+	return true
+}
+
 func (policy *Policy) Observe(resources Resources) error {
 	policy.mutex.Lock()
 	reserve := policy.resolution.Reserve
@@ -223,17 +248,17 @@ func (policy *Policy) Observe(resources Resources) error {
 	unmanaged := max(resources.RSS, resources.RuntimeBytes)
 	unmanaged -= min(unmanaged, managed)
 	if unmanaged > ^uint64(0)-reserve {
-		policy.budget.lower(0)
+		policy.applyObservedLimit(0)
 		policy.emit("stop", "resource_unavailable", 1<<0)
 		return ErrWorkingMemoryLimitExceeded
 	}
 	capacity, headroom, err := envelope(resources, reserve+unmanaged)
 	if err != nil {
-		policy.budget.lower(0)
+		policy.applyObservedLimit(0)
 		policy.emit("stop", "resource_unavailable", 1<<0)
 		return err
 	}
-	policy.budget.lower(capacity - headroom)
+	recovered := policy.applyObservedLimit(capacity - headroom)
 	policy.mutex.Lock()
 	policy.resolution.Resources = resources
 	policy.resolution.Envelope = capacity
@@ -249,6 +274,9 @@ func (policy *Policy) Observe(resources Resources) error {
 		policy.pressure = true
 	}
 	policy.mutex.Unlock()
+	if recovered {
+		policy.emit("recover", "sustained_resource_recovery", 1<<7)
+	}
 	if warning {
 		policy.emit("warn", "managed_pressure", 1<<1)
 		for _, evict := range evictors {
@@ -294,16 +322,45 @@ func (policy *Policy) Start(ctx context.Context, probe func() (Resources, error)
 			case <-ticker.C:
 				resources, err := probe()
 				if err != nil {
-					policy.budget.lower(0)
+					policy.applyObservedLimit(0)
 					policy.emit("stop", "resource_unavailable", 1<<0)
 					continue
 				}
+				resources.OwnedFileCache = policy.ownedFileCacheBytes()
 				_ = policy.Observe(resources)
 			}
 		}
 	}()
 	var once sync.Once
 	return func() { once.Do(func() { cancel(); <-done; policy.emit("complete", "closed", 1<<6) }) }
+}
+
+func (policy *Policy) trackCacheFile(file *os.File) {
+	policy.cacheMutex.Lock()
+	defer policy.cacheMutex.Unlock()
+	if policy.cacheFiles == nil {
+		policy.cacheFiles = make(map[*os.File]struct{})
+	}
+	policy.cacheFiles[file] = struct{}{}
+}
+
+func (policy *Policy) untrackCacheFile(file *os.File) {
+	policy.cacheMutex.Lock()
+	defer policy.cacheMutex.Unlock()
+	delete(policy.cacheFiles, file)
+}
+
+func (policy *Policy) ownedFileCacheBytes() uint64 {
+	policy.cacheMutex.Lock()
+	defer policy.cacheMutex.Unlock()
+	var total uint64
+	for file := range policy.cacheFiles {
+		cached, err := cachedFileBytes(file)
+		if err == nil && cached <= ^uint64(0)-total {
+			total += cached
+		}
+	}
+	return total
 }
 
 func ReadResources() (Resources, error) {

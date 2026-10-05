@@ -28,23 +28,28 @@ var (
 )
 
 type Policy struct {
-	mode       Mode
-	budget     *Budget
-	scratch    string
-	mutex      sync.Mutex
-	migration  contextMutex
-	headroom   uint64
-	stores     int
-	fallback   bool
-	disk       *Budget
-	ramStores  int
-	configured uint64
-	resolution Resolution
-	actions    uint32
-	events     uint64
-	pressure   bool
-	evictors   [4]func()
-	report     func(PolicyEvent)
+	mode            Mode
+	budget          *Budget
+	scratch         string
+	mutex           sync.Mutex
+	cacheMutex      sync.Mutex
+	cacheFiles      map[*os.File]struct{}
+	migration       contextMutex
+	headroom        uint64
+	stores          int
+	fallback        bool
+	disk            *Budget
+	ramStores       int
+	configured      uint64
+	resolution      Resolution
+	actions         uint32
+	events          uint64
+	pressure        bool
+	ceiling         uint64
+	recoveryLimit   uint64
+	recoverySamples uint8
+	evictors        [4]func()
+	report          func(PolicyEvent)
 }
 
 func NewPolicy(mode Mode, limit uint64, scratch string) (*Policy, error) {
@@ -59,7 +64,7 @@ func NewPolicy(mode Mode, limit uint64, scratch string) (*Policy, error) {
 		return nil, err
 	}
 	disk, _ := NewBudget(8 << 30)
-	return &Policy{mode: mode, budget: budget, scratch: scratch, disk: disk, configured: limit}, nil
+	return &Policy{mode: mode, budget: budget, scratch: scratch, disk: disk, configured: limit, ceiling: limit}, nil
 }
 
 func (policy *Policy) Mode() Mode                { return policy.mode }
@@ -94,6 +99,7 @@ type WorkingStore struct {
 	fault          func(string) error
 	verify         func([]byte, []byte) error
 	path           string
+	cacheFile      *os.File
 	backend        string
 	closeErr       error
 	once           sync.Once
@@ -227,6 +233,10 @@ func openDiskWorking(policy *Policy, parent, prefix string) (*WorkingStore, erro
 		engine := store.engine.(*boltEngine)
 		engine.database.MaxSize = int(result.mapLimit)
 		engine.database.AllocSize = 4096
+		if file, err := os.Open(filepath.Join(path, "state.db")); err == nil {
+			result.cacheFile = file
+			policy.trackCacheFile(file)
+		}
 	}
 	return result, nil
 }
@@ -351,6 +361,11 @@ func (store *WorkingStore) migrate(ctx context.Context) error {
 	}
 	old := store.store
 	store.store, store.path, store.backend = destination.store, destination.path, destination.backend
+	if destination.cacheFile != nil {
+		transferPolicy.untrackCacheFile(destination.cacheFile)
+		policy.trackCacheFile(destination.cacheFile)
+		store.cacheFile = destination.cacheFile
+	}
 	policy.mutex.Lock()
 	policy.headroom -= destination.memoryCharge
 	store.mapLimit, store.memoryCharge, store.diskCharge = destination.mapLimit, destination.memoryCharge, destination.diskCharge
@@ -437,6 +452,9 @@ func (store *WorkingStore) putLocked(ctx context.Context, entries []Entry, size 
 
 func (store *WorkingStore) growLocked() error {
 	next := store.mapLimit * 2
+	if store.mapLimit >= 1<<30 {
+		next = store.mapLimit + 1<<30
+	}
 	if next > uint64(^uint(0)>>1) {
 		return ErrWorkingScratchLimitExceeded
 	}
@@ -572,6 +590,11 @@ func (store *WorkingStore) Close() error {
 		defer store.mutex.Unlock()
 		store.closed = true
 		store.closeErr = store.store.Close()
+		if store.cacheFile != nil {
+			store.policy.untrackCacheFile(store.cacheFile)
+			store.closeErr = errors.Join(store.closeErr, store.cacheFile.Close())
+			store.cacheFile = nil
+		}
 		var removeErr error
 		if store.path != "" {
 			if store.fault != nil {

@@ -180,25 +180,29 @@ func (probe *WorkingProbe) readOS() WorkingProbeOS {
 	}
 	if runtime.GOOS != "linux" {
 		result.Unavailable = append(result.Unavailable, "mapping_residency")
-	} else if mappings, err := probe.process.MemoryMapsWithContext(ctx, false); err == nil && mappings != nil {
-		encoded, encodeErr := json.Marshal(mappings)
-		var owned []struct {
-			Path string `json:"path"`
-			Size uint64 `json:"size"`
-			RSS  uint64 `json:"rss"`
-		}
-		if encodeErr != nil || json.Unmarshal(encoded, &owned) != nil {
-			result.Unavailable = append(result.Unavailable, "mapping_residency")
-		} else {
-			for _, mapping := range owned {
-				if withinWorkingProbe(probe.root, mapping.Path) {
-					result.MappedBytes += mapping.Size * 1024
-					result.MappedRSSBytes += mapping.RSS * 1024
+	} else if ownedMapping, err := workingProbeHasOwnedMapping(probe.root); err != nil {
+		result.Unavailable = append(result.Unavailable, "mapping_residency")
+	} else if ownedMapping {
+		if mappings, err := probe.process.MemoryMapsWithContext(ctx, false); err == nil && mappings != nil {
+			encoded, encodeErr := json.Marshal(mappings)
+			var owned []struct {
+				Path string `json:"path"`
+				Size uint64 `json:"size"`
+				RSS  uint64 `json:"rss"`
+			}
+			if encodeErr != nil || json.Unmarshal(encoded, &owned) != nil {
+				result.Unavailable = append(result.Unavailable, "mapping_residency")
+			} else {
+				for _, mapping := range owned {
+					if withinWorkingProbe(probe.root, mapping.Path) {
+						result.MappedBytes += mapping.Size * 1024
+						result.MappedRSSBytes += mapping.RSS * 1024
+					}
 				}
 			}
+		} else {
+			result.Unavailable = append(result.Unavailable, "mapping_residency")
 		}
-	} else {
-		result.Unavailable = append(result.Unavailable, "mapping_residency")
 	}
 	if children, err := probe.process.ChildrenWithContext(ctx); err == nil {
 		for _, child := range children {
@@ -211,22 +215,52 @@ func (probe *WorkingProbe) readOS() WorkingProbeOS {
 	} else if !errors.Is(err, process.ErrorNoChildren) {
 		result.Unavailable = append(result.Unavailable, "child_memory")
 	}
-	if err := filepath.WalkDir(probe.root, func(path string, entry os.DirEntry, walkErr error) error {
+	var err error
+	result.ScratchBytes, err = workingProbeScratchSize(probe.root)
+	if err != nil {
+		result.Unavailable = append(result.Unavailable, "scratch_inventory")
+	}
+	return result
+}
+
+func workingProbeHasOwnedMapping(root string) (bool, error) {
+	file, err := os.Open("/proc/self/maps")
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) >= 6 && withinWorkingProbe(root, strings.Join(fields[5:], " ")) {
+			return true, nil
+		}
+	}
+	return false, scanner.Err()
+}
+
+func workingProbeScratchSize(root string) (uint64, error) {
+	var size uint64
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
+			if path != root && errors.Is(walkErr, os.ErrNotExist) {
+				return nil
+			}
 			return walkErr
 		}
 		if !entry.IsDir() {
 			info, err := entry.Info()
 			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					return nil
+				}
 				return err
 			}
-			result.ScratchBytes += uint64(info.Size())
+			size += uint64(info.Size())
 		}
 		return nil
-	}); err != nil {
-		result.Unavailable = append(result.Unavailable, "scratch_inventory")
-	}
-	return result
+	})
+	return size, err
 }
 
 func withinWorkingProbe(root, path string) bool {

@@ -338,9 +338,11 @@ No production command paths switch backend in this milestone.
 Protocol, review repairs and completion review are complete. Reduced 400-case
 and extended 416-case captures are sealed with independently reproduced analysis
 and explicit accepted/rejected/incomplete classifications. The extended NFS
-capture includes full tree/path import and actual 10/100 GB targets; all modes
-completed 10 GB, but candidate modes exhausted 140 GiB budgets near 60-62 GB
-instead of completing 100 GB. See the [M5 record](phase-35-m5-benchmarks.md).
+capture includes full tree/path import and actual 10/100 GB targets. The
+original candidate modes exhausted 140 GiB budgets near 60-62 GB; completed
+allocator, packing, KV growth and resource-accounting remediation now verifies
+four full 100 GB repetitions in every mode under unchanged limits and gates.
+Historical evidence is preserved. See the [M5 record](phase-35-m5-benchmarks.md).
 The evidence-collection exit gate is met, not production performance approval;
 there is no production recommendation or default change.
 

@@ -219,10 +219,12 @@ func TestM5WorkingSet(t *testing.T) {
 	}
 	state := policy.Snapshot("benchmark", "endpoint")
 	if mode != "pebble" && state.Memory.Used > state.Memory.Limit {
-		t.Fatal("aggregate overspend")
+		t.Fatalf("aggregate overspend: state=%+v committed=%d admission=%v", state, committed, failure)
 	}
 	actualBackend := store.Backend()
+	ramState, _ := store.store.RAMSnapshot()
 	_, err = probe.Finish(inputDigest, map[string]any{"policy": state, "backend": actualBackend,
+		"ram_capacity": ramState, "mapping_capacity_bytes": store.mapLimit, "mapping_memory_charge_bytes": store.memoryCharge,
 		"requested_mode": mode, "target_payload_bytes": target, "achieved_payload_bytes": committed * uint64(payloadSize),
 		"payload_size": payloadSize, "batch_entries": batchCount,
 		"committed_entries": committed, "completed": failure == nil, "typed_exhaustion": failure != nil,

@@ -21,7 +21,7 @@ func openBolt(path string) (engine, error) {
 }
 
 func openBoltLimited(path string, limit int) (engine, error) {
-	db, err := bolt.Open(filepath.Join(path, "state.db"), 0600, &bolt.Options{Timeout: time.Second, NoSync: true, NoFreelistSync: true, MaxSize: limit})
+	db, err := bolt.Open(filepath.Join(path, "state.db"), 0600, &bolt.Options{Timeout: time.Second, NoSync: true, NoFreelistSync: true, FreelistType: bolt.FreelistMapType, MaxSize: limit})
 	if err != nil {
 		return nil, err
 	}

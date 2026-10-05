@@ -42,6 +42,12 @@ func (budget *Budget) lower(limit uint64) {
 	defer budget.mutex.Unlock()
 	budget.state.Limit = min(budget.state.Limit, limit)
 }
+
+func (budget *Budget) setLimit(limit uint64) {
+	budget.mutex.Lock()
+	defer budget.mutex.Unlock()
+	budget.state.Limit = limit
+}
 func (budget *Budget) reserve(size uint64) error {
 	budget.mutex.Lock()
 	defer budget.mutex.Unlock()
@@ -62,6 +68,7 @@ func (budget *Budget) release(size uint64) {
 }
 
 const ramChunkBytes = 64 << 10
+const ramLargeChunkBytes = 1 << 20
 const ramNodeCount = 256
 const ramBaseCharge = 1024
 
@@ -72,17 +79,20 @@ type ramNode struct {
 	height, valueCapacity uint32
 }
 type ramChunk struct {
-	data []byte
-	used uint32
-	live uint64
+	data     []byte
+	used     uint32
+	nextFree uint32
+	live     uint64
 }
 type ramEngine struct {
-	mutex             sync.RWMutex
-	budget            *Budget
-	chunks            []ramChunk
-	nodes             [][]ramNode
-	count, root, tail uint32
-	charged           uint64
+	mutex               sync.RWMutex
+	budget              *Budget
+	chunks              []ramChunk
+	nodes               [][]ramNode
+	count, root, tail   uint32
+	charged             uint64
+	freeHead, freeCount uint32
+	arenaCharge         uint64
 }
 
 func ramCharge(size uint64) uint64 { return size + size/4 + 64 }
@@ -236,6 +246,18 @@ func (impl *ramEngine) put(ctx context.Context, entries []Entry) error {
 	if uint64(impl.count)+newKeys > uint64(^uint32(0))-1 {
 		return ErrWorkingMemoryLimitExceeded
 	}
+	chunkBytes := ramChunkBytes
+	state := impl.budget.Snapshot()
+	if state.Limit >= 16*ramLargeChunkBytes && state.Used <= state.Limit &&
+		state.Limit-state.Used >= 2*ramCharge(ramLargeChunkBytes) {
+		for ordinal := range used {
+			entry := entries[order[ordinal]]
+			if max(len(entry.Key), len(entry.Value)) > ramChunkBytes/4 {
+				chunkBytes = ramLargeChunkBytes
+				break
+			}
+		}
+	}
 	available := 0
 	if impl.tail != 0 {
 		tail := impl.chunks[impl.tail-1]
@@ -259,7 +281,7 @@ func (impl *ramEngine) put(ctx context.Context, entries []Entry) error {
 		}
 		for _, value := range [][]byte{key, value} {
 			if len(value) > available {
-				capacity := max(ramChunkBytes, len(value))
+				capacity := max(chunkBytes, len(value))
 				newChunks++
 				arenaCharge += ramCharge(uint64(capacity))
 				available = capacity
@@ -269,12 +291,7 @@ func (impl *ramEngine) put(ctx context.Context, entries []Entry) error {
 	}
 	neededNodes := (uint64(impl.count) + newKeys + ramNodeCount - 1) / ramNodeCount
 	newNodes := int(neededNodes) - len(impl.nodes)
-	holes := 0
-	for _, chunk := range impl.chunks {
-		if chunk.data == nil {
-			holes++
-		}
-	}
+	holes := int(impl.freeCount)
 	chunkCapacity := cap(impl.chunks)
 	if len(impl.chunks)+max(0, newChunks-holes) > chunkCapacity {
 		chunkCapacity = max(len(impl.chunks)+max(0, newChunks-holes), 2*chunkCapacity, 4)
@@ -326,17 +343,21 @@ func (impl *ramEngine) put(ctx context.Context, entries []Entry) error {
 		}
 		var key ramSpan
 		if index == 0 {
-			key = impl.appendBytes(entry.Key)
+			key = impl.appendBytes(entry.Key, chunkBytes)
 		}
-		value := impl.appendBytes(entry.Value)
+		value := impl.appendBytes(entry.Value, chunkBytes)
 		if index != 0 {
 			node := impl.node(index)
 			if node.valueCapacity != 0 {
 				chunk := &impl.chunks[node.value.chunk]
 				chunk.live -= uint64(node.valueCapacity)
 				if chunk.live == 0 {
+					impl.arenaCharge -= ramCharge(uint64(len(chunk.data)))
 					chunk.data = nil
 					chunk.used = 0
+					chunk.nextFree = impl.freeHead
+					impl.freeHead = node.value.chunk + 1
+					impl.freeCount++
 				}
 			}
 			node.value = value
@@ -354,12 +375,7 @@ func (impl *ramEngine) put(ctx context.Context, entries []Entry) error {
 }
 
 func (impl *ramEngine) retainedCharge() uint64 {
-	charge := uint64(ramBaseCharge)
-	for _, chunk := range impl.chunks {
-		if chunk.data != nil {
-			charge += ramCharge(uint64(len(chunk.data)))
-		}
-	}
+	charge := uint64(ramBaseCharge) + impl.arenaCharge
 	charge += uint64(len(impl.nodes)) * ramCharge(uint64(ramNodeCount)*uint64(unsafe.Sizeof(ramNode{})))
 	if cap(impl.chunks) != 0 {
 		charge += ramCharge(uint64(cap(impl.chunks)) * uint64(unsafe.Sizeof(ramChunk{})))
@@ -370,24 +386,22 @@ func (impl *ramEngine) retainedCharge() uint64 {
 	return charge
 }
 
-func (impl *ramEngine) appendBytes(value []byte) ramSpan {
+func (impl *ramEngine) appendBytes(value []byte, chunkBytes int) ramSpan {
 	if len(value) == 0 {
 		return ramSpan{}
 	}
 	index := int(impl.tail) - 1
 	if index < 0 || len(impl.chunks[index].data)-int(impl.chunks[index].used) < len(value) {
-		index = -1
-		for ordinal := range impl.chunks {
-			if impl.chunks[ordinal].data == nil {
-				index = ordinal
-				break
-			}
-		}
-		if index == -1 {
+		if impl.freeHead != 0 {
+			index = int(impl.freeHead) - 1
+			impl.freeHead = impl.chunks[index].nextFree
+			impl.freeCount--
+		} else {
 			impl.chunks = append(impl.chunks, ramChunk{})
 			index = len(impl.chunks) - 1
 		}
-		impl.chunks[index] = ramChunk{data: make([]byte, max(ramChunkBytes, len(value)))}
+		impl.chunks[index] = ramChunk{data: make([]byte, max(chunkBytes, len(value)))}
+		impl.arenaCharge += ramCharge(uint64(len(impl.chunks[index].data)))
 	}
 	impl.tail = uint32(index) + 1
 	chunk := &impl.chunks[index]
@@ -478,6 +492,7 @@ func (impl *ramEngine) close() error {
 	impl.count = 0
 	impl.root = 0
 	impl.tail = 0
+	impl.freeHead, impl.freeCount, impl.arenaCharge = 0, 0, 0
 	impl.budget.release(impl.charged)
 	impl.charged = 0
 	return nil
@@ -486,6 +501,9 @@ func (impl *ramEngine) close() error {
 type RAMSnapshot struct {
 	Entries                  uint64
 	ArenaCapacityBytes       uint64
+	ArenaLiveBytes           uint64
+	ArenaUnusedBytes         uint64
+	FreeArenaChunks          uint64
 	IndexCapacityBytes       uint64
 	MetadataCapacityBytes    uint64
 	AccountedRetainedBytes   uint64
@@ -500,13 +518,16 @@ func (store *Store) RAMSnapshot() (RAMSnapshot, bool) {
 	}
 	impl.mutex.RLock()
 	defer impl.mutex.RUnlock()
-	result := RAMSnapshot{Entries: uint64(impl.count), AccountedRetainedBytes: impl.charged, Budget: impl.budget.Snapshot()}
+	result := RAMSnapshot{Entries: uint64(impl.count), AccountedRetainedBytes: impl.charged,
+		FreeArenaChunks: uint64(impl.freeCount), Budget: impl.budget.Snapshot()}
 	for _, chunk := range impl.chunks {
 		if chunk.data != nil {
 			result.ArenaCapacityBytes += uint64(len(chunk.data))
+			result.ArenaLiveBytes += chunk.live
 			result.ArenaChunks++
 		}
 	}
+	result.ArenaUnusedBytes = result.ArenaCapacityBytes - result.ArenaLiveBytes
 	result.IndexChunks = uint64(len(impl.nodes))
 	result.IndexCapacityBytes = uint64(len(impl.nodes)) * ramNodeCount * uint64(unsafe.Sizeof(ramNode{}))
 	result.MetadataCapacityBytes = uint64(cap(impl.chunks))*uint64(unsafe.Sizeof(ramChunk{})) + uint64(cap(impl.nodes))*uint64(unsafe.Sizeof([]ramNode{}))

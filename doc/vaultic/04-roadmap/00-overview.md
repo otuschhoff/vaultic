@@ -53,7 +53,7 @@ commit series so it can be reviewed or reverted independently.
 | 32 | [Scalable legacy metadata bulk import](phase-32-scalable-legacy-metadata-bulk-import.md) | implemented; optimization and scenario validation ongoing |
 | 33 | [index check scalability & performance](phase-33-index-check-scalability-and-performance.md) | implemented; production validation reaches SlateDB scan |
 | 34 | [Operational monitoring and bounded metrics export](phase-34-operational-monitoring-and-metrics-export.md) | design |
-| 35 | [RAM-only working memory with a pure-Go KV fallback](phase-35-ram-working-memory-and-kv-fallback.md) | M0-M5 complete; reduced/extended evidence sealed, performance not approved; M6 pending |
+| 35 | [RAM-only working memory with a pure-Go KV fallback](phase-35-ram-working-memory-and-kv-fallback.md) | M0-M5 remediation complete; all modes verified at 100 GB, evidence sealed; production approval/M6 pending |
 | 36 | [Native SMB backup, restore, and Windows metadata indexing](phase-36-native-smb-backup-source.md) | design |
 | 37 | [Writable FUSE and durable writeback](phase-37-writable-fuse-and-durable-writeback.md) | design |
 | 38 | [Writable NFSv3 workspace exports](phase-38-writable-nfsv3-exports.md) | design |

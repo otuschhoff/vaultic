@@ -143,7 +143,10 @@ function analyze(root) {
     assert.ok(!records.some(record => record.Action === 'fail' || record.Action === 'skip'));
     const names = new Set(records.filter(record => record.Action === 'pass').map(record => record.Test));
     const required = filename === 'measurement-race.jsonl'
-      ? ['TestM5ProbeOwnershipAndBounds', 'TestM5LargeLatencyHistogram', 'TestM5WorkingRuntimeIntervals', 'TestWorkingRuntimeAvailabilityAndPrivacy', 'TestM5WorkingPolicyMeasurementBoundary']
+      ? ['TestM5ProbeOwnershipAndBounds', 'TestM5LargeLatencyHistogram', 'TestM5WorkingRuntimeIntervals', 'TestWorkingRuntimeAvailabilityAndPrivacy', 'TestM5WorkingPolicyMeasurementBoundary',
+        'TestRAMFreeListAndIncrementalAccounting', 'TestRAMPackingAtEncryptedBoundary', 'TestKVLargeGrowthWithinBudget',
+        'TestPolicyResourceRecoveryBounded', 'TestPolicyOwnedCacheAcrossRemap', 'TestPolicyCacheFileOwnership',
+        'TestWorkingScratchInventoryConcurrentRemoval']
       : ['TestM3ImportParity', 'TestM3SplitImportParity', 'TestM3CheckParity', 'TestCheckValidatesDeclaredReadSession', 'TestCheckTelemetryIncludesFinalReadSessionValidation', 'TestM4FindingsAdmissionAndReplacement', 'TestM4SorterAggregatePressure',
         'TestCheckKVSpoolSortsDuplicatesAcrossMergePasses', 'TestLocationMultisetSpoolPreservesDuplicatesAcrossMergePasses',
         'TestLocationSpoolRejectsScratchOverflowAndCorruption', 'TestSnapshotTraversalLimitsLeaveNoCheckpoint'];
@@ -364,6 +367,9 @@ function selftest() {
       'darwin/amd64', 'darwin/arm64', 'windows/amd64', 'windows/arm64', 'freebsd/amd64', 'freebsd/arm64',
       'openbsd/amd64', 'openbsd/arm64'].map(target => `PASS ${target} CGO_ENABLED=0\n`).join(''));
     const gates = ['TestM5ProbeOwnershipAndBounds', 'TestM5LargeLatencyHistogram', 'TestM5WorkingRuntimeIntervals', 'TestWorkingRuntimeAvailabilityAndPrivacy', 'TestM5WorkingPolicyMeasurementBoundary',
+      'TestRAMFreeListAndIncrementalAccounting', 'TestRAMPackingAtEncryptedBoundary', 'TestKVLargeGrowthWithinBudget',
+      'TestPolicyResourceRecoveryBounded', 'TestPolicyOwnedCacheAcrossRemap', 'TestPolicyCacheFileOwnership',
+      'TestWorkingScratchInventoryConcurrentRemoval',
       'TestM3ImportParity', 'TestM3SplitImportParity', 'TestM3CheckParity', 'TestCheckValidatesDeclaredReadSession', 'TestCheckTelemetryIncludesFinalReadSessionValidation', 'TestM4FindingsAdmissionAndReplacement', 'TestM4SorterAggregatePressure',
       'TestCheckKVSpoolSortsDuplicatesAcrossMergePasses', 'TestLocationMultisetSpoolPreservesDuplicatesAcrossMergePasses',
       'TestLocationSpoolRejectsScratchOverflowAndCorruption', 'TestSnapshotTraversalLimitsLeaveNoCheckpoint'];

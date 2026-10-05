@@ -58,7 +58,13 @@ envelope. Effective capacity is the smaller configured limit and remaining
 safe envelope, and must be at least 8 MiB for CLI startup. Unsafe requests are
 reported as smaller effective limits, never enlarged silently.
 
-The sampler runs once per second. Limits can only decrease. Missing resources
+The sampler runs once per second. The original M4 limits only decreased; the
+[M5 remediation](phase-35-m5-benchmarks.md#completed-remediation) restores a
+temporarily lowered limit after three consecutive healthy observations, capped
+at the initial safe/configured ceiling. Pressure still lowers immediately and
+resets recovery. Linux private-KV file-cache census prevents remap RSS drops
+from double-charging owned cached pages; failed/unsupported census gets no
+additional credit. Missing resources
 or a reduced limit below retained usage stop admissions and cancel participating
 command work with a preserved typed cause. Warning starts at 75%; recomputable
 caches are evicted before pressure is reevaluated. Pressure begins at 85% and
@@ -118,8 +124,10 @@ so exhausted state admissions cannot block transaction cleanup.
 
 ## Scratch and failures
 
-KV uses pinned bbolt v1.5.0, with a 64 KiB initial ceiling and admitted doubling;
-mapped ceilings and file ceilings are charged separately. Scratch budgets cover
+KV uses pinned bbolt v1.5.0, with a 64 KiB initial ceiling. Following M5
+remediation, admitted growth doubles below 1 GiB and adds 1 GiB thereafter;
+the built-in hashmap freelist avoids linear page-run allocation scans.
+Mapped ceilings and file ceilings are charged separately. Scratch budgets cover
 all sibling stores, sort runs and transfer/merge overlap. Protected owner codecs
 continue to encrypt values and authenticate their domain/key bindings. Roots
 are private, uniquely owned and disposable; arbitrary supplied parents and

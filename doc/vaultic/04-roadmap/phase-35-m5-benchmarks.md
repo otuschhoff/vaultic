@@ -5,9 +5,10 @@
 [Phase 35 specification](phase-35-ram-working-memory-and-kv-fallback.md) |
 [M4 policy and fallback evidence](phase-35-m4-fallback.md)
 
-**Status: M5 evidence collection complete: reduced 400-case and extended
-416-case NFS captures sealed and independently reproduced. Performance
-approval is not established; no production recommendation or default change.**
+**Status: M5 remediation complete: fresh reduced 400-case and extended
+416-case NFS captures sealed and independently reproduced. All modes completed
+four 100 GB repetitions under the unchanged limits. Production performance
+approval remains unestablished; no recommendation or default change.**
 
 ## Frozen protocol
 
@@ -153,10 +154,11 @@ achieved payload/entries over the measured interval, including churn where
 present; workflow source-byte rates are logical inspected input, not physical
 backup upload throughput.
 
-## Boundaries
+## Historical Boundaries
 
-The following intended matrix cells remain explicitly incomplete rather than
-being represented by another workload or filesystem:
+The original captures below retained the following limitations. The later
+remediation capture resolves candidate 100 GB capacity and transient scratch
+inventory gaps; it does not change or reclassify these original observations:
 
 - All 48 extended full-import cases completed verified traversal/reopen/resume;
   generated 2,051-file fixtures are not a real production legacy distribution.
@@ -175,7 +177,7 @@ being represented by another workload or filesystem:
 
 M6 production recommendations and Pebble removal require their own gates.
 
-## Retained evidence
+## Historical Retained Evidence
 
 Reduced capture `/tmp/vaultic-phase35-m5-g2gjVk` passed capture-level gates:
 400 semantic cases, four balanced repetitions, independently reproduced
@@ -321,3 +323,106 @@ another competing Go process during repetition one. Both violation records
 and completed-case artifacts remain retained; neither is accepted evidence.
 Focused trial logs remain at `/tmp/vaultic-phase35-m5-probe-3VcsLr`;
 their isolated passes are not a substitute for the complete repeated matrix.
+
+## Completed Remediation
+
+The October 4 remediation implements all five follow-up recommendations without
+changing payloads, configured caps, safety margins, GC settings or acceptance
+thresholds. The original manifests and classifications above remain untouched.
+
+| Recommendation | Implementation and Discriminating Verification |
+|---|---|
+| Remove quadratic RAM bookkeeping | Indexed free-chunk chain and incremental arena charge replace allocation-time hole/accounting scans. An independent capacity oracle checks reclamation, reuse, exact values and final release. Telemetry alone may walk chunks at the endpoint. |
+| Improve packing | Budget-aware 1 MiB arenas for large spans retain 64 KiB arenas under tight limits. Planning and allocation use the same choice. Six boundary sizes include the unchanged 32,768-byte plaintext plus nonce/tag case; packing, admission and contents are checked. |
+| Remove KV growth cliff | Mapping ceilings double below 1 GiB, then increase by 1 GiB. Memory and disk deltas are admitted before changing the ceiling; denied growth releases reservations and retains state. The synthetic 64-to-65 GiB test requires a 64-bit address space. |
+| Audit resource accounting and recover | Full mapping capacity, transient copies and migration overlap stay charged. Linux `cachestat` measures only registered private KV descriptors, including ownership transfer and close. Cgroup credit is `max(RSS, owned cached bytes)`, never their sum or all cgroup cache. Unsupported/failed probes get no additional credit. Immediate pressure lowering and unavailable-resource failure remain; three consecutive healthy observations recover only to the initial safe/configured ceiling. |
+| Validate progressively and repeat | Focused 1/10/100 GB probes precede new four-repetition 400/416-case sealed captures, required race suites, all 12 pure-Go platform builds, decoded profiles, source/tool/seed pins and independently reproduced analysis. |
+
+Re-evaluation found two additional local causes. Full `smaps` walks on a
+RAM-only 100 GB heap stalled measurement; a cheap owned-mapping preflight now
+avoids those walks only when no owned file mapping exists. KV still measures
+mapping residency. Concurrent compaction/unlink no longer marks the whole
+scratch inventory unavailable for a vanished child; missing roots and other
+I/O failures remain unavailable. Mandatory ownership and concurrent-removal
+regressions cover these paths.
+
+The first repaired KV 100 GB attempt exposed RSS dropping during bbolt remap
+while its owned page cache remained charged to the cgroup. The resource-credit
+repair above fixes this without replacing the mapping charge with RSS. The
+completed diagnostic's profile then found 41.52% CPU in bbolt's linear array
+freelist allocator. Selecting bbolt v1.5.0's built-in hashmap freelist removed
+that hotspot; ordinary conformance, reopen, failure, migration and pressure
+tests passed again. Repeated progressive KV timing fell from 3,333.7 to
+1,592.6 seconds at 100 GB, with the same 139,586,478,144-byte retained charge.
+These sequential diagnostics are not paired production speedup evidence.
+An isolated 384 MiB cgroup regression still lowered effective admission from
+179,056,640 to 110,329,856 bytes after unrelated allocation pressure.
+
+The private diagnostic root is
+`/volume2/NASDA2/vaultic-phase35-remediation-probes-20261004`.
+Earlier timeouts, failed RSS-cliff probes and the RAM test whose post-test
+wrapper could not locate Node remain diagnostics, not sealed capture evidence.
+
+### Fresh Sealed Captures
+
+Reduced `/tmp/vaultic-phase35-m5-oAOym9`: 400 semantic cases, four balanced
+repetitions and four actual near-budget migrations. Frozen classifications are
+accepted 12 / rejected 114 / incomplete 274. The original 7,407-entry manifest
+hash is `2633890c0bf768e3bb72dea97b7f2ccc1288239e896ec4f3efa23de895e5e0d2`.
+Actual cgroup peak was 3,618,988,032 bytes; 14,312 owned-monitor checks passed.
+
+Extended
+`/volume2/NASDA2/vaultic-phase35-remediation-probes-20261004/vaultic-phase35-m5-vz3z1B`:
+416 semantic cases, four balanced repetitions and all 48 full imports verified.
+Frozen classifications are accepted 28 / rejected 74 / incomplete 314.
+The original 7,535-entry manifest hash is
+`23d6417335b627e5dc8902d080763058c27f1ec206036b114975b1c6bae6e4e5`.
+Required preflight retained 278 measurement and 429 import/check race
+test/subtest passes, no skips/failures, and all 12 pure-Go core builds.
+Actual cgroup peak was 168,025,776,128 bytes; 377,704 owned-monitor checks
+passed. Both captures had zero cgroup max/OOM/OOM-kill events and observed
+swap, verified pins, decoded profiles and identical independent analysis.
+Unrelated host activity was authorized; sampled external peaks were empty,
+not proof that the host was globally idle.
+
+| Target / Mode | Achieved Plaintext Bytes | Completed Repeats | Wall Median / Min / Max (s) | Sampled Peak RSS (bytes) | Frozen Performance |
+|---|---:|---:|---:|---:|---|
+| 10 GB / Pebble | 10,000,007,168 | 4/4 | 50.8 / 50.4 / 52.5 | 219,615,232 | accepted |
+| 10 GB / RAM | 10,000,007,168 | 4/4 | 9.1 / 9.0 / 9.1 | 13,427,187,712 | accepted |
+| 10 GB / KV | 10,000,007,168 | 4/4 | 47.8 / 46.8 / 49.2 | 10,770,669,568 | rejected |
+| 10 GB / auto | 10,000,007,168 | 4/4 | 110.4 / 106.0 / 113.4 | 10,831,523,840 | accepted |
+| 100 GB / Pebble | 100,000,006,144 | 4/4 | 508.2 / 504.5 / 523.9 | 371,036,160 | accepted |
+| 100 GB / RAM | 100,000,006,144 | 4/4 | 78.6 / 78.5 / 79.3 | 104,500,310,016 | accepted |
+| 100 GB / KV | 100,000,006,144 | 4/4 | 1,601.3 / 1,570.6 / 1,616.7 | 109,919,449,088 | accepted |
+| 100 GB / auto | 100,000,006,144 | 4/4 | 2,085.3 / 2,069.9 / 2,100.9 | 111,494,991,872 | accepted |
+
+Every large case completed exact ciphertext/sequence/digest validation,
+1,536 reads interleaved through 3 GiB allocation churn, actual GC and cleanup,
+with no missing peak metrics. At 100 GB RAM retained 103,226,015,744 arena
+bytes, including 100,109,869,432 live span bytes and 3,116,146,312 unused
+bytes. Its retained managed charge was 129,199,218,112 bytes. KV/auto charged
+139,586,478,144 bytes for a 111,669,149,696-byte mapping ceiling. All remain
+below the unchanged 150,323,855,360-byte managed cap. These are distinct
+capacity, managed-charge and sampled-residency measurements, not interchangeable
+whole-process guarantees. Live span bytes include retained reusable overwrite
+capacity. RAM GC cycles were 12-13 at 10 GB and 15-16 at 100 GB; KV 100 GB
+cycles were 8,694-8,847, and auto 5,512-5,829.
+
+### Final Re-evaluation
+
+The five recommendations and exercised safety/semantic gates are complete.
+No unresolved implementation finding remains in this remediation scope.
+Both fresh matrices completed in one capture each; no cases were dropped,
+stitched or reclassified to obtain approval. Historical exhausted prefixes are
+not compared as completed-workload speedups. Source and commit completion
+artifacts receive a separate seal, preserving the original capture manifests.
+
+Frozen acceptance is not a total-throughput gate: KV and auto 100 GB are
+slower than Pebble despite passing the GC/assist/pause/read/write-tail gates.
+The 10 GB KV gate failures remain rejected; single-invocation CLI p99 and other
+unknown gates remain incomplete. Generated/warm-cache/NFS-media/production-SLO
+limitations persist. Linux cache census availability is not promised on older
+kernels or other platforms; conservative RSS-only admission may exhaust sooner.
+There is no general guarantee that arbitrary 100 GB distributions fit.
+M6, production trials, runtime tuning, defaults and Pebble removal remain
+unapproved.

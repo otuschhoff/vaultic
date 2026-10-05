@@ -2,11 +2,13 @@ package workingbench
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,6 +37,14 @@ func TestM5ProbeOwnershipAndBounds(t *testing.T) {
 	info, err := os.Stat(filepath.Join(root, "mapped.db"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if runtime.GOOS == "linux" {
+		if owned, err := workingProbeHasOwnedMapping(root); err != nil || !owned {
+			t.Fatal("owned mapping omitted by residency preflight", owned, err)
+		}
+		if owned, err := workingProbeHasOwnedMapping(output); err != nil || owned {
+			t.Fatal("foreign mapping attributed to owned fixture", owned, err)
+		}
 	}
 	probe, err := StartWorkingProbe(root, output)
 	if err != nil {
@@ -105,6 +115,40 @@ func TestM5ProbeOwnershipAndBounds(t *testing.T) {
 	}
 	if err := bounded.LookupLatency(time.Second); err == nil {
 		t.Fatal("unbounded lookup latency retention")
+	}
+}
+
+func TestWorkingScratchInventoryConcurrentRemoval(t *testing.T) {
+	root := t.TempDir()
+	stable := filepath.Join(root, "stable")
+	if err := os.WriteFile(stable, make([]byte, 4096), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var group sync.WaitGroup
+	group.Go(func() {
+		for range 2000 {
+			path := filepath.Join(root, "compacting")
+			if err := os.WriteFile(path, []byte("temporary"), 0600); err != nil {
+				t.Error(err)
+				return
+			}
+			if err := os.Remove(path); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	})
+	for range 500 {
+		if size, err := workingProbeScratchSize(root); err != nil || size < 4096 {
+			t.Fatal("transient removal invalidated sampled inventory", size, err)
+		}
+	}
+	group.Wait()
+	if size, err := workingProbeScratchSize(root); err != nil || size != 4096 {
+		t.Fatal("stable inventory mismatch", size, err)
+	}
+	if _, err := workingProbeScratchSize(filepath.Join(root, "missing")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("missing root treated as valid inventory", err)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"runtime/debug"
 	"sync"
 	"testing"
+	"unsafe"
 
 	"github.com/otuschhoff/vaultic/internal/telemetry"
 )
@@ -108,6 +109,93 @@ func TestRAMReplacementAccounting(t *testing.T) {
 	}
 	if budget.Snapshot().Used != impl.retainedCharge() {
 		t.Fatal("reused-hole accounting mismatch")
+	}
+}
+
+func TestRAMFreeListAndIncrementalAccounting(t *testing.T) {
+	budget, _ := NewBudget(4 << 20)
+	store, err := OpenRAM(budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	impl := store.engine.(*ramEngine)
+	for ordinal := range 128 {
+		value := bytes.Repeat([]byte{byte(ordinal)}, (128<<10)+ordinal*512)
+		if err := store.Put(t.Context(), []Entry{{[]byte("key"), value}}); err != nil {
+			t.Fatal(err)
+		}
+		var charge uint64
+		var holes uint32
+		for _, chunk := range impl.chunks {
+			if chunk.data == nil {
+				holes++
+			} else {
+				charge += ramCharge(uint64(len(chunk.data)))
+			}
+		}
+		seen := make(map[uint32]bool)
+		for head := impl.freeHead; head != 0; head = impl.chunks[head-1].nextFree {
+			if int(head) > len(impl.chunks) || seen[head] || impl.chunks[head-1].data != nil {
+				t.Fatal("invalid or cyclic free list")
+			}
+			seen[head] = true
+		}
+		retained := charge + ramBaseCharge + uint64(len(impl.nodes))*ramCharge(uint64(ramNodeCount)*uint64(unsafe.Sizeof(ramNode{})))
+		if cap(impl.chunks) != 0 {
+			retained += ramCharge(uint64(cap(impl.chunks)) * uint64(unsafe.Sizeof(ramChunk{})))
+		}
+		if cap(impl.nodes) != 0 {
+			retained += ramCharge(uint64(cap(impl.nodes)) * uint64(unsafe.Sizeof([]ramNode{})))
+		}
+		if retained != budget.Snapshot().Used || charge != impl.arenaCharge || holes != impl.freeCount || len(seen) != int(holes) || len(impl.chunks) > 3 {
+			t.Fatal("incremental accounting or constant-time reuse mismatch")
+		}
+		got, found, err := store.Get(t.Context(), []byte("key"))
+		if err != nil || !found || !bytes.Equal(got, value) || budget.Snapshot().Used != impl.retainedCharge() {
+			t.Fatal("reused chunk lost state or accounting", err)
+		}
+	}
+	if err := store.Close(); err != nil || budget.Snapshot().Used != 0 || impl.freeHead != 0 || impl.arenaCharge != 0 {
+		t.Fatal("close leaked retained state", err)
+	}
+}
+
+func TestRAMPackingAtEncryptedBoundary(t *testing.T) {
+	for _, valueSize := range []int{32740, 32768, 32796, 65508, 65536, 65564} {
+		t.Run(fmt.Sprint(valueSize), func(t *testing.T) {
+			budget, _ := NewBudget(128 << 20)
+			store, err := OpenRAM(budget)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			batchCount := min(31, MaxBatchBytes/(valueSize+24))
+			entries := make([]Entry, batchCount)
+			for ordinal := range entries {
+				entries[ordinal] = Entry{make([]byte, 8), bytes.Repeat([]byte{byte(ordinal)}, valueSize)}
+			}
+			for batch := range 64 {
+				for ordinal := range entries {
+					binary.BigEndian.PutUint64(entries[ordinal].Key, uint64(batch*batchCount+ordinal))
+				}
+				if err := store.Put(t.Context(), entries); err != nil {
+					t.Fatal(err)
+				}
+			}
+			state, _ := store.RAMSnapshot()
+			payload := uint64(64 * batchCount * (valueSize + 8))
+			if state.ArenaLiveBytes != payload || state.ArenaUnusedBytes != state.ArenaCapacityBytes-payload {
+				t.Fatal("fragmentation telemetry mismatch", state)
+			}
+			if state.ArenaCapacityBytes > payload*11/10+ramLargeChunkBytes || state.Budget.Peak > state.Budget.Limit {
+				t.Fatal("packing cliff or admission overspend", state, payload)
+			}
+			rows, err := store.Scan(t.Context(), nil, nil, 1)
+			if err != nil || len(rows) != 1 || !bytes.Equal(rows[0].Value, entries[0].Value) {
+				t.Fatal("packed ciphertext changed", err)
+			}
+		})
 	}
 }
 
