@@ -4,8 +4,9 @@
 
 [Previous: Phase 34](phase-34-operational-monitoring-and-metrics-export.md) | [Next: Phase 36](phase-36-native-smb-backup-source.md)
 
-**Status: M0-M5 complete; reduced and extended NFS/large-state evidence sealed.
-Performance approval is not established; M6 remains a design specification.**
+**Status: M0-M5 and M6 preparation complete; repeated evidence and conditional
+decisions sealed. Production acceptance, defaults and Pebble removal remain
+pending.**
 
 [M0 inventory, frozen contracts, and validation evidence](phase-35-m0-contract.md)
 
@@ -18,6 +19,8 @@ Performance approval is not established; M6 remains a design specification.**
 [M4 bounded automatic fallback, CLI policy, and validation evidence](phase-35-m4-fallback.md)
 
 [M5 benchmark protocol, review repairs, and retained evidence](phase-35-m5-benchmarks.md)
+
+[M6 preparation, conditional recommendations and operator/pilot contract](phase-35-m6-preparation.md)
 
 ## Goal
 
@@ -355,6 +358,12 @@ there is no production recommendation or default change.
   explicit accepted/rejected/incomplete classifications for every case.
 
 ### M6: Production recommendations and removal of Pebble
+
+[M6 preparation](phase-35-m6-preparation.md) is complete: repeated evidence,
+KV pre-growth repair, reproducible conditional decisions, operator-SLO/pilot
+contract and live-consumer cutover inventory. Faster KV still fails frozen GC
+CPU-share gates; real workload/SLO/pilot authorization and full removal/default
+acceptance remain pending. Preparation does not change the production default.
 
 - Publish workload/storage-specific recommendations and measured safe budget
   envelopes, including GC-sensitive cases where KV is preferable despite fit.

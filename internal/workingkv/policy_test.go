@@ -58,6 +58,53 @@ func TestKVLargeGrowthWithinBudget(t *testing.T) {
 	}
 }
 
+func TestKVPreemptiveGrowthAdmission(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("large mapping admission requires a 64-bit address space")
+	}
+	for _, denied := range []bool{false, true} {
+		t.Run(fmt.Sprint(denied), func(t *testing.T) {
+			policy, err := NewPolicy(ModeKV, 4<<30, t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy.disk, _ = NewBudget(4 << 30)
+			store, err := OpenWorking(WithPolicy(t.Context(), policy), "", "preempt-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			for store.mapLimit < 1<<30 {
+				if err := store.growLocked(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := policy.Budget().Used
+			if denied {
+				policy.budget.lower(before + ramCharge(8192))
+			}
+			store.growForWriteLocked(store.mapLimit-4096, 8192)
+			if denied {
+				if store.mapLimit != 1<<30 || policy.Budget().Used != before {
+					t.Fatal("denied speculative growth changed capacity or charge")
+				}
+			} else if store.mapLimit != 2<<30 || policy.Budget().Used != store.memoryCharge {
+				t.Fatal("preemptive growth did not reserve the new mapping")
+			}
+			if err := store.Put(t.Context(), []Entry{{[]byte("key"), []byte("value")}}); err != nil {
+				t.Fatal("speculative growth rejected a write that fits", err)
+			}
+			value, found, err := store.Get(t.Context(), []byte("key"))
+			if err != nil || !found || string(value) != "value" {
+				t.Fatal("lost committed contents", err)
+			}
+			if err := store.Close(); err != nil || policy.Budget().Used != 0 || policy.disk.Snapshot().Used != 0 {
+				t.Fatal("growth cleanup leaked", err)
+			}
+		})
+	}
+}
+
 func TestPolicyResourceRecoveryBounded(t *testing.T) {
 	resources := Resources{HostLimit: 4 << 30, HostAvailable: 3 << 30,
 		CgroupKnown: true, CgroupLimit: 1 << 30, CgroupUsed: 256 << 20, RSS: 64 << 20, RSSKnown: true}

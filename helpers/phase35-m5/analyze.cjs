@@ -145,7 +145,7 @@ function analyze(root) {
     const required = filename === 'measurement-race.jsonl'
       ? ['TestM5ProbeOwnershipAndBounds', 'TestM5LargeLatencyHistogram', 'TestM5WorkingRuntimeIntervals', 'TestWorkingRuntimeAvailabilityAndPrivacy', 'TestM5WorkingPolicyMeasurementBoundary',
         'TestRAMFreeListAndIncrementalAccounting', 'TestRAMPackingAtEncryptedBoundary', 'TestKVLargeGrowthWithinBudget',
-        'TestPolicyResourceRecoveryBounded', 'TestPolicyOwnedCacheAcrossRemap', 'TestPolicyCacheFileOwnership',
+        'TestPolicyResourceRecoveryBounded', 'TestPolicyOwnedCacheAcrossRemap', 'TestPolicyCacheFileOwnership', 'TestKVPreemptiveGrowthAdmission',
         'TestWorkingScratchInventoryConcurrentRemoval']
       : ['TestM3ImportParity', 'TestM3SplitImportParity', 'TestM3CheckParity', 'TestCheckValidatesDeclaredReadSession', 'TestCheckTelemetryIncludesFinalReadSessionValidation', 'TestM4FindingsAdmissionAndReplacement', 'TestM4SorterAggregatePressure',
         'TestCheckKVSpoolSortsDuplicatesAcrossMergePasses', 'TestLocationMultisetSpoolPreservesDuplicatesAcrossMergePasses',
@@ -368,7 +368,7 @@ function selftest() {
       'openbsd/amd64', 'openbsd/arm64'].map(target => `PASS ${target} CGO_ENABLED=0\n`).join(''));
     const gates = ['TestM5ProbeOwnershipAndBounds', 'TestM5LargeLatencyHistogram', 'TestM5WorkingRuntimeIntervals', 'TestWorkingRuntimeAvailabilityAndPrivacy', 'TestM5WorkingPolicyMeasurementBoundary',
       'TestRAMFreeListAndIncrementalAccounting', 'TestRAMPackingAtEncryptedBoundary', 'TestKVLargeGrowthWithinBudget',
-      'TestPolicyResourceRecoveryBounded', 'TestPolicyOwnedCacheAcrossRemap', 'TestPolicyCacheFileOwnership',
+      'TestPolicyResourceRecoveryBounded', 'TestPolicyOwnedCacheAcrossRemap', 'TestPolicyCacheFileOwnership', 'TestKVPreemptiveGrowthAdmission',
       'TestWorkingScratchInventoryConcurrentRemoval',
       'TestM3ImportParity', 'TestM3SplitImportParity', 'TestM3CheckParity', 'TestCheckValidatesDeclaredReadSession', 'TestCheckTelemetryIncludesFinalReadSessionValidation', 'TestM4FindingsAdmissionAndReplacement', 'TestM4SorterAggregatePressure',
       'TestCheckKVSpoolSortsDuplicatesAcrossMergePasses', 'TestLocationMultisetSpoolPreservesDuplicatesAcrossMergePasses',

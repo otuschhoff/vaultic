@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/otuschhoff/vaultic/internal/workingstate"
+	bolt "go.etcd.io/bbolt"
 	boltErrors "go.etcd.io/bbolt/errors"
 )
 
@@ -439,6 +440,18 @@ func (store *WorkingStore) putLocked(ctx context.Context, entries []Entry, size 
 		return err
 	}
 	defer store.policy.Release(charge)
+	if store.mapLimit >= 1<<30 && ctx.Err() == nil {
+		engine := store.store.engine.(*boltEngine)
+		var allocated uint64
+		if err := engine.database.View(func(tx *bolt.Tx) error {
+			allocated = uint64(tx.Size())
+			return nil
+		}); err != nil {
+			return err
+		}
+		pageSize := uint64(engine.database.Info().PageSize)
+		store.growForWriteLocked(allocated, size*2+uint64(len(entries)+1)*pageSize*4)
+	}
 	for {
 		err := store.store.Put(ctx, entries)
 		if !errors.Is(err, boltErrors.ErrMaxSizeReached) {
@@ -447,6 +460,12 @@ func (store *WorkingStore) putLocked(ctx context.Context, entries []Entry, size 
 		if err := store.growLocked(); err != nil {
 			return err
 		}
+	}
+}
+
+func (store *WorkingStore) growForWriteLocked(allocated, growth uint64) {
+	if store.mapLimit >= 1<<30 && (allocated >= store.mapLimit || growth >= store.mapLimit-allocated) {
+		_ = store.growLocked()
 	}
 }
 
