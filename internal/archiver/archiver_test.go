@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/data"
+	"github.com/otuschhoff/vaultic/internal/filter"
 	"github.com/otuschhoff/vaultic/internal/fs"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	rtest "github.com/otuschhoff/vaultic/internal/test"
@@ -91,6 +92,35 @@ func TestCWalkManifestSelectsOnlyDirectories(t *testing.T) {
 	names, found, err := arch.cwalkManifest.Names(root)
 	if err != nil || !found || len(names) != 2 || names[0] != "directory" || names[1] != "file" {
 		t.Fatalf("manifest lost file names: %v, %v, %v", names, found, err)
+	}
+}
+
+func TestCWalkPrunesCDOTSnapshotDirectories(t *testing.T) {
+	root := t.TempDir()
+	for _, directory := range []string{"ordinary", ".snapshot/hourly/deep", "ordinary/.snapshot/hourly/deep", ".snapshot-not-a-snapshot"} {
+		if err := os.MkdirAll(filepath.Join(root, directory), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reject := filter.RejectByPattern([]string{"**/.snapshot/**", "**/.snapshot", "**/.Trash-*/**", "**/lost+found/**"}, t.Errorf)
+	arch := New(nil, fs.NewLocal(), Options{CWalkConcurrency: 4})
+	arch.SelectByName = CombineRejectByNames([]RejectByNameFunc{RejectByNameFunc(reject)})
+	cleanup, err := arch.prepareCWalkManifest(t.Context(), []string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	for _, directory := range []string{".snapshot", ".snapshot/hourly", "ordinary/.snapshot", "ordinary/.snapshot/hourly"} {
+		_, found, err := arch.cwalkManifest.Names(filepath.Join(root, directory))
+		if err != nil || found {
+			t.Fatalf("snapshot directory was walked: %q, found=%v, error=%v", directory, found, err)
+		}
+	}
+	for _, directory := range []string{"ordinary", ".snapshot-not-a-snapshot"} {
+		_, found, err := arch.cwalkManifest.Names(filepath.Join(root, directory))
+		if err != nil || !found {
+			t.Fatalf("ordinary directory was lost: %q, found=%v, error=%v", directory, found, err)
+		}
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/otuschhoff/vaultic/internal/filter"
 	"github.com/spf13/pflag"
 )
 
@@ -89,7 +90,7 @@ group-by = "paths"
 [backup]
 host = "ncl1-1-ps"
 exclude-if-present = ["CACHEDIR.TAG", ".nobackup"]
-globs = ["!**/.snapshot/**", "!**/lost+found/**"]
+globs = ["!**/.snapshot/**", "!**/.snapshot", "!**/.Trash-*/**", "!**/lost+found/**"]
 
 [[backup.snapshots]]
 name = "cdot"
@@ -122,7 +123,29 @@ one-file-system = true
 		t.Fatalf("unexpected named backup job: %#v", p.Snapshots)
 	}
 	excludes, ok := p.Sections["backup"]["exclude"].([]any)
-	if !ok || len(excludes) != 2 || excludes[0] != "**/.snapshot/**" {
+	if !ok || len(excludes) != 4 || excludes[0] != "**/.snapshot/**" {
 		t.Fatalf("globs were not translated: %#v", p.Sections["backup"]["exclude"])
+	}
+	patterns := make([]string, len(excludes))
+	for index, value := range excludes {
+		patterns[index] = value.(string)
+	}
+	if err := filter.ValidatePatterns(patterns); err != nil {
+		t.Fatal(err)
+	}
+	reject := filter.RejectByPattern(patterns, t.Errorf)
+	for path, excluded := range map[string]bool{
+		"/volume/a/.snapshot":                true,
+		"/volume/a/.snapshot/hourly/file":    true,
+		"/volume/a/nested/.snapshot":         true,
+		"/volume/a/nested/.snapshot/file":    true,
+		"/volume/a/.Trash-1000/file":         true,
+		"/volume/a/lost+found/file":          true,
+		"/volume/a/.snapshot-not-a-snapshot": false,
+		"/volume/a/ordinary/file":            false,
+	} {
+		if actual := reject(path); actual != excluded {
+			t.Errorf("profile exclusion for %q = %v, want %v", path, actual, excluded)
+		}
 	}
 }

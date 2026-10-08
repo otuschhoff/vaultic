@@ -1,6 +1,9 @@
 package index
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"math"
 	"strconv"
 	"testing"
@@ -8,7 +11,113 @@ import (
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	rtest "github.com/otuschhoff/vaultic/internal/test"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/workingkv"
+	"github.com/otuschhoff/vaultic/internal/workingstate"
 )
+
+func encodedWorkingIndex(t *testing.T) []byte {
+	t.Helper()
+	source := NewIndex()
+	packID := source.addToPacks(vaultic.NewRandomID())
+	for range 512 {
+		source.store(packID, pack.Blob{BlobHandle: vaultic.NewRandomBlobHandle(), Length: 100})
+	}
+	var encoded bytes.Buffer
+	rtest.OK(t, source.Encode(&encoded))
+	return encoded.Bytes()
+}
+
+func TestWorkingIndexRetainsCompactCapacity(t *testing.T) {
+	encoded := encodedWorkingIndex(t)
+	policy, err := workingkv.NewPolicy(workingkv.ModeRAM, 32<<20, "")
+	rtest.OK(t, err)
+	ctx := workingkv.WithPolicy(t.Context(), policy)
+	release, err := workingstate.ReserveJSON(ctx, encoded)
+	rtest.OK(t, err)
+	decodeCharge := policy.Budget().Used
+	release()
+	idx, err := decodeWorkingIndex(ctx, encoded, vaultic.NewRandomID())
+	rtest.OK(t, err)
+	defer idx.releaseWorking(true)
+	retained := policy.Budget().Used
+	if retained == 0 || retained >= decodeCharge/4 {
+		t.Fatalf("retained compact charge=%d, transient decode charge=%d", retained, decodeCharge)
+	}
+}
+
+func TestWorkingIndexAdmissionFailures(t *testing.T) {
+	encoded := encodedWorkingIndex(t)
+	probe, err := workingkv.NewPolicy(workingkv.ModeRAM, 32<<20, "")
+	rtest.OK(t, err)
+	release, err := workingstate.ReserveJSON(workingkv.WithPolicy(t.Context(), probe), encoded)
+	rtest.OK(t, err)
+	decodeCharge := probe.Budget().Used
+	release()
+	decoded, err := DecodeIndex(encoded, vaultic.NewRandomID())
+	rtest.OK(t, err)
+	for _, limit := range []uint64{decoded.workingCapacity(), decodeCharge} {
+		policy, err := workingkv.NewPolicy(workingkv.ModeRAM, limit, "")
+		rtest.OK(t, err)
+		idx, err := decodeWorkingIndex(workingkv.WithPolicy(t.Context(), policy), encoded, vaultic.NewRandomID())
+		if idx != nil || !errors.Is(err, workingstate.ErrMemoryLimitExceeded) || policy.Budget().Used != 0 {
+			t.Fatalf("limit=%d index=%v err=%v budget=%+v", limit, idx, err, policy.Budget())
+		}
+	}
+}
+
+type cancellingIndexPolicy struct {
+	*workingkv.Policy
+	retainedCharge uint64
+	cancel         context.CancelFunc
+}
+
+func (policy *cancellingIndexPolicy) Reserve(size uint64) error {
+	err := policy.Policy.Reserve(size)
+	if err == nil && size == policy.retainedCharge {
+		policy.cancel()
+	}
+	return err
+}
+
+func TestWorkingIndexCancellationAfterRetainedAdmission(t *testing.T) {
+	encoded := encodedWorkingIndex(t)
+	decoded, err := DecodeIndex(encoded, vaultic.NewRandomID())
+	rtest.OK(t, err)
+	base, err := workingkv.NewPolicy(workingkv.ModeRAM, 32<<20, "")
+	rtest.OK(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	policy := &cancellingIndexPolicy{Policy: base, retainedCharge: decoded.workingCapacity(), cancel: cancel}
+	idx, err := decodeWorkingIndex(workingstate.WithPolicy(ctx, policy), encoded, vaultic.NewRandomID())
+	if idx != nil || !errors.Is(err, context.Canceled) || base.Budget().Used != 0 {
+		t.Fatalf("index=%v err=%v budget=%+v", idx, err, base.Budget())
+	}
+}
+
+func TestWorkingIndexCumulativeLoadAndMerge(t *testing.T) {
+	policy, err := workingkv.NewPolicy(workingkv.ModeRAM, 16<<20, "")
+	rtest.OK(t, err)
+	ctx := workingkv.WithPolicy(t.Context(), policy)
+	master := NewMasterIndex()
+	defer func() {
+		rtest.OK(t, master.Close())
+		rtest.Equals(t, uint64(0), policy.Budget().Used)
+	}()
+	for range 64 {
+		idx, err := decodeWorkingIndex(ctx, encodedWorkingIndex(t), vaultic.NewRandomID())
+		rtest.OK(t, err)
+		master.Insert(idx)
+		idx.releaseWorking(false)
+	}
+	beforeMerge := policy.Budget().Used
+	rtest.OK(t, master.MergeFinalIndexes())
+	rtest.Equals(t, beforeMerge, policy.Budget().Used)
+	master.idx[0].releaseWorking(false)
+	rtest.Equals(t, beforeMerge, policy.Budget().Used)
+	if beforeMerge < master.idx[0].workingCapacity()/2 {
+		t.Fatalf("merge backing-capacity headroom insufficient: charged=%d merged=%d", beforeMerge, master.idx[0].workingCapacity())
+	}
+}
 
 func TestCatalogBuilderPreservesLocationsAndReusesPacks(t *testing.T) {
 	builder := NewCatalogBuilder()

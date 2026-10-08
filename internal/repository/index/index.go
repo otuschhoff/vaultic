@@ -10,6 +10,7 @@ import (
 	"iter"
 	"math"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -62,6 +63,22 @@ type Index struct {
 	created         time.Time
 	workingReleases []func()
 	workingRetained bool
+}
+
+func (idx *Index) workingCapacity() uint64 {
+	idx.m.RLock()
+	defer idx.m.RUnlock()
+	wordBytes := uint64(strconv.IntSize / 8)
+	capacity := uint64(cap(idx.packs)+cap(idx.ids)) * uint64(len(vaultic.ID{}))
+	for typ := range idx.byType {
+		mapping := &idx.byType[typ]
+		capacity += uint64(cap(mapping.buckets)) * wordBytes
+		capacity += uint64(cap(mapping.blockList.blockList)) * 3 * wordBytes
+		for _, block := range mapping.blockList.blockList {
+			capacity += uint64(cap(block)) * (48 + wordBytes)
+		}
+	}
+	return capacity*4 + 8192
 }
 
 func (idx *Index) attachWorking(release func(), retained bool) {

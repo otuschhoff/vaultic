@@ -274,3 +274,349 @@ operator SLOs/distribution and reviewed stop/rollback procedure. The full M6
 recommendation/default/removal milestone remains pending those external inputs
 and its own evidence. No production changes, runtime tuning, default change,
 dependency removal or production pilot occurred.
+
+## Authorized Real-Input Screening: 2026-10-06
+
+The operator subsequently authorized read-only input from
+`/volume2/NASDA2/rustic/repo`, using the password-file reference
+`/volume2/NASDA2/rustic/etc/repo-password.txt`, and every backup source/option
+in `/volume2/NASDA2/rustic/etc/rustic.toml`. Only isolated test destinations,
+state and scratch under `/volume2/NASDA2/vaultic-test-m6/` are writable.
+No password contents are published. This authorization supersedes the missing
+input/path/SLO prerequisites for this screening scope only, not the historical
+preparation report or production/default/removal decisions.
+
+The ceiling is 200,000,000,000 bytes combined CLI/daemon RSS, excluding unmapped
+filesystem page cache. Linux file-backed mapped RSS still counts as RSS.
+RSS is sampled every 250 ms; this is a fail-stop sampled guard, not an
+instantaneous kernel RSS limiter. Cgroup current/file-cache bytes are separate
+diagnostics, never added to RSS or used as a substitute 200 GB cgroup limit.
+Shared NFS free space must remain above the larger of 5% of filesystem capacity
+and 20% of the initial available space; reaching that reserve stops the pilot.
+Import and each check have hard 43,200-second limits; each backup has a
+604,800-second limit. No two-day extension is approved without a new request.
+Completed-work throughput and total wall time are the performance criteria;
+latency/GC observations remain diagnostic for this operator screening, while
+historical synthetic frozen gates remain unchanged.
+
+`helpers/phase35-m6/pilot.py` freezes binaries, the original profile, metadata
+file-name/size inventory and a copy of itself. Each mode uses a separate
+repository view with private configuration/locks and read-only source metadata
+and pack references, an independent native database and a fresh backup target.
+Kernel read-only mounts protect the original repository, configuration,
+password-file and backup sources. Import may activate only its private copied
+configuration. Hot/cold mode is deliberately not used: it would write locks on
+the cold input. Original metadata/pack deletion by another operator remains an
+external hazard; source changes or failures are not silently repaired/retried.
+
+All 52 sources must be present. The original `.snapshot` directory/descendant,
+trash/lost+found, marker-file and one-filesystem exclusions/options are preserved.
+The profile matcher and real-walk regressions prove `.snapshot` trees are
+pruned before descent. NFS create modes alone were insufficient on this export;
+owned private directories are explicitly chmodded and verified as 0700.
+The bounded dry-run preflight is not a completed import/performance result.
+
+The first matrix is one screening repetition per Pebble/RAM/KV/auto mode, with
+a 160 GiB managed working-state cap for configured modes and unchanged runtime
+defaults. It runs complete import, native/legacy index comparison, all-snapshot
+repository structural check and an initial backup. Structural check does not
+claim an all-pack payload scrub. Partial/failed/timed-out/resource-stopped
+commands are retained failures, not completed-work throughput. Frozen import
+counts must match every index and snapshot. Single fixed-order screening,
+warm-cache effects, shared host activity and changing backup files preclude
+repeated-production acceptance or a truly unchanged-backup claim. Real results
+remain pending; the original preparation seals are not modified.
+
+### Throughput and Bottleneck Observation
+
+At the operator's request, `helpers/phase35-m6/observe.py` runs as a separate
+lightweight service, outside the measured cgroup, sampling every five seconds.
+It does not change the pinned runner/binaries or original launch manifest.
+Import/index-check native telemetry retains work counters, queues and operation
+timings; rates match counter labels, component process identities and actual
+sample windows, rejecting decreases/restarts/stale observations. Import encoded
+batch bytes, packs and mutations are not labeled logical backup throughput.
+Backup JSON retains allowlisted logical bytes/files and final processed counts,
+never current filenames. Structural repository-check has process/cgroup and
+completion evidence; missing phase-work/GC counters remain unknown.
+
+Per-process CPU-core rates, RSS, threads, I/O and scheduler counters are correlated
+with cgroup CPU/I/O/memory pressure, file cache and queue/operation time series.
+NFS RPC and host pressure are shared-host diagnostics, not pilot-attributed
+throughput; `/proc/PID/io` does not capture all NFS traffic. Observation attached
+after the first import started, so earlier OS data cannot be reconstructed.
+Fixed-order screening and observation overhead remain limitations. Separate
+observer versions/pins/logs are retained and will receive a supplemental/final
+seal rather than extending the original immutable launch manifest.
+
+Each scenario's final findings must report completed scope, wall time and work
+units, sustained/window throughput, resource/queue evidence and availability
+gaps. CPU saturation, I/O waits, memory/GC pressure or coordination stalls require
+supporting measurements; low CPU or a single empty queue does not prove a cause.
+The active pilot and all full-workload acceptance results remain pending.
+
+### First Real-Input Finding: Pebble Import Timeout
+
+The first full Pebble cell stopped at its 12-hour action deadline, followed by
+30 seconds of termination grace. It failed runtime/full-scope acceptance; checks
+and backup did not run. Peak combined CLI/daemon RSS was 45,328,183,296 bytes,
+below the 200 GB RSS ceiling. The termination summary reports all 10,170 indexes,
+419,853 packs and 380,166,821 blob records imported, but only 22 of 143 snapshots
+completed. It visited 36,288,545 trees and 194,058,757 nodes; the single finding
+was `load-tree: context canceled`. These partial counts are not successful
+full-import throughput or approval to activate the candidate.
+
+Batch publication stopped increasing about 7.2 hours before termination while
+snapshot work remained unfinished. Observed combined CLI/daemon CPU averaged
+about 2.06 cores, with no sampled nonzero memory-pressure avg10. This identifies
+snapshot traversal as the incomplete phase, not a memory stop, but does not
+prove network latency, serialization or cache behavior is the root cause.
+Aggregate planning/blob-read timers overlap other activity and cannot be
+interpreted as percentages of wall time. Cgroup file cache peaked around
+175.3 GB in observed samples; it is not RSS and does not violate the RSS-only
+operator ceiling.
+
+The failed cell, counters and observer records remain in
+`/volume2/NASDA2/vaultic-test-m6/pilot-wbacd8_5`. Its separate
+`PEBBLE-TIMEOUT-SHA256SUMS` identity is
+`66f028d11b5d557d2924d75227ef22ab75f3de0e3eca80f2c4f368645a4441c8`.
+The original launch manifest is unchanged. Remaining modes must keep complete
+snapshot scope and the original limits; no automatic timeout extension,
+snapshot omission, uncertain-publication resume or accepted-prefix speedup is
+authorized. All other full workload outcomes remain pending.
+
+### RAM Setup Failure and Capture Repair
+
+The first RAM cell failed while loading source indexes, before any indexes or
+snapshots were imported. Its configured 160 GiB managed-state admission limit
+was exhausted (`used=171788394608`, `requested=12582976`); its reported managed
+peak was 171,790,646,576 bytes. Managed charges are not measured RSS: peak
+sampled combined RSS was only 6,732,713,984 bytes. This is a rejection under the
+frozen pilot configuration, not evidence that RAM exceeded the operator's
+200 GB RSS ceiling or could never fit under another configuration.
+
+An RSS sampling exception during termination prevented the supervisor from
+retaining its normal action result. The child's exit code is therefore unknown,
+although its structured log contains the explicit admission error. The retained
+logs and limitations are separately sealed by `RAM-FAILED-CAPTURE-SHA256SUMS`,
+identity `1d873288c48fb043c0bd2e2dc74bdb2166fed4cd01c8e766b7f2fb0ec63c60c3`,
+in the original pilot root. No checks or backup ran against this partial state.
+
+The workspace runner now ignores missing RSS only for positively identified
+exiting/dead processes, and preserves a failed action result if live-process
+RSS monitoring is unavailable. Seven runner regressions pass, including both
+exit-race handling and fail-closed live-RSS handling. The original frozen runner
+and captures are unchanged. Remaining cells require a separately pinned runner
+publication with identical input inventory, binaries and workload limits;
+neither this repair nor the admission failure authorizes a budget increase,
+partial-state resume or production change.
+
+### KV Shared Setup Rejection
+
+The fresh KV cell in `/volume2/NASDA2/vaultic-test-m6/pilot-tit30h5a` exited
+with code 1 after 505.052 seconds. Its peak combined RSS was 6,680,723,456 bytes,
+with no timeout or RSS stop. Like RAM, it failed in the shared `repo.LoadIndex`
+preload before `legacyimport.Import` began: managed admission reported
+`limit=171798691840 used=171797808368 requested=3145792`. The managed peak was
+171,798,392,496 bytes; reported managed disk usage and peak were both zero.
+Thus this is a shared setup rejection under the frozen configuration, not a
+demonstrated KV scratch-capacity or completed-import throughput limit.
+
+The repaired supervisor retained the action and incomplete-cell results.
+Observed CLI/daemon CPU averaged about 6.12 cores over 496.159 seconds; no
+sampled nonzero memory-pressure avg10 was recorded. Source totals remained
+uninitialized at zero, which does not mean the input repository was empty.
+Checks, initialization and backup did not run. The separate verified failure
+seal `KV-FAILURE-SHA256SUMS` has identity
+`30b2c28709f40f4c0a97b9253cb8b9c12c424b453766ae2f0f4b4ad65ec76543`.
+The continuation launch seal is
+`3ad7476efec2eeed11089f182525e024166e78bd4000cda9408e584b544a2302`;
+only root identity and runner pin differ from the original plan. The final
+auto cell remains pending with the same scope, binaries and limits.
+
+### Auto Outcome and Configured Screening Disposition
+
+Auto exited with code 1 after 504.228 seconds, with peak combined RSS of
+6,652,547,072 bytes and no RSS or timeout stop. It failed in the same source
+preload at `limit=171798691840 used=171798691760 requested=128`.
+`fallback_pending` was reported, but effective mode remained RAM, migration
+reservation was zero, and reported disk usage/peak were zero. Its separate
+verified `AUTO-FAILURE-SHA256SUMS` identity is
+`58459a19e1ab5f2cb4c90cbf178ea12942550456789a2d1d548d9f5e5f120261`.
+Observed CLI/daemon CPU averaged about 6.28 cores over 496.344 seconds, with no
+sampled nonzero memory-pressure avg10. Checks, initialization and backup did
+not run.
+
+All four configured import attempts have now failed. No complete real-input
+import/check/backup acceptance or successful mode throughput comparison exists.
+RAM's child exit code was not retained; its failure capture must not be treated
+as a normal measured result. The original and continuation roots preserve each
+failure independently, including the supervisor-version change. No candidate
+was accepted and no production/default change is approved.
+
+The shared setup path reserves generic JSON decode capacity in
+`workingstate.ReserveJSON`, attaches that reservation to the compact result in
+`decodeWorkingIndex`, marks it retained in `MasterIndex.Insert`, and transfers
+the releases during index merging. `DecodeIndex` returns compact lookup tables,
+not the temporary JSON representation. Retaining that conservative decode
+reservation accounts for the admission/RSS distinction; neither KV selection
+nor auto's pending fallback changed this legacy-source preload in these runs.
+The nearby `TestM4IndexDecodeOwnership` regression passes and verifies retention
+and eventual release, but does not validate that retained charges match compact
+storage capacity. The recommended next experiment is a separately tested,
+pinned retained-index accounting repair, preserving decode-peak admission and
+charging actual retained capacity. Raising limits, disabling admission or
+skipping snapshots is not an accepted substitute. Pebble's snapshot traversal
+timeout remains a separate unresolved throughput finding.
+
+### Authorized Compact-Index Accounting Repair
+
+On 2026-10-07 the operator authorized the targeted accounting fix and isolated
+rerun. Successful source-index decoding now admits a replacement charge based
+on allocated compact index capacities: pack/index-ID arrays, hash buckets,
+hashed-array-tree block headers and entry blocks. Fourfold merge/allocator
+growth headroom and 8192 bytes of per-index ownership overhead remain charged.
+This is conservative capacity accounting, not a claim of measured RSS.
+
+The generic JSON decode reservation is unchanged and remains owned until the
+replacement reservation is admitted. Failed replacement admission and
+cancellation release owned charges; insertion, merge and close preserve
+existing retained-charge ownership. The new regression reproduced a compact
+512-entry index retaining its entire 1,120,512-byte transient charge before the
+fix. Four focused repair tests cover retained size, transient/retained admission
+failure, cancellation after retained admission and cumulative loading/merging
+of 64 indexes within 16 MiB. Existing decode-ownership and incremental-load
+regressions also pass under race instrumentation.
+
+The separate publication at
+`/volume2/NASDA2/vaultic-test-m6/pilot-kd0p0kjv` pins CLI identity
+`46dfc59ef8faf21370fc1a861c9df08400f57bc978737dc6ca52313a91be5ae5`.
+Only root and CLI identity differ from the prior continuation plan; the native
+daemon, source inventory, profile/exclusions, all workload limits and absolute
+disk reserve are identical. Eight retained verification gates pass, including
+both CDOT snapshot-exclusion race regressions and the evidence analyzer and
+decision-generator selftests. An extra Linux/386 check is blocked by unchanged
+repository `MaxPackSize` constants overflowing `uint`; that failed log is
+retained and no 32-bit pass is claimed.
+
+Fresh RAM/KV/auto candidates must retain the complete input/snapshot scope and
+telemetry-first observation. No original failed state is resumed. The original
+Pebble timeout remains independently sealed; this accounting repair does not
+establish that snapshot traversal will meet the 12-hour target. Real-input
+import/check/backup acceptance and production approval remain unachieved.
+
+### Repaired RAM Runtime Finding
+
+The first repaired RAM cell reached the 12-hour import deadline and stopped
+after 30 seconds of termination grace: wall time 43,230.201 seconds, exit -9,
+peak combined RSS 40,111,030,272 bytes. The compact-accounting repair cleared
+source-index setup, but only 5,632 of 10,170 indexes and 231,602 packs completed
+publication. It imported 211,758,114 blob records and reached no snapshots.
+This differs from the original Pebble timeout, which completed all index
+publication and stopped during snapshot traversal. Neither run is accepted.
+
+Managed-state peak was 96,423,672,094 bytes, below the unchanged 160 GiB budget;
+the RSS ceiling did not stop the run. CLI/daemon CPU averaged about 3.23 cores
+over observed samples. Only 12 of 8,626 resource samples had nonzero memory
+pressure avg10, peaking at 0.36 percent. Observed cgroup file cache peaked at
+61,063,135,232 bytes, separately from RSS. These observations do not establish
+memory pressure as the primary cause of the timeout.
+
+Aggregate lane timers report 63,201.482 seconds in `blob_read`, 65,237.677
+seconds in planning and 71,854.505 seconds in transactions. They overlap and
+must not be summed or treated as percentages of wall time. The `blob_read`
+timer covers existing blob-record lookup through `loadLegacyBlobRecords`,
+including batched metadata reads and record decoding, not source pack-payload
+reads. This identifies metadata lookup as a bottleneck lead; the underlying
+cache, RPC or storage mechanism remains unproven. Final telemetry reports
+25,591,681,086 encoded committed metadata bytes, not logical backup throughput.
+
+The separate verified `RAM-TIMEOUT-SHA256SUMS` identity is
+`bd19990271cadca87834a6ddd7220bcff1bb263edfe5d8ec4b4a5d722028ac99`
+under `/volume2/NASDA2/vaultic-test-m6/pilot-kd0p0kjv`. The original variant
+launch seal is unchanged. Checks, initialization and backup did not run;
+fresh KV and auto candidates remain pending under the same complete scope and
+limits, without timeout extension or partial-state resume.
+
+### Repaired KV Runtime Finding
+
+The repaired KV cell also reached the 12-hour deadline: wall time 43,230.271
+seconds including termination grace, exit -9, peak combined RSS
+39,931,330,560 bytes. It imported 5,570 of 10,170 indexes, 228,680 packs and
+209,560,270 blob records, reaching no snapshots. Managed peak was
+96,373,652,506 bytes, below the 160 GiB limit; reported managed scratch
+usage/peak were zero. Neither admission nor the RSS ceiling stopped this run.
+
+Observed CLI/daemon CPU averaged about 3.21 cores. Only 5 of 8,623 resource
+samples had nonzero memory-pressure avg10, peaking at 0.14 percent. Existing
+blob-record lookup again dominated aggregate planning: `blob_read` reported
+63,663.495 seconds and planning 65,703.613 seconds across overlapping lanes.
+Final encoded committed metadata was 25,326,075,534 bytes. These partial
+counters and overlapping timers are not completed full-import throughput or
+a causal RAM/KV speedup comparison. KV selection did not demonstrate scratch
+work in this incomplete run; the shared metadata-lookup mechanism remains
+the bottleneck lead, not a proven storage or cache root cause.
+
+The verified `KV-TIMEOUT-SHA256SUMS` identity is
+`bb61a82d9ea001bc920027205dca6bb19af7cec419c2edb46db64dbe637bf495`
+in the same accounting-variant root. Checks, initialization and backup did
+not run. The final fresh auto candidate subsequently ran with the unchanged
+binary, complete scope, observer and limits, as recorded below; neither
+timeout is accepted.
+
+### Repaired Auto Runtime Finding
+
+The final fresh auto cell also timed out: wall time 43,230.299 seconds
+including termination grace, exit -9, peak combined RSS 40,367,001,600 bytes.
+It imported 5,596 of 10,170 indexes, 229,636 packs and 210,466,332 blob
+records, reaching no snapshots. Auto remained effective RAM, with no
+migration or reported managed scratch use. Managed peak was 96,474,850,928
+bytes, below the unchanged 160 GiB limit.
+
+Observed CLI/daemon CPU averaged about 3.18 cores. Memory-pressure avg10
+was nonzero in 22 of 8,620 resource samples, peaking at 7.08 percent;
+this observation does not establish memory pressure as the timeout cause.
+Aggregate `blob_read` was 64,009.843 seconds against planning 65,960.474
+seconds across overlapping lanes. Existing blob-record metadata lookup is
+again the bottleneck lead; native cache, RPC and storage attribution remains
+unproven. Final encoded committed metadata was 25,435,573,126 bytes, not
+logical backup payload or a completed full-import throughput measurement.
+
+The verified `AUTO-TIMEOUT-SHA256SUMS` identity is
+`c0a45deac34215ce24bce907dba473d6084db4aaa412a158c0a3afe73954ab26`
+in the accounting-variant root. Checks, initialization and backup did not run.
+
+### Repaired Screening Disposition
+
+All three repaired full-scope import attempts are deadline failures. The
+accounting repair removed the shared preload admission blocker, but did not
+meet operator acceptance. None reached snapshot traversal or completed import.
+
+| Mode | Indexes Imported / Total | Snapshots Imported / Total | Peak Combined RSS (GB) | Partial Encoded Metadata / Failed Wall (MB/s) |
+| --- | --- | --- | --- | --- |
+| RAM | 5,632 / 10,170 | 0 / 143 | 40.11 | 0.592 |
+| KV | 5,570 / 10,170 | 0 / 143 | 39.93 | 0.586 |
+| Auto | 5,596 / 10,170 | 0 / 143 | 40.37 | 0.588 |
+
+GB and MB are decimal. The final column amortizes only committed encoded
+metadata over each failed action's wall time, including preload and termination
+grace. It is not logical backup throughput, a successful full-import rate or
+a causal mode ranking. All runs stayed under the RSS and managed RAM limits;
+KV selection showed no reported scratch work, and auto did not migrate.
+Single fixed-order runs, shared NFS/cache effects and the different baseline
+CLI variant preclude production recommendations or intrinsic speedup claims.
+The original Pebble baseline instead imported all indexes and then timed out
+in incomplete snapshot traversal; that separate bottleneck remains unresolved.
+
+`repaired-screening-disposition.json` links the three outcome seals, immutable
+variant launch, input pins and original configured-screening disposition.
+The verified `REPAIRED-SCREENING-SHA256SUMS` identity is
+`d8733a37ea035011caaf2056be15957ad5708a0287b1c6501395751f87079ff2`.
+There are zero completed index checks, repository checks or backups. No
+failed database was resumed, timeout extended, exclusion relaxed or production
+default changed. The complete operator workflow remains blocked, not accepted.
+
+The next proposed scope is a bounded diagnostic of existing blob-record lookup
+across the client/RPC/native cache/store path, followed by a separately pinned
+optimization only if justified and authorized. Neither another runtime variant
+nor decoupling backup from failed import is authorized by this screening result.

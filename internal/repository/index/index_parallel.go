@@ -201,6 +201,15 @@ func decodeWorkingIndex(ctx context.Context, encoded []byte, id vaultic.ID) (*In
 		release()
 		return nil, err
 	}
-	idx.attachWorking(release, false)
+	retainedRelease, err := workingstate.Reserve(ctx, idx.workingCapacity())
+	release()
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		retainedRelease()
+		return nil, err
+	}
+	idx.attachWorking(retainedRelease, false)
 	return idx, nil
 }
