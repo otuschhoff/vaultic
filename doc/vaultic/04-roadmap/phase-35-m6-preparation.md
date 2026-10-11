@@ -620,3 +620,173 @@ The next proposed scope is a bounded diagnostic of existing blob-record lookup
 across the client/RPC/native cache/store path, followed by a separately pinned
 optimization only if justified and authorized. Neither another runtime variant
 nor decoupling backup from failed import is authorized by this screening result.
+
+### Authorized Fresh-Filter Diagnostic And Rerun
+
+On 2026-10-08 the operator authorized bounded metadata-lookup diagnostics,
+an evidence-backed separately pinned fix and isolated reruns under the existing
+limits and exclusions. This supersedes the pending diagnostic authorization
+above; it does not authorize limit changes or resuming failed databases.
+
+The controlling path is `SchemaStore.EnableFreshLegacyImportContext`: every
+working policy previously selected an empty database-fallback filter, even
+with enough budget. A new 64 MiB regression first failed for RAM, KV and auto.
+Bounded final telemetry confirms fallback in all three repaired runs and
+212,175,552 / 209,981,710 / 210,892,442 catalog read keys respectively. The
+original unconfigured run's active filter instead recorded 376,663,016
+definitely-absent lookups and 4,247,499 catalog read keys. Those unequal-scope,
+fixed-order observations confirm read amplification, not a causal speedup ratio
+or native cache/RPC/storage service-time attribution.
+
+The candidate admits and charges each filter layer before allocation, including
+conservative per-layer ownership overhead, while preserving the existing size
+bound. Initial/growth denial, cancelled admission or policies without accounting
+fall back to authoritative reads. CLI import-session teardown releases all
+charges; repeated release is safe. Tests cover admitted hints in all modes,
+no false negatives, growth charges, denied growth, cancellation and cleanup.
+Existing native idempotence and fallback-equivalence fixtures also pass.
+
+The fresh publication is
+`/volume2/NASDA2/vaultic-test-m6/pilot-5goxo86c`, with CLI SHA-256
+`cee7072b8e97988cd5156acc71dc95ffbbc370eba2b50190dc7b3a2b56fa93e0`.
+Its plan differs from the prior accounting variant only in root and CLI hash;
+daemon, source inventory/profile/config, runner, observer, absolute free-space
+reserve and all runtime limits remain pinned identically. Seven retained
+verification gates passed. Fresh RAM, KV and auto cells use full import scope,
+then only proceed to checks and backup if prior actions complete successfully.
+No full-workload throughput or operator acceptance is claimed before outcomes;
+the separate original snapshot-traversal bottleneck remains unresolved.
+
+### Charged-Filter RAM Runtime Finding
+
+The fresh RAM rerun reached the unchanged deadline: wall time 43,230.245
+seconds including termination grace, exit -9, peak combined RSS
+47,180,910,592 bytes. All 10,170 indexes, 419,853 packs and 380,166,821 blob
+records were imported. Snapshot traversal remained incomplete: 19 of 143
+snapshots imported, 21 seen, 32,611,085 trees and 175,360,140 nodes visited.
+All 21 recorded findings were `load-tree` / `context canceled` at termination;
+retain them as deadline-related findings, not a clean source audit.
+
+The charged filter reached six layers / 1,368,893,127 bytes, with no observed
+fallback while filter bytes were live. It avoided 376,663,017 lookups; catalog
+read keys were 4,247,498. Final telemetry shows zero filter storage and
+fallback after the explicit teardown release, not the old admission bypass.
+Managed peak was 96,402,032,293 bytes, below 160 GiB; reported managed scratch
+usage/peak remained zero. Neither admission nor the 200 GB RSS ceiling stopped
+the run. The filter repair cleared read amplification but did not establish
+complete full-import acceptance or a causal variant speedup.
+
+Observed CLI/daemon CPU averaged about 2.26 cores over 8,626 resource samples.
+Memory-pressure avg10 was nonzero in 86 samples, peaking at 0.74 percent.
+Observed cgroup file cache peaked at 202,172,809,216 bytes, separately from RSS.
+Index-publication counters were unchanged for the final 6.30 hours; this does
+not imply an idle process or measure snapshot work. Aggregate `blob_read` was
+15,048.928 seconds and planning 16,536.231 seconds across overlapping lanes.
+Final encoded committed metadata was 46,002,455,652 bytes, not logical backup
+payload throughput. The remaining snapshot-traversal mechanism is unproven.
+
+The verified `RAM-TIMEOUT-SHA256SUMS` identity in the charged-filter root is
+`02cdd13335deb06e3286f3c27de1459be995edc684c9a3008cb8b60bb3940600`.
+The immutable launch seal is
+`0318f9267bf6378aff9a05109e177958794847934cfa52e96ec59ef8a4851033`.
+Index checks, repository checks, initialization and backup did not run.
+Fresh KV and auto reruns remain authorized under the same frozen complete
+scope, binaries, observer and limits; no partial RAM database is resumed.
+
+### Charged-Filter KV Runtime Finding
+
+The fresh KV cell also reached the unchanged deadline: wall time 43,230.152
+seconds including termination grace, exit -9, peak combined RSS
+45,512,536,064 bytes. All 10,170 indexes, 419,853 packs and 380,166,821 blob
+records were imported. Snapshot traversal remained incomplete: 19 of 143
+snapshots imported, 21 seen, 31,864,185 trees and 172,713,460 nodes visited.
+All 70 recorded findings were `load-tree` / `context canceled` at termination;
+this remains a failed full import, not a clean source audit.
+
+Live filter peak was six layers / 1,368,893,127 bytes, with no observed fallback
+while filter bytes were live. It avoided 376,663,019 lookups; catalog read keys
+were 4,247,496. Final released-filter fallback is expected teardown, not renewed
+policy bypass. Managed peak was 96,445,030,131 bytes, below 160 GiB; reported
+managed scratch usage/peak were zero. KV selection alone did not establish
+scratch work or intrinsic mode superiority, and no resource ceiling stopped
+this run.
+
+Observed CLI/daemon CPU averaged about 2.28 cores over 8,623 samples.
+Memory-pressure avg10 was nonzero in 59 samples, peaking at 1.92 percent;
+cgroup file cache peaked at 209,261,506,560 bytes, separately from RSS.
+Publication counters were unchanged for the final 6.25 hours, which does not
+measure snapshot work or imply process inactivity. Aggregate `blob_read` was
+15,098.739 seconds and planning 16,582.357 seconds across overlapping lanes.
+Final encoded committed metadata was 46,002,455,652 bytes. Neither these
+partial workflow counters nor the single fixed-order RAM/KV results establish
+completed full-import throughput or a causal mode ranking. The shared
+remaining snapshot-traversal mechanism is still unproven.
+
+The verified `KV-TIMEOUT-SHA256SUMS` identity in the charged-filter root is
+`b045a501907ad1eb5ec6039da2ace4bb127d78ca95dd2e3f8f34e5da3b1e06d3`.
+Checks, initialization and backup did not run. The final fresh auto cell
+subsequently ran with the identical frozen scope, binaries, observer and
+limits, as recorded below; neither failed database was resumed and no deadline
+was extended.
+
+### Charged-Filter Auto Runtime Finding
+
+The final fresh auto cell also reached the unchanged deadline: wall time
+43,230.357 seconds including termination grace, exit -9, peak combined RSS
+47,111,458,816 bytes. All 10,170 indexes, 419,853 packs and 380,166,821 blob
+records were imported. Only 19 of 143 snapshots were imported, with 21 seen,
+32,540,576 trees and 175,122,198 nodes visited. All three recorded findings
+were `load-tree` / `context canceled` at termination, not a clean source audit.
+
+Auto stayed effective RAM without migration or reported managed scratch work.
+Managed peak was 96,282,984,897 bytes, below 160 GiB. The live filter peaked
+at six layers / 1,368,893,127 bytes, with no observed fallback while allocated;
+it avoided 376,663,038 lookups and catalog read keys were 4,247,477.
+Terminal released-filter fallback is expected cleanup, not policy bypass.
+
+Observed CLI/daemon CPU averaged about 2.26 cores over 8,621 samples.
+Memory-pressure avg10 was nonzero in 54 samples, peaking at 2.37 percent;
+cgroup file cache peaked at 208,404,713,472 bytes, separately from RSS.
+Publication counters were unchanged for the final 6.29 hours, which does not
+measure snapshot progress. Aggregate `blob_read` was 14,997.973 seconds and
+planning 16,478.497 seconds across overlapping lanes. Final encoded committed
+metadata was 46,002,455,652 bytes, not logical backup payload throughput.
+
+The verified `AUTO-TIMEOUT-SHA256SUMS` identity in the charged-filter root is
+`bb76e934b6936a8ad5cc4a257f6cd86f20267f89a91c0c182ecfa6a4b01002ea`.
+Checks, initialization and backup did not run. Full import remains incomplete.
+
+### Charged-Filter Screening Disposition
+
+All three charged-filter runs reported complete index publication and cleared
+the policy-induced catalog-read amplification, but failed the unchanged
+12-hour full-import deadline during snapshot traversal. No candidate met
+operator acceptance, and no completed checks or backup results exist.
+
+| Mode | Indexes Imported / Total | Snapshots Imported / Total | Peak Combined RSS (GB) | Index-Publication Counter Span (h) |
+| --- | --- | --- | --- | --- |
+| RAM | 10,170 / 10,170 | 19 / 143 | 47.18 | 4.99 |
+| KV | 10,170 / 10,170 | 19 / 143 | 45.51 | 5.00 |
+| Auto | 10,170 / 10,170 | 19 / 143 | 47.11 | 4.97 |
+
+GB is decimal. Counter spans run from the first positive mutation sample to
+the last index-publication counter change, with matched process identity;
+they exclude earlier preload and are not full-import wall times. Mutation
+operation rates over those spans were about 21.5-21.6 thousand operations
+per second, not logical backup bytes or distinct blob-record throughput.
+Single fixed-order shared NFS/cache runs do not establish causal mode or
+variant speedups. Complete counters alone do not prove durable reopen
+integrity or clean source audits; the required checks never ran.
+
+`charged-filter-screening-disposition.json` links the diagnostic, frozen
+variant launch, input pins, three outcome seals and prior accounting-screening
+disposition. The verified `CHARGED-FILTER-SCREENING-SHA256SUMS` identity is
+`f797cbc70eb992ff46ff23e82adc7a7488582e665c98427b603bef1447b65c37`.
+The accounting and filter-admission defects were repaired without raising
+limits or changing defaults, exclusions, daemon, runner or observer. No
+partial database was resumed, timeout extended or independent backup started.
+
+The complete operator workflow remains blocked by snapshot traversal. Its
+load/traversal/audit cost and underlying runtime/storage mechanism require
+a separately bounded diagnostic; no new snapshot-runtime variant or decoupled
+backup is implied by these failed outcomes.

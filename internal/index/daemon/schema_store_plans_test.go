@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"github.com/otuschhoff/vaultic/internal/workingkv"
+	"github.com/otuschhoff/vaultic/internal/workingstate"
 	"math"
 	"testing"
 
@@ -34,6 +35,41 @@ func TestFreshImportLookupHintsNeverForgetCommittedIDs(t *testing.T) {
 	}
 }
 
+func TestM6FreshImportPolicyAdmitsAbsenceHints(t *testing.T) {
+	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV, workingkv.ModeAuto} {
+		t.Run(string(mode), func(t *testing.T) {
+			policy, err := workingkv.NewPolicy(mode, 64<<20, t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := &SchemaStore{}
+			store.EnableFreshLegacyImportContext(workingkv.WithPolicy(t.Context(), policy))
+			t.Cleanup(store.ReleaseFreshLegacyImport)
+			stats := store.freshImportSeen.stats()
+			if stats.FallbackToDatabase || stats.Bytes == 0 || stats.Layers == 0 || policy.Budget().Used < stats.Bytes {
+				t.Fatalf("admitted filter did not retain charged absence hints: stats=%+v budget=%+v", stats, policy.Budget())
+			}
+			packID, blobID := daemonTestID(1), daemonTestID(2)
+			imported := LegacyPackImport{PackID: packID, Blobs: map[schema.ID]schema.BlobRecord{blobID: {}}}
+			hints := store.freshImportLookupHintsForBatch([]LegacyPackImport{imported})
+			if len(hints.packsAbsent) != 1 || len(hints.blobsAbsent) != 1 {
+				t.Fatalf("fresh IDs did not receive absence hints: %+v", hints)
+			}
+			store.freshImportSeen.insert(packID)
+			store.freshImportSeen.insert(blobID)
+			hints = store.freshImportLookupHintsForBatch([]LegacyPackImport{imported})
+			if len(hints.packsAbsent) != 0 || len(hints.blobsAbsent) != 0 {
+				t.Fatalf("committed IDs were reported absent: %+v", hints)
+			}
+			store.ReleaseFreshLegacyImport()
+			store.ReleaseFreshLegacyImport()
+			if policy.Budget().Used != 0 || !store.freshImportSeen.possiblyContains(daemonTestID(99)) {
+				t.Fatal("filter release leaked admission or allowed unsafe absence hints", policy.Budget())
+			}
+		})
+	}
+}
+
 func TestM3FreshImportPolicyFallback(t *testing.T) {
 	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV, workingkv.ModeAuto} {
 		t.Run(string(mode), func(t *testing.T) {
@@ -52,6 +88,97 @@ func TestM3FreshImportPolicyFallback(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestM6FreshImportPolicyGrowthFallbackAndRelease(t *testing.T) {
+	firstLayerBytes, _ := seenFilterLayerParameters(2, 0.001/2)
+	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV, workingkv.ModeAuto} {
+		t.Run(string(mode), func(t *testing.T) {
+			policy, err := workingkv.NewPolicy(mode, firstLayerBytes+seenFilterLayerWorkingOverhead, t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			filter := newIDSeenFilterContext(workingkv.WithPolicy(t.Context(), policy), 2, 1024, 0.001)
+			defer filter.close()
+			for _, id := range []schema.ID{daemonTestID(1), daemonTestID(2), daemonTestID(3), daemonTestID(4), daemonTestID(5)} {
+				filter.insert(id)
+				if !filter.possiblyContains(id) {
+					t.Fatal("budget fallback forgot an inserted ID")
+				}
+			}
+			if stats := filter.stats(); !stats.FallbackToDatabase || stats.Layers != 1 || policy.Budget().Used != firstLayerBytes+seenFilterLayerWorkingOverhead {
+				t.Fatalf("growth did not fail closed: stats=%+v budget=%+v", stats, policy.Budget())
+			}
+			if !filter.possiblyContains(daemonTestID(99)) {
+				t.Fatal("growth fallback skipped an authoritative lookup")
+			}
+			filter.close()
+			filter.close()
+			if policy.Budget().Used != 0 {
+				t.Fatal("growth fallback leaked charges", policy.Budget())
+			}
+		})
+	}
+}
+
+type cancellingFilterPolicy struct {
+	*workingkv.Policy
+	cancel context.CancelFunc
+}
+
+func TestM6FreshImportPolicyChargesEveryLayer(t *testing.T) {
+	policy, err := workingkv.NewPolicy(workingkv.ModeRAM, 1<<20, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	filter := newIDSeenFilterContext(workingkv.WithPolicy(t.Context(), policy), 2, 1024, 0.001)
+	defer filter.close()
+	for _, id := range []schema.ID{daemonTestID(1), daemonTestID(2), daemonTestID(3), daemonTestID(4), daemonTestID(5)} {
+		filter.insert(id)
+		if !filter.possiblyContains(id) {
+			t.Fatal("admitted growth forgot an inserted ID")
+		}
+	}
+	stats := filter.stats()
+	if stats.Layers < 2 || stats.FallbackToDatabase || policy.Budget().Used != stats.Bytes+stats.Layers*seenFilterLayerWorkingOverhead {
+		t.Fatalf("layer charges differ from retained capacities: stats=%+v budget=%+v", stats, policy.Budget())
+	}
+	filter.close()
+	if policy.Budget().Used != 0 {
+		t.Fatal("multi-layer release leaked charges", policy.Budget())
+	}
+}
+
+func (policy *cancellingFilterPolicy) Reserve(size uint64) error {
+	err := policy.Policy.Reserve(size)
+	if err == nil {
+		policy.cancel()
+	}
+	return err
+}
+
+type unaccountedFilterPolicy struct{}
+
+func (unaccountedFilterPolicy) Mode() workingkv.Mode { return workingkv.ModeRAM }
+
+func TestM6FreshImportCancelledAndUnaccountedAdmission(t *testing.T) {
+	base, err := workingkv.NewPolicy(workingkv.ModeRAM, 1024, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	policy := &cancellingFilterPolicy{Policy: base, cancel: cancel}
+	filter := newIDSeenFilterContext(workingstate.WithPolicy(ctx, policy), 2, 1024, 0.001)
+	if stats := filter.stats(); !stats.FallbackToDatabase || stats.Bytes != 0 || base.Budget().Used != 0 {
+		t.Fatalf("cancelled admission allocated or leaked: stats=%+v budget=%+v", stats, base.Budget())
+	}
+	filter.close()
+	filter = newIDSeenFilterContext(workingstate.WithPolicy(t.Context(), unaccountedFilterPolicy{}), 2, 1024, 0.001)
+	if stats := filter.stats(); !stats.FallbackToDatabase || stats.Bytes != 0 {
+		t.Fatalf("filter bypassed an unaccounted policy: %+v", stats)
+	}
+	filter.close()
 }
 
 func TestIDSeenFilterRollsOverWithoutFalseNegatives(t *testing.T) {

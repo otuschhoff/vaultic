@@ -16,6 +16,7 @@ import (
 
 	vaulticdbv1 "github.com/otuschhoff/vaultic/internal/index/proto/vaulticdb/v1"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
+	"github.com/otuschhoff/vaultic/internal/workingkv"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -1883,8 +1884,13 @@ func TestSchemaStoreImportsLegacyPacksIdempotently(t *testing.T) {
 	}
 	defer client.Close(context.Background())
 	store := NewSchemaStore(client)
-	store.EnableFreshLegacyImport()
-	ctx := context.Background()
+	policy, err := workingkv.NewPolicy(workingkv.ModeRAM, 64<<20, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := workingkv.WithPolicy(t.Context(), policy)
+	store.EnableFreshLegacyImportContext(ctx)
+	defer store.ReleaseFreshLegacyImport()
 	source1, source2 := daemonTestID(1), daemonTestID(2)
 	pack1, pack2, blobID := daemonTestID(3), daemonTestID(4), daemonTestID(5)
 	location := func(packID schema.ID, offset uint64) map[schema.ID]schema.BlobRecord {
@@ -1985,6 +1991,14 @@ func TestSchemaStoreImportsLegacyPacksIdempotently(t *testing.T) {
 	resolvedDebt, err := schema.UnmarshalCrawlDebtRecord(debtValue)
 	if err != nil || resolvedDebt.Status != schema.DebtResolved || resolvedDebt.ErrorClass != "" {
 		t.Fatalf("resolved pack debt = %#v, err=%v", resolvedDebt, err)
+	}
+	stats := store.LegacyImportStats()
+	if stats.FilterFallbackToDatabase || stats.DefinitelyAbsentLookups == 0 || stats.FoundLookups == 0 || policy.Budget().Used < stats.FilterBytes {
+		t.Fatalf("charged filter did not preserve native duplicate reads: stats=%+v budget=%+v", stats, policy.Budget())
+	}
+	store.ReleaseFreshLegacyImport()
+	if policy.Budget().Used != 0 {
+		t.Fatal("native import filter leaked charges", policy.Budget())
 	}
 }
 

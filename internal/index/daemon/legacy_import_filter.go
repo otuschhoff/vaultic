@@ -1,17 +1,23 @@
 package daemon
 
 import (
+	"context"
 	"encoding/binary"
 	"math"
 	"sync"
 
 	"github.com/otuschhoff/vaultic/internal/index/schema"
+	"github.com/otuschhoff/vaultic/internal/workingstate"
 )
 
-const seenFilterGrowth = 2
+const (
+	seenFilterGrowth               = 2
+	seenFilterLayerWorkingOverhead = 256
+)
 
 type idSeenFilter struct {
 	mu                  sync.RWMutex
+	ctx                 context.Context
 	layers              []idSeenFilterLayer
 	initialCapacity     uint64
 	maxBytes            uint64
@@ -23,6 +29,7 @@ type idSeenFilter struct {
 
 type idSeenFilterLayer struct {
 	bits          []byte
+	release       func()
 	capacity      uint64
 	inserts       uint64
 	probes        uint8
@@ -39,15 +46,40 @@ type idSeenFilterStats struct {
 }
 
 func newIDSeenFilter(initialCapacity int, maxBytes int, targetFalsePositive float64) *idSeenFilter {
+	return newIDSeenFilterContext(context.Background(), initialCapacity, maxBytes, targetFalsePositive)
+}
+
+func newIDSeenFilterContext(ctx context.Context, initialCapacity int, maxBytes int, targetFalsePositive float64) *idSeenFilter {
 	filter := &idSeenFilter{
+		ctx:                 ctx,
 		initialCapacity:     uint64(max(initialCapacity, 1)),
 		maxBytes:            uint64(max(maxBytes, 1)),
 		targetFalsePositive: targetFalsePositive,
+	}
+	if policy := workingstate.PolicyFrom(ctx); policy != nil {
+		if _, accounted := policy.(interface {
+			Reserve(uint64) error
+			Release(uint64)
+		}); !accounted {
+			filter.fallbackToDatabase = true
+			return filter
+		}
 	}
 	if !filter.addLayer() {
 		filter.fallbackToDatabase = true
 	}
 	return filter
+}
+
+func (filter *idSeenFilter) close() {
+	filter.mu.Lock()
+	defer filter.mu.Unlock()
+	filter.fallbackToDatabase = true
+	for _, layer := range filter.layers {
+		layer.release()
+	}
+	filter.layers = nil
+	filter.allocatedBytes = 0
 }
 
 func (filter *idSeenFilter) possiblyContains(id schema.ID) bool {
@@ -109,7 +141,7 @@ func (filter *idSeenFilter) stats() idSeenFilterStats {
 }
 
 func (filter *idSeenFilter) addLayer() bool {
-	if filter.targetFalsePositive <= 0 || filter.targetFalsePositive >= 1 || math.IsNaN(filter.targetFalsePositive) {
+	if filter.ctx.Err() != nil || filter.targetFalsePositive <= 0 || filter.targetFalsePositive >= 1 || math.IsNaN(filter.targetFalsePositive) {
 		return false
 	}
 	capacity := filter.initialCapacity
@@ -125,8 +157,16 @@ func (filter *idSeenFilter) addLayer() bool {
 		byteCount > filter.maxBytes-filter.allocatedBytes {
 		return false
 	}
+	release, err := workingstate.Reserve(filter.ctx, byteCount+seenFilterLayerWorkingOverhead)
+	if err != nil {
+		return false
+	}
+	if filter.ctx.Err() != nil {
+		release()
+		return false
+	}
 	filter.layers = append(filter.layers, idSeenFilterLayer{
-		bits: make([]byte, byteCount), capacity: capacity, probes: probeCount, falsePositive: falsePositive,
+		bits: make([]byte, byteCount), release: release, capacity: capacity, probes: probeCount, falsePositive: falsePositive,
 	})
 	filter.allocatedBytes += byteCount
 	return true
