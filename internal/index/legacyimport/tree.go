@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"math"
 	"path"
+	"time"
 
 	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/workingstate"
 )
 
 type SnapshotSource interface {
@@ -182,6 +184,9 @@ type TreeStore interface {
 const (
 	snapshotRevisionBlockSize = 1024
 	snapshotDebtBatchSize     = 256
+	snapshotDebtAdmittedItems = 4096
+	snapshotDebtAdmittedBytes = 1 << 20
+	snapshotDebtWorkingCharge = 4 << 20
 	snapshotRevisionBatchSize = 256
 	snapshotProgressNodes     = 1024
 )
@@ -200,6 +205,9 @@ type treeImporter struct {
 	snapshot         vaultic.ID
 	ancestors        map[vaultic.ID]struct{}
 	pendingDebt      []daemon.Mutation
+	pendingDebtBytes uint64
+	pendingDebtKeys  map[string]struct{}
+	debtBatchItems   int
 	pendingRevisions []daemon.RevisionPublication
 	pendingCurrent   map[string]struct{}
 	revisionNext     uint64
@@ -279,6 +287,8 @@ func importSnapshots(
 			pendingCurrent: make(map[string]struct{}),
 			reportProgress: reportProgress,
 		}
+		releaseDebt := importer.admitDebtBatch()
+		defer releaseDebt()
 		_, _, err = importer.importTree(*snapshot.Tree, nil, "", 0)
 		if err != nil {
 			return err
@@ -326,7 +336,9 @@ func (importer *treeImporter) importTree(treeID vaultic.ID, parent *nodeIdentity
 	}
 	importer.ancestors[treeID] = struct{}{}
 	defer delete(importer.ancestors, treeID)
+	loadStarted := time.Now()
 	tree, err := data.LoadTree(importer.ctx, importer.source, treeID)
+	importer.options.Telemetry.observe("snapshot_tree_load", time.Since(loadStarted))
 	if err != nil {
 		if debtErr := importer.writeDebt(debtWrite{
 			store: importer.store, options: importer.options, result: importer.result,
@@ -343,7 +355,9 @@ func (importer *treeImporter) importTree(treeID vaultic.ID, parent *nodeIdentity
 	importer.result.TreesVisited++
 	children := make([]schema.DirectoryChild, 0)
 	complete := true
+	decodeStarted := time.Now()
 	for item := range tree {
+		importer.options.Telemetry.observe("snapshot_tree_decode", time.Since(decodeStarted))
 		if item.Error != nil {
 			if findingErr := recordFinding(importer.result, importer.options, importer.snapshot, "decode-tree", item.Error); findingErr != nil {
 				return nil, false, findingErr
@@ -364,10 +378,13 @@ func (importer *treeImporter) importTree(treeID vaultic.ID, parent *nodeIdentity
 		}
 		if !imported {
 			complete = false
+			decodeStarted = time.Now()
 			continue
 		}
 		children = append(children, child)
+		decodeStarted = time.Now()
 	}
+	importer.options.Telemetry.observe("snapshot_tree_decode", time.Since(decodeStarted))
 	return children, complete, nil
 }
 
@@ -594,6 +611,11 @@ func (importer *treeImporter) publishRevision(currentKey []byte, identity nodeId
 		}
 		related = append(related, daemon.Mutation{Key: schema.ReverseInodeKey(id, identity.fsid, identity.inode), Value: reverseValue})
 	}
+	if importer.debtBatchItems == snapshotDebtAdmittedItems {
+		if err := importer.flushDebt(); err != nil {
+			return nil, err
+		}
+	}
 	related = append(related, importer.pendingDebt...)
 	if importer.options.DeferSnapshotDurability {
 		currentID := string(currentKey)
@@ -649,14 +671,64 @@ func (importer *treeImporter) allocateRevision() (uint64, error) {
 	return revision, nil
 }
 
+func (importer *treeImporter) admitDebtBatch() func() {
+	importer.debtBatchItems = snapshotDebtBatchSize
+	if importer.ctx.Err() != nil || workingstate.PolicyFrom(importer.ctx) == nil {
+		return func() {}
+	}
+	if _, accounted := workingstate.PolicyFrom(importer.ctx).(interface {
+		Reserve(uint64) error
+		Release(uint64)
+	}); !accounted {
+		return func() {}
+	}
+	release, err := workingstate.Reserve(importer.ctx, snapshotDebtWorkingCharge)
+	if err != nil {
+		return func() {}
+	}
+	if importer.ctx.Err() != nil {
+		release()
+		return func() {}
+	}
+	importer.debtBatchItems = snapshotDebtAdmittedItems
+	importer.pendingDebt = make([]daemon.Mutation, 0, snapshotDebtAdmittedItems)
+	importer.pendingDebtKeys = make(map[string]struct{}, snapshotDebtAdmittedItems)
+	return release
+}
+
 func (importer *treeImporter) writeDebt(debt debtWrite) error {
 	mutation, err := debtMutation(debt)
 	if err != nil {
 		return err
 	}
 	if !debt.options.DryRun {
+		mutationBytes := uint64(len(mutation.Key) + len(mutation.Value))
+		key := string(mutation.Key)
+		_, duplicate := importer.pendingDebtKeys[key]
+		if importer.debtBatchItems == snapshotDebtAdmittedItems && mutationBytes > snapshotDebtAdmittedBytes {
+			release, err := workingstate.Reserve(importer.ctx, uint64(cap(mutation.Key)+cap(mutation.Value))*2+512)
+			if err != nil {
+				return err
+			}
+			defer release()
+		}
+		if importer.debtBatchItems == snapshotDebtAdmittedItems &&
+			(duplicate || mutationBytes+importer.pendingDebtBytes > snapshotDebtAdmittedBytes) {
+			if err := importer.flushDebt(); err != nil {
+				return err
+			}
+		}
 		importer.pendingDebt = append(importer.pendingDebt, mutation)
-		if len(importer.pendingDebt) >= snapshotDebtBatchSize {
+		if importer.pendingDebtKeys != nil {
+			importer.pendingDebtKeys[key] = struct{}{}
+		}
+		importer.pendingDebtBytes += mutationBytes
+		limit := importer.debtBatchItems
+		if limit == 0 {
+			limit = snapshotDebtBatchSize
+		}
+		if len(importer.pendingDebt) >= limit ||
+			(importer.debtBatchItems == snapshotDebtAdmittedItems && importer.pendingDebtBytes >= snapshotDebtAdmittedBytes) {
 			if err := importer.flushDebt(); err != nil {
 				return err
 			}
@@ -671,10 +743,16 @@ func (importer *treeImporter) flushDebt() error {
 		return nil
 	}
 	durable := !importer.options.DeferSnapshotDurability
-	if err := importer.store.WriteMutableBatch(importer.ctx, importer.pendingDebt, nil, durable); err != nil {
+	writeStarted := time.Now()
+	err := importer.store.WriteMutableBatch(importer.ctx, importer.pendingDebt, nil, durable)
+	importer.options.Telemetry.observe("snapshot_debt_write", time.Since(writeStarted))
+	if err != nil {
 		return err
 	}
+	clear(importer.pendingDebt)
+	clear(importer.pendingDebtKeys)
 	importer.pendingDebt = importer.pendingDebt[:0]
+	importer.pendingDebtBytes = 0
 	return nil
 }
 

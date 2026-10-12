@@ -790,3 +790,136 @@ The complete operator workflow remains blocked by snapshot traversal. Its
 load/traversal/audit cost and underlying runtime/storage mechanism require
 a separately bounded diagnostic; no new snapshot-runtime variant or decoupled
 backup is implied by these failed outcomes.
+
+### Authorized Snapshot Diagnostics And Debt Candidate (2026-10-11)
+
+The operator subsequently authorized bounded snapshot-traversal diagnostics
+and a separately pinned repair/rerun under the same resource, input and
+exclusion contract. This does not authorize timeout extensions, failed-state
+resume, tree/source omission or independent backup after failed import.
+
+Diagnostics use a read-only source view, an empty fresh native catalog and
+at most 100,000 visited nodes per sorted snapshot, across all 143 snapshots.
+Full source preload has a separate 90-minute bound; traversal has 30 minutes
+inside a two-hour context. Tracking retains at most 100,000 unique tree IDs
+under an explicit 12.8 MB charge; repeat counts are therefore lower bounds.
+The native binary, observer, combined 200 GB RSS ceiling, input pins and
+absolute shared NFS free-space reserve remain unchanged. These prefixes do
+not reproduce the complete post-index catalog or constitute snapshot audits.
+
+The initial diagnostic exhausted a combined 30-minute bound during preload,
+without traversal. The staged first-prefix run completed preload in 3,026.44
+seconds and visited 100,000 nodes with 200,000 debts and no findings. The
+all-prefix baseline and debt candidate visited exactly the same 12,113,704
+nodes, 1,907,677 trees and 24,227,408 debts with no findings; neither imported
+identity-known nodes. Source loads, decoded bytes and bounded repeat counts
+also matched exactly.
+
+| Matched Prefix Observation | Baseline | Debt Candidate |
+| --- | ---: | ---: |
+| Native debt batch submissions | 94,733 | 6,642 |
+| Aggregate debt submission seconds | 504.21 | 205.64 |
+| Traversal wall seconds | 1,403.67 | 793.33 |
+| Full source preload seconds | 2,617.24 | 3,061.01 |
+| Peak combined process RSS, decimal GB | 47.086 | 46.797 |
+
+These are single fixed-order shared NFS/cache observations, not a causal wall
+speedup or a full-workflow throughput claim. Tree-load and lazy-decode service
+times changed too; aggregate timers are not exclusive wall partitions.
+The exact-scope reduction in submissions justifies a separately pinned full
+screening, not acceptance.
+
+The candidate reserves 4 MiB before allocating a per-snapshot buffer, targets
+4,096 records and at most 1 MiB encoded key/value bytes, and retains the
+256-record fallback if accounting is absent, denied or cancelled. Duplicate
+keys flush first; oversized records receive separate admission. Successful
+flushes clear retained references, failed flushes retain pending work, and
+snapshot cleanup releases the charge. Enlarged debt batches flush separately
+before revision publication; final durable checkpoint ordering is unchanged.
+Load, lazy-decode and standalone debt-write timings distinguish their costs.
+
+Focused tests cover RAM/KV/auto admission and byte-for-byte equivalence,
+cancellation, byte limits, duplicate keys, failed writes, native reopen and
+deferred publication ordering. The native fixture seeds its root catalog,
+uses sorted names and allows native RPC headroom; the optimized-daemon native
+fixture, focused race gate and owning-package gates all passed before pinning.
+
+All diagnostic roots are beneath `/volume2/NASDA2/vaultic-test-m6/`:
+
+| Diagnostic Root | Verified Outcome Seal SHA-256 |
+| --- | --- |
+| `snapshot-diag-20261011-Dtj4Wa` | `876f30e725f70496c7c0a986dee1a01e8eb2c68a6213b05f2ae9013b933c3833` |
+| `snapshot-diag-staged-20261011-HfFF6P` | `40a52cac23b4c63e8d8d173adc5a0a1207e1eebbfba0d00cb0e55444e6332d77` |
+| `snapshot-diag-matrix-20261011-JmeI2L` | `6556bfc7a58325134eca4ffbc075db4d48fb3128c90b29db8f6dd14a234e6b25` |
+| `snapshot-debt-candidate-20261011-g7Zrll` | `0f41bb80f5896233811849b8b02d4a0474889781ef6d92b2e2ddc02fe795ea78` |
+
+The separate full-workflow candidate is `pilot-ru5_eh_8`, with CLI SHA-256
+`8554e47f2204c469b247a8117eb37c2ec9592f46b58694d0c946b5ae69d0e8f9`
+and launch seal
+`525769d6bda466a0f15070bd7cd89c8bc06731f273090f0661cc42d18fd647f1`.
+Its plan differs from the preceding charged-filter pilot only by private root
+and CLI hash. Source inventory, profile, config, optimized daemon, runner,
+observer, 52-source selection and exact exclusions match. The absolute NFS
+reserve remains 57,481,929,687,040 bytes, managed policy 160 GiB and scratch
+8 GiB; import/check bounds remain 12 hours each and backup seven days.
+Fresh RAM, KV and auto cells must each complete import, both checks, init and
+the full backup in order. No complete workflow or M6 acceptance is claimed.
+
+### Debt Candidate RAM Full-Scope Outcome
+
+The fresh RAM cell in `pilot-ru5_eh_8` reached the unchanged 12-hour import
+deadline: action exit `-9`, wall 43,230.176969 seconds including termination
+grace, peak combined CLI/native RSS 53,559,631,872 bytes. All 10,170 indexes,
+419,853 packs and 380,166,821 blob records completed, but only 28 of 143
+snapshots were imported, with 30 seen. Final counters recorded 48,014,077
+trees, 317,792,343 visited nodes, zero imported nodes and 635,584,742 crawl
+debts. The 56 findings all report `load-tree` / `context canceled`; they are
+retained deadline findings, not a clean source audit or evidence that every
+counted debt was durably published. Neither check, init nor backup ran.
+
+Managed peak was 96,576,378,561 bytes under the 160 GiB policy, with closing
+usage 90,316,228,480 bytes and reported managed scratch usage/peak zero.
+The independent observer retained 8,627 samples over 43,235.994419 seconds,
+averaging 2.422717 owned CLI/native CPU cores. Peak cgroup file cache was
+220,191,236,096 bytes, separate from the RSS ceiling. Memory PSI avg10 was
+nonzero in 51 samples, peaking at 0.84%; pressure was not absent, and these
+observations do not identify its causal contribution.
+
+The identity-matched positive index-publication counter span was 18,330
+seconds, with 386,695,476 additional mutations, or 21,096.316 operations/s.
+It excludes preload before the first positive counter and does not measure
+logical backup payload. Its subsequent 21,916.744-second unchanged interval
+does not imply process inactivity: snapshot work is outside that counter.
+Aggregate index-stage microseconds included existing-blob metadata reads
+15,239,498,239, planning 16,766,262,369, transactions 26,676,530,962 and
+cleanup 3,047,007,954; these timers overlap, not partition wall time.
+
+Live absence-filter retention peaked at 1,368,893,127 bytes across six layers.
+Final released-filter fields may be omitted and the final fallback flag may
+reflect teardown, not a live policy bypass. The full CLI exporter does not
+expose the new snapshot-specific timers recorded by the bounded diagnostic;
+its index-stage counters cannot establish full-scale debt submission costs.
+More partial traversal than the preceding screening does not demonstrate
+causal speedup, durable reopen integrity, or complete import acceptance.
+
+The verified `RAM-TIMEOUT-SHA256SUMS` identity is
+`325889fe3e55885ab15af0d7541535b5fdf0343e173b952f26b886b2eef55781`.
+All launch pins were reverified unchanged; RAM workload and observer were
+inactive/dead and production remained active/running. The next authorized
+KV and auto cells remain fresh, with the same scope, exclusions and limits;
+the failed RAM database is not resumed and no independent backup is started.
+
+### Operator Upgrade Pause (2026-10-12)
+
+The operator requested stopping the current KV run for a VS Code/Copilot
+upgrade. Its workload and observer were stopped and verified inactive/dead;
+no pilot CLI/native processes remained, production stayed active/running,
+and auto was not started. KV ended on operator SIGTERM after a reported
+9h 25m 19.487s, not on the 12-hour deadline or a completed import. Its logs,
+RSS samples and telemetry remain retained, but supervisor result/summary
+files were not produced. The launcher's second stop of the already-collected
+observer reported an unloaded unit; that cleanup error does not indicate a
+remaining workload. Cgroup memory peak includes file cache and is not a
+combined-RSS acceptance result. The workflow is paused pending explicit
+continuation; this interrupted database must not be silently resumed.
+M6 full-workflow acceptance remains unmet.

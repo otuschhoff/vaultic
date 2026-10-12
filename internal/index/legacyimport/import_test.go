@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/backend/local"
 	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
@@ -3376,7 +3377,8 @@ func TestImportSnapshotsPreservesUnknownFactsAndResumes(t *testing.T) {
 	var updates []Progress
 	options := Options{
 		Resume: true, SnapshotDepth: 1,
-		Progress: func(progress Progress) { updates = append(updates, progress) },
+		Telemetry: NewSchedulerTelemetry(),
+		Progress:  func(progress Progress) { updates = append(updates, progress) },
 	}
 	result, err := Import(context.Background(), source, fixedStatter{}, store, options)
 	if err != nil {
@@ -3385,6 +3387,10 @@ func TestImportSnapshotsPreservesUnknownFactsAndResumes(t *testing.T) {
 	if result.SnapshotsImported != 1 || result.NodesImported != 1 || result.CrawlDebtCreated < 3 ||
 		store.revisionsWritten != 1 {
 		t.Fatalf("unexpected tree import result: %#v, revisions=%d", result, store.revisionsWritten)
+	}
+	operations := options.Telemetry.Snapshot().Operations
+	if operations["snapshot_tree_load"].Count != 2 || operations["snapshot_tree_decode"].Count != 4 || operations["snapshot_debt_write"].Count != 0 {
+		t.Fatalf("snapshot traversal timing counts = %+v", operations)
 	}
 	imported, err := schema.UnmarshalSnapshotRecord(store.values[string(schema.SnapshotKey(schema.ID(snapshotID)))])
 	if err != nil || imported.LegacyTree != schema.ID(rootTreeID) || !bytes.Equal(imported.OriginalJSON, snapshotJSON) || imported.RootRevision != 0 {
@@ -3430,6 +3436,408 @@ func TestImportSnapshotsPreservesUnknownFactsAndResumes(t *testing.T) {
 	}
 }
 
+type diagnosticSnapshotSource struct {
+	SnapshotSource
+	seen        map[vaultic.ID]struct{}
+	loads       uint64
+	repeats     uint64
+	loadedBytes uint64
+}
+
+func (source *diagnosticSnapshotSource) LoadBlob(ctx context.Context, handle vaultic.BlobHandle, buffer []byte) ([]byte, error) {
+	source.loads++
+	if _, found := source.seen[handle.ID]; found {
+		source.repeats++
+	}
+	if len(source.seen) < 100000 {
+		source.seen[handle.ID] = struct{}{}
+	}
+	value, err := source.SnapshotSource.LoadBlob(ctx, handle, buffer)
+	source.loadedBytes += uint64(len(value))
+	return value, err
+}
+
+func TestM6BoundedSnapshotTraversalDiagnostic(t *testing.T) {
+	sourcePath := os.Getenv("VAULTIC_M6_DIAGNOSTIC_REPO")
+	if sourcePath == "" {
+		t.Skip("opt-in bounded read-only real-input diagnostic")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Hour)
+	defer cancel()
+	password, err := os.ReadFile(os.Getenv("VAULTIC_M6_DIAGNOSTIC_PASSWORD_FILE"))
+	if err != nil {
+		t.Fatal("diagnostic password file unavailable")
+	}
+	policy, err := workingkv.NewPolicy(workingkv.ModeRAM, 160<<30, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx = workingkv.WithPolicy(ctx, policy)
+	if err := policy.Reserve(100000 * 128); err != nil {
+		t.Fatal(err)
+	}
+	defer policy.Release(100000 * 128)
+	be, err := local.Open(ctx, local.Config{Path: sourcePath, Connections: 8}, func(string, ...any) {})
+	if err != nil {
+		t.Fatal("diagnostic source open failed")
+	}
+	defer be.Close()
+	repo, err := repository.New(be, repository.Options{Compression: repository.CompressionFastest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repo.Close()
+	if err := repo.SearchKey(ctx, strings.TrimRight(string(password), "\r\n"), 10, ""); err != nil {
+		t.Fatal("diagnostic source unlock failed")
+	}
+	preloadStarted := time.Now()
+	preloadCtx, cancelPreload := context.WithTimeout(ctx, 90*time.Minute)
+	preloadErr := repo.LoadIndex(preloadCtx, vaultic.NoopTerminalCounterFactory)
+	cancelPreload()
+	if preloadErr != nil {
+		t.Fatal("diagnostic full source preload failed", preloadErr)
+	}
+	t.Logf("full_source_preload_seconds=%.6f", time.Since(preloadStarted).Seconds())
+	traversalCtx, cancelTraversal := context.WithTimeout(ctx, 30*time.Minute)
+	defer cancelTraversal()
+	ctx = traversalCtx
+	var snapshots vaultic.IDs
+	if err := repo.List(ctx, vaultic.SnapshotFile, func(id vaultic.ID, _ int64) error {
+		snapshots = append(snapshots, id)
+		return nil
+	}); err != nil {
+		t.Fatal("diagnostic source inventory failed")
+	}
+	sort.Slice(snapshots, func(first, second int) bool { return bytes.Compare(snapshots[first][:], snapshots[second][:]) < 0 })
+	directory := os.Getenv("VAULTIC_M6_DIAGNOSTIC_STATE")
+	if directory == "" || os.Getenv("VAULTICDB_TEST_BINARY") == "" {
+		t.Fatal("isolated diagnostic state and pinned daemon are required")
+	}
+	client, err := daemon.Ensure(ctx, daemon.Options{
+		Socket: filepath.Join(directory, "d.sock"), RepositoryID: "m6-snapshot-diagnostic",
+		DaemonPath: os.Getenv("VAULTICDB_TEST_BINARY"), DataDir: filepath.Join(directory, "db"), ObjectStore: "local",
+		WALStore: "memory", WALDataDir: filepath.Join(directory, "wal"), RebuildReset: true, FreshBulkImport: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	store := daemon.NewSchemaStore(client)
+	telemetry := NewSchedulerTelemetry()
+	result := &Result{}
+	source := &diagnosticSnapshotSource{SnapshotSource: repo, seen: make(map[vaultic.ID]struct{})}
+	traversalStarted := time.Now()
+	for _, snapshotID := range snapshots {
+		nodeLimit := result.NodesVisited + 100000
+		original, err := repo.LoadLegacyUnpacked(ctx, vaultic.SnapshotFile, snapshotID)
+		if err != nil {
+			t.Fatal("diagnostic snapshot load failed")
+		}
+		var snapshot data.Snapshot
+		if err := json.Unmarshal(original, &snapshot); err != nil || snapshot.Tree == nil {
+			t.Fatal("diagnostic snapshot decode failed")
+		}
+		importer := treeImporter{
+			ctx: ctx, source: source, store: store, snapshot: snapshotID, result: result,
+			options:   Options{SnapshotWorkBudget: nodeLimit, DeferSnapshotDurability: true, Telemetry: telemetry},
+			ancestors: make(map[vaultic.ID]struct{}), pendingCurrent: make(map[string]struct{}), reportProgress: func() {},
+		}
+		releaseDebt := sync.OnceFunc(importer.admitDebtBatch())
+		t.Cleanup(releaseDebt)
+		_, _, traversalErr := importer.importTree(*snapshot.Tree, nil, "", 0)
+		if err := importer.flushRevisions(); err != nil {
+			t.Fatal(err)
+		}
+		if err := importer.flushDebt(); err != nil {
+			t.Fatal(err)
+		}
+		releaseDebt()
+		result.SnapshotsSeen++
+		if errors.Is(traversalErr, ErrLimitReached) {
+			continue
+		}
+		if traversalErr != nil {
+			t.Fatal("bounded traversal failed", ctx.Err())
+		}
+	}
+	t.Logf("diagnostic_only=true cap_nodes_per_snapshot=100000 traversal_seconds=%.6f snapshots_seen=%d trees=%d nodes=%d imported_nodes=%d debts=%d errors=%d source_loads=%d repeated_loads=%d bounded_unique_trees=%d source_decoded_bytes=%d timings=%+v managed_budget=%+v", time.Since(traversalStarted).Seconds(), result.SnapshotsSeen, result.TreesVisited, result.NodesVisited, result.NodesImported, result.CrawlDebtCreated, result.ErrorsSeen, source.loads, source.repeats, len(source.seen), source.loadedBytes, telemetry.Snapshot().Operations, policy.Budget())
+	if result.ErrorsSeen != 0 || ctx.Err() != nil {
+		t.Fatal("diagnostic traversal recorded findings or expired")
+	}
+}
+
+type diagnosticDebtStore struct {
+	*memoryStore
+	sizes []int
+	bytes []uint64
+	fail  bool
+}
+
+func (store *diagnosticDebtStore) WriteMutableBatch(ctx context.Context, puts []daemon.Mutation, deletes [][]byte, durable bool) error {
+	store.sizes = append(store.sizes, len(puts))
+	var encoded uint64
+	for _, put := range puts {
+		encoded += uint64(len(put.Key) + len(put.Value))
+	}
+	store.bytes = append(store.bytes, encoded)
+	if store.fail {
+		return errors.New("injected debt submission failure")
+	}
+	return store.memoryStore.WriteMutableBatch(ctx, puts, deletes, durable)
+}
+
+func TestM6SnapshotDebtBatchAdmissionAndEquivalence(t *testing.T) {
+	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV, workingkv.ModeAuto} {
+		t.Run(string(mode), func(t *testing.T) {
+			var expected map[string][]byte
+			for _, budget := range []uint64{1, snapshotDebtWorkingCharge} {
+				policy, err := workingkv.NewPolicy(mode, budget, t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				store := &diagnosticDebtStore{memoryStore: newMemoryStore()}
+				result := &Result{}
+				importer := treeImporter{ctx: workingkv.WithPolicy(t.Context(), policy), store: store}
+				release := sync.OnceFunc(importer.admitDebtBatch())
+				t.Cleanup(release)
+				for ordinal := range 5000 {
+					debt := debtWrite{result: result, snapshot: vaultic.Hash([]byte("snapshot")), pathHint: fmt.Sprintf("node-%d", ordinal), reason: schema.DebtUnknownFreshness}
+					if err := importer.writeDebt(debt); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := importer.flushDebt(); err != nil {
+					t.Fatal(err)
+				}
+				if result.CrawlDebtCreated != 5000 {
+					t.Fatal(result)
+				}
+				if budget == 1 {
+					expected = store.values
+					if store.sizes[0] != 256 || policy.Budget().Used != 0 {
+						t.Fatal("denied admission changed fallback", store.sizes, policy.Budget())
+					}
+				} else if store.sizes[0] != 4096 || !reflect.DeepEqual(expected, store.values) || policy.Budget().Used != snapshotDebtWorkingCharge {
+					t.Fatal("admitted batching changed debt or accounting", store.sizes, policy.Budget())
+				}
+				release()
+				if policy.Budget().Used != 0 {
+					t.Fatal("debt batch leaked admission", policy.Budget())
+				}
+			}
+		})
+	}
+}
+
+func TestM6SnapshotDebtBatchByteLimitAndFailure(t *testing.T) {
+	policy, err := workingkv.NewPolicy(workingkv.ModeRAM, snapshotDebtWorkingCharge, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &diagnosticDebtStore{memoryStore: newMemoryStore()}
+	importer := treeImporter{ctx: workingkv.WithPolicy(t.Context(), policy), store: store}
+	release := sync.OnceFunc(importer.admitDebtBatch())
+	t.Cleanup(release)
+	result := &Result{}
+	for ordinal := range 100 {
+		if err := importer.writeDebt(debtWrite{result: result, pathHint: strings.Repeat("x", 16000) + fmt.Sprint(ordinal), reason: schema.DebtUnknownFreshness}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := importer.flushDebt(); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.sizes) < 2 {
+		t.Fatal("byte limit did not flush", store.sizes)
+	}
+	for _, encoded := range store.bytes {
+		if encoded > snapshotDebtAdmittedBytes {
+			t.Fatal("encoded debt batch exceeded cap", encoded)
+		}
+	}
+	store.fail = true
+	if err := importer.writeDebt(debtWrite{result: result, pathHint: "failure", reason: schema.DebtUnknownFreshness}); err != nil {
+		t.Fatal(err)
+	}
+	if err := importer.flushDebt(); err == nil || len(importer.pendingDebt) == 0 {
+		t.Fatal("failed debt write discarded pending work")
+	}
+	release()
+	if policy.Budget().Used != 0 {
+		t.Fatal("failure cleanup leaked admission", policy.Budget())
+	}
+}
+
+func TestM6SnapshotDebtBatchNativeReopen(t *testing.T) {
+	binary := os.Getenv("VAULTICDB_TEST_BINARY")
+	if binary == "" {
+		t.Skip("set VAULTICDB_TEST_BINARY for native durability fixture")
+	}
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+	defer cancel()
+	options := daemon.Options{
+		Socket: filepath.Join(directory, "d.sock"), RepositoryID: "m6-debt-reopen",
+		DaemonPath: binary, DataDir: filepath.Join(directory, "db"), ObjectStore: "local",
+		WALStore: "memory", WALDataDir: filepath.Join(directory, "wal"), RebuildReset: true, FreshBulkImport: true,
+	}
+	client, err := daemon.Ensure(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	store := daemon.NewSchemaStore(client)
+	policy, err := workingkv.NewPolicy(workingkv.ModeRAM, 16<<20, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes := make([]*data.Node, 5000)
+	for ordinal := range nodes {
+		nodes[ordinal] = &data.Node{Name: fmt.Sprintf("node-%05d", ordinal), Type: data.NodeTypeFile}
+	}
+	tree := treeJSON(t, nodes...)
+	treeID, snapshotID := vaultic.Hash(tree), vaultic.Hash([]byte("native-debt-snapshot"))
+	packID := schema.ID(vaultic.Hash([]byte("native-debt-tree-pack")))
+	if err := store.ImportLegacyPack(ctx, daemon.LegacyPackImport{
+		SourceIndex: schema.ID(vaultic.Hash([]byte("native-debt-index"))), PackID: packID,
+		Record: schema.PackRecord{Type: schema.PackTree, PayloadSize: uint64(len(tree)), BlobCount: 1, Lifecycle: schema.PackImported},
+		Blobs: map[schema.ID]schema.BlobRecord{schema.ID(treeID): {
+			Locations: []schema.BlobLocation{{PackID: packID, Length: uint32(len(tree)), Type: schema.BlobTree}},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	original, err := json.Marshal(data.Snapshot{Tree: &treeID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &memorySource{snapshots: map[vaultic.ID][]byte{snapshotID: original}, blobs: map[vaultic.ID][]byte{treeID: tree}}
+	result, err := Import(workingkv.WithPolicy(ctx, policy), source, fixedStatter{}, store, Options{SnapshotDepth: 1, DeferSnapshotDurability: true})
+	if err != nil || result.SnapshotsImported != 1 || result.CrawlDebtCreated != 10000 || policy.Budget().Used != 0 {
+		t.Fatalf("native import result=%+v budget=%+v err=%v", result, policy.Budget(), err)
+	}
+	if err := store.MarkBulkImportComplete(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	options.WALStore, options.RebuildReset, options.FreshBulkImport = "local", false, false
+	reopened, err := daemon.Ensure(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close(context.Background())
+	reopenedStore := daemon.NewSchemaStore(reopened)
+	for _, ordinal := range []int{0, 2048, 4999} {
+		for _, reason := range []schema.DebtReason{schema.DebtMissingInode, schema.DebtUnknownFreshness} {
+			pathHint := fmt.Sprintf("node-%05d", ordinal)
+			errorClass := "legacy-metadata-not-live-verified"
+			if reason == schema.DebtMissingInode {
+				errorClass = "legacy-node-identity-or-parent-unknown"
+			}
+			mutation, err := debtMutation(debtWrite{snapshot: snapshotID, work: workID(pathHint), pathHint: pathHint, reason: reason, errorClass: errorClass})
+			if err != nil {
+				t.Fatal(err)
+			}
+			value, found, err := reopenedStore.Get(ctx, mutation.Key)
+			if err != nil || !found || !bytes.Equal(value, mutation.Value) {
+				t.Fatalf("reopened debt missing or changed: ordinal=%d reason=%d found=%t err=%v", ordinal, reason, found, err)
+			}
+		}
+	}
+	value, found, err := reopenedStore.Get(ctx, schema.SnapshotImportCheckpointKey(schema.ID(snapshotID)))
+	if err != nil || !found {
+		t.Fatal("durable snapshot checkpoint absent", err)
+	}
+	checkpoint, err := schema.UnmarshalSnapshotImportCheckpointRecord(value)
+	if err != nil || checkpoint.DebtsCreated != 10000 {
+		t.Fatal("durable checkpoint changed", checkpoint, err)
+	}
+}
+
+func TestM6SnapshotDebtBatchDuplicateKeys(t *testing.T) {
+	policy, err := workingkv.NewPolicy(workingkv.ModeRAM, snapshotDebtWorkingCharge, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &diagnosticDebtStore{memoryStore: newMemoryStore()}
+	importer := treeImporter{ctx: workingkv.WithPolicy(t.Context(), policy), store: store}
+	release := importer.admitDebtBatch()
+	defer release()
+	result := &Result{}
+	debt := debtWrite{result: result, pathHint: "same", reason: schema.DebtUnknownFreshness}
+	for range 2 {
+		if err := importer.writeDebt(debt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := importer.flushDebt(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(store.sizes, []int{1, 1}) || len(store.values) != 1 || result.CrawlDebtCreated != 2 {
+		t.Fatal("duplicate debt changed overwrite semantics", store.sizes, result)
+	}
+}
+
+func TestM6SnapshotDebtBatchCancelledAdmission(t *testing.T) {
+	policy, err := workingkv.NewPolicy(workingkv.ModeRAM, snapshotDebtWorkingCharge, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(workingkv.WithPolicy(t.Context(), policy))
+	cancel()
+	importer := treeImporter{ctx: ctx}
+	release := importer.admitDebtBatch()
+	release()
+	if importer.debtBatchItems != snapshotDebtBatchSize || policy.Budget().Used != 0 || cap(importer.pendingDebt) != 0 {
+		t.Fatal("cancelled admission retained a buffer", policy.Budget())
+	}
+}
+
+func TestSnapshotDebtOnlyTraversalTiming(t *testing.T) {
+	tree := treeJSON(t, &data.Node{Name: "file", Type: data.NodeTypeFile})
+	treeID, snapshotID := vaultic.Hash(tree), vaultic.NewRandomID()
+	original, err := json.Marshal(data.Snapshot{Tree: &treeID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &memorySource{
+		snapshots: map[vaultic.ID][]byte{snapshotID: original},
+		blobs:     map[vaultic.ID][]byte{treeID: tree},
+	}
+	store := newMemoryStore()
+	telemetry := NewSchedulerTelemetry()
+	result, err := Import(t.Context(), source, fixedStatter{}, store, Options{SnapshotDepth: 1, Telemetry: telemetry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operations := telemetry.Snapshot().Operations
+	if result.SnapshotsImported != 1 || result.NodesVisited != 1 || result.NodesImported != 0 || result.CrawlDebtCreated != 2 ||
+		operations["snapshot_tree_load"].Count != 1 || operations["snapshot_tree_decode"].Count != 2 || operations["snapshot_debt_write"].Count != 1 {
+		t.Fatalf("debt-only traversal result=%+v timings=%+v", result, operations)
+	}
+	debts := 0
+	for key, value := range store.values {
+		parsed, err := schema.ParseKey([]byte(key))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if parsed.Kind == schema.KeyCrawlDebt {
+			if _, err := schema.UnmarshalCrawlDebtRecord(value); err != nil {
+				t.Fatal(err)
+			}
+			debts++
+		}
+	}
+	if debts != 2 {
+		t.Fatalf("persisted debt records = %d", debts)
+	}
+}
+
 func TestSnapshotDeferredPublicationsPrecedeDurableCheckpoint(t *testing.T) {
 	childTree := treeJSON(t,
 		&data.Node{Name: "first", Type: data.NodeTypeFile, DeviceID: 7, Inode: 11},
@@ -3450,7 +3858,11 @@ func TestSnapshotDeferredPublicationsPrecedeDurableCheckpoint(t *testing.T) {
 		blobs: map[vaultic.ID][]byte{rootTreeID: rootTree, childTreeID: childTree},
 	}
 	store := &deferredSnapshotStore{memoryStore: newMemoryStore()}
-	result, err := Import(context.Background(), source, fixedStatter{}, store, Options{
+	policy, err := workingkv.NewPolicy(workingkv.ModeRAM, 4<<20, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := Import(workingkv.WithPolicy(t.Context(), policy), source, fixedStatter{}, store, Options{
 		Resume: true, SnapshotDepth: 1, DeferSnapshotDurability: true,
 	})
 	if err != nil {
@@ -3459,6 +3871,9 @@ func TestSnapshotDeferredPublicationsPrecedeDurableCheckpoint(t *testing.T) {
 	want := []string{"reserve:1024", "revisions:deferred=2", "snapshot:durable=true", "checkpoint:durable=true"}
 	if !slices.Equal(store.events, want) || result.SnapshotsImported != 1 || store.getCalls != 1 {
 		t.Fatalf("events = %v, result = %#v", store.events, result)
+	}
+	if policy.Budget().Used != 0 {
+		t.Fatal("deferred snapshot admission leaked", policy.Budget())
 	}
 }
 
