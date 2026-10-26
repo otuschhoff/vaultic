@@ -1,0 +1,2500 @@
+diff --git a/cmd/vaultic/indexcmd/legacy_import_monitor.go b/cmd/vaultic/indexcmd/legacy_import_monitor.go
+index 539ca25..b0808f8 100644
+--- a/cmd/vaultic/indexcmd/legacy_import_monitor.go
++++ b/cmd/vaultic/indexcmd/legacy_import_monitor.go
+@@ -55,7 +55,9 @@ func (source *legacyImportMonitorSource) Snapshot(ctx context.Context, scheduler
+ 	source.mu.RUnlock()
+ 	vaultic := scheduler.Component(now)
+ 	if statsProvider != nil {
+-		vaultic.Metrics = append(vaultic.Metrics, legacyImportStatsMetrics(statsProvider.LegacyImportStats())...)
++		metrics, dropped := legacyImportStatsMetrics(statsProvider.LegacyImportStats(), telemetry.MaxMonitorMetrics-legacyImportExporterHealthMetrics-len(vaultic.Metrics))
++		vaultic.Metrics = append(vaultic.Metrics, metrics...)
++		vaultic.CardinalityDropped += dropped
+ 	}
+ 	components := []telemetry.ComponentSnapshot{vaultic}
+ 	if client == nil {
+@@ -106,8 +108,11 @@ var legacyImportOperationStages = []string{
+ 	"reduce_mutation_rpc", "reduce_commit", "reduce_retry_backoff", "reduce_recovery_read", "reduce_checkpoint_read",
+ }
+ 
+-func legacyImportStatsMetrics(stats daemon.LegacyImportStats) []telemetry.Metric {
++const legacyImportExporterHealthMetrics = 6
++
++func legacyImportStatsMetrics(stats daemon.LegacyImportStats, limit int) ([]telemetry.Metric, uint64) {
+ 	metrics := make([]telemetry.Metric, 0, len(legacyImportOperationStages)*5+52)
++	var percentiles []telemetry.Metric
+ 	stageLabel := func(stage string) []telemetry.Label { return []telemetry.Label{{Name: "stage", Value: stage}} }
+ 	for _, stage := range legacyImportOperationStages {
+ 		distribution := stats.Operations[stage]
+@@ -115,6 +120,11 @@ func legacyImportStatsMetrics(stats daemon.LegacyImportStats) []telemetry.Metric
+ 		metrics = append(metrics,
+ 			telemetry.Metric{Name: "legacy_import_stage_count", Kind: telemetry.MetricCounter, Unit: "operations", Availability: telemetry.AvailabilityExact, Labels: labels, Value: distribution.Count},
+ 			telemetry.Metric{Name: "legacy_import_stage_time", Kind: telemetry.MetricCounter, Unit: "microseconds", Availability: telemetry.AvailabilityExact, Labels: labels, Value: durationMicroseconds(distribution.Sum)},
++		)
++		if distribution.Count == 0 {
++			continue
++		}
++		percentiles = append(percentiles,
+ 			telemetry.Metric{Name: "legacy_import_stage_p50", Kind: telemetry.MetricGauge, Unit: "microseconds", Availability: telemetry.AvailabilityExact, Labels: labels, Value: durationMicroseconds(distribution.P50)},
+ 			telemetry.Metric{Name: "legacy_import_stage_p95", Kind: telemetry.MetricGauge, Unit: "microseconds", Availability: telemetry.AvailabilityExact, Labels: labels, Value: durationMicroseconds(distribution.P95)},
+ 			telemetry.Metric{Name: "legacy_import_stage_p99", Kind: telemetry.MetricGauge, Unit: "microseconds", Availability: telemetry.AvailabilityExact, Labels: labels, Value: durationMicroseconds(distribution.P99)},
+@@ -172,7 +182,9 @@ func legacyImportStatsMetrics(stats daemon.LegacyImportStats) []telemetry.Metric
+ 		telemetry.Metric{Name: "legacy_import_filter_layers", Kind: telemetry.MetricGauge, Unit: "objects", Availability: telemetry.AvailabilityExact, Value: stats.FilterLayers},
+ 		telemetry.Metric{Name: "legacy_import_filter_fallback", Kind: telemetry.MetricGauge, Unit: "state", Availability: telemetry.AvailabilityExact, Value: boolUint64(stats.FilterFallbackToDatabase)},
+ 	)
+-	return metrics
++	retained := min(len(percentiles), max(limit-len(metrics), 0))
++	metrics = append(metrics, percentiles[:retained]...)
++	return metrics, uint64(len(percentiles) - retained)
+ }
+ 
+ func durationMicroseconds(duration time.Duration) uint64 {
+diff --git a/cmd/vaultic/indexcmd/legacy_import_monitor_test.go b/cmd/vaultic/indexcmd/legacy_import_monitor_test.go
+index 976176d..479475e 100644
+--- a/cmd/vaultic/indexcmd/legacy_import_monitor_test.go
++++ b/cmd/vaultic/indexcmd/legacy_import_monitor_test.go
+@@ -227,10 +227,14 @@ func TestLegacyImportMonitorSourceExportsBoundedImportStats(t *testing.T) {
+ 		ReducedBatches: 2, ReductionPlanReadRPCs: 2, ReductionPlanReadKeys: 24,
+ 		PlanningTime: time.Second, FilterBytes: 1024, FilterLayers: 1, FilterInserts: 9,
+ 	}})
+-	snapshot, err := source.Snapshot(context.Background(), legacyimport.NewSchedulerTelemetry(), now)
++	scheduler := legacyimport.NewSchedulerTelemetry()
++	scheduler.StartAction()
++	now = time.Now()
++	snapshot, err := source.Snapshot(context.Background(), scheduler, now)
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
++	addLegacyImportExporterHealth(&snapshot, telemetry.ExporterStats{Capacity: 4})
+ 	if err := snapshot.Validate(); err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -246,6 +250,41 @@ func TestLegacyImportMonitorSourceExportsBoundedImportStats(t *testing.T) {
+ 	}
+ }
+ 
++func TestLegacyImportMonitorSourceExportsAllActiveStageCounters(t *testing.T) {
++	now := time.Now()
++	stats := daemon.LegacyImportStats{Operations: make(map[string]daemon.DurationDistribution)}
++	for _, stage := range legacyImportOperationStages {
++		stats.Operations[stage] = daemon.DurationDistribution{Count: 1, Sum: time.Millisecond, P50: time.Millisecond, P95: time.Millisecond, P99: time.Millisecond}
++	}
++	source := &legacyImportMonitorSource{client: monitorStatusClient{
++		writer: daemon.WriterStatus{ProcessStartedUnixMS: 1, CapturedUnixMS: now.UnixMilli()},
++	}}
++	source.SetStatsProvider(fixedImportStatsProvider{stats: stats})
++	scheduler := legacyimport.NewSchedulerTelemetry()
++	scheduler.StartAction()
++	now = time.Now()
++	snapshot, err := source.Snapshot(context.Background(), scheduler, now)
++	if err != nil {
++		t.Fatal(err)
++	}
++	addLegacyImportExporterHealth(&snapshot, telemetry.ExporterStats{Capacity: 4})
++	if err := snapshot.Validate(); err != nil {
++		t.Fatal(err)
++	}
++	component := snapshot.Components[0]
++	if component.CardinalityDropped == 0 {
++		t.Fatal("expected explicit optional percentile omissions at the fixed metric ceiling")
++	}
++	for _, stage := range legacyImportOperationStages {
++		if value := labeledMonitorMetricValue(component.Metrics, "legacy_import_stage_count", "stage", stage); value != 1 {
++			t.Fatalf("%s count = %d, want 1", stage, value)
++		}
++		if value := labeledMonitorMetricValue(component.Metrics, "legacy_import_stage_time", "stage", stage); value != 1000 {
++			t.Fatalf("%s time = %d, want 1000", stage, value)
++		}
++	}
++}
++
+ func TestLegacyImportMonitorCloseIsBoundedByOneTimeout(t *testing.T) {
+ 	exporter := &cancelBlockingMonitorExporter{started: make(chan struct{}, 1)}
+ 	worker := telemetry.NewAsyncExporter(exporter, 1)
+diff --git a/internal/backend/cache/backend.go b/internal/backend/cache/backend.go
+index 2684705..e00b671 100644
+--- a/internal/backend/cache/backend.go
++++ b/internal/backend/cache/backend.go
+@@ -136,8 +136,8 @@ func (b *cacheBackend) cacheFile(ctx context.Context, h backend.Handle) error {
+ }
+ 
+ // loadFromCache will try to load the file from the cache.
+-func (b *cacheBackend) loadFromCache(h backend.Handle, length int, offset int64, consumer func(reader io.Reader) error) (bool, error) {
+-	reader, inCache, err := b.Cache.load(h, length, offset)
++func (b *cacheBackend) loadFromCache(ctx context.Context, h backend.Handle, length int, offset int64, consumer func(reader io.Reader) error) (bool, error) {
++	reader, inCache, err := b.Cache.loadContext(ctx, h, length, offset)
+ 	if err != nil {
+ 		return inCache, err
+ 	}
+@@ -163,7 +163,7 @@ func (b *cacheBackend) Load(ctx context.Context, h backend.Handle, length int, o
+ 	}
+ 
+ 	// try loading from cache without checking that the handle is actually cached
+-	inCache, err := b.loadFromCache(h, length, offset, consumer)
++	inCache, err := b.loadFromCache(ctx, h, length, offset, consumer)
+ 	if inCache {
+ 		if err != nil {
+ 			debug.Log("error loading %v from cache: %v", h, err)
+@@ -184,7 +184,7 @@ func (b *cacheBackend) Load(ctx context.Context, h backend.Handle, length int, o
+ 		return err
+ 	}
+ 
+-	inCache, err = b.loadFromCache(h, length, offset, consumer)
++	inCache, err = b.loadFromCache(ctx, h, length, offset, consumer)
+ 	if inCache {
+ 		if err != nil {
+ 			debug.Log("error loading %v from cache: %v", h, err)
+diff --git a/internal/backend/cache/cache.go b/internal/backend/cache/cache.go
+index 0532ea8..7f00a24 100644
+--- a/internal/backend/cache/cache.go
++++ b/internal/backend/cache/cache.go
+@@ -7,6 +7,7 @@ import (
+ 	"regexp"
+ 	"strconv"
+ 	"sync"
++	"sync/atomic"
+ 	"time"
+ 
+ 	"github.com/otuschhoff/vaultic/internal/backend"
+@@ -20,7 +21,8 @@ type Cache struct {
+ 	Base    string
+ 	Created bool
+ 
+-	forgotten sync.Map
++	forgotten  sync.Map
++	generation atomic.Uint64
+ }
+ 
+ const dirMode = 0700
+diff --git a/internal/backend/cache/file.go b/internal/backend/cache/file.go
+index 8be6e3b..48bdb3e 100644
+--- a/internal/backend/cache/file.go
++++ b/internal/backend/cache/file.go
+@@ -110,6 +110,9 @@ func (c *Cache) save(h backend.Handle, reader io.Reader) error {
+ 	}
+ 
+ 	err = os.Rename(f.Name(), finalname)
++	if err == nil {
++		c.generation.Add(1)
++	}
+ 	if err != nil {
+ 		_ = os.Remove(f.Name()) // The incomplete cache file is harmless and replaced on the next load.
+ 	}
+@@ -148,6 +151,7 @@ func (c *Cache) remove(h backend.Handle) (bool, error) {
+ 		return false, nil
+ 	}
+ 
++	c.generation.Add(1)
+ 	err := os.Remove(c.filename(h))
+ 	removed := err == nil
+ 	if errors.Is(err, os.ErrNotExist) {
+diff --git a/internal/backend/cache/file_test.go b/internal/backend/cache/file_test.go
+index d7c81a5..065173f 100644
+--- a/internal/backend/cache/file_test.go
++++ b/internal/backend/cache/file_test.go
+@@ -2,6 +2,7 @@ package cache
+ 
+ import (
+ 	"bytes"
++	"context"
+ 	"fmt"
+ 	"io"
+ 	"maps"
+@@ -15,6 +16,7 @@ import (
+ 	"github.com/otuschhoff/vaultic/internal/errors"
+ 	rtest "github.com/otuschhoff/vaultic/internal/test"
+ 	"github.com/otuschhoff/vaultic/internal/vaultic"
++	"github.com/otuschhoff/vaultic/internal/workingkv"
+ 
+ 	"golang.org/x/sync/errgroup"
+ )
+@@ -70,6 +72,88 @@ func load(t testing.TB, c *Cache, h backend.Handle) []byte {
+ 	return buf
+ }
+ 
++func BenchmarkM6CacheRangeRead(b *testing.B) {
++	directory := b.TempDir()
++	if parent := os.Getenv("VAULTIC_M6_CACHE_BENCH_DIR"); parent != "" {
++		var err error
++		directory, err = os.MkdirTemp(parent, "range-read-")
++		if err != nil {
++			b.Fatal(err)
++		}
++		defer os.RemoveAll(directory)
++	}
++	cache, err := New(testCacheID, directory)
++	if err != nil {
++		b.Fatal(err)
++	}
++	data := bytes.Repeat([]byte("range-read-content"), 1<<16)
++	handle := backend.Handle{Type: backend.PackFile, Name: vaultic.Hash(data).String()}
++	if err := cache.save(handle, bytes.NewReader(data)); err != nil {
++		b.Fatal(err)
++	}
++	for _, name := range []string{"seek", "read_at", "reuse_fd", "session"} {
++		b.Run(name, func(b *testing.B) {
++			policy, err := workingkv.NewPolicy(workingkv.ModeRAM, 1<<20, "")
++			if err != nil {
++				b.Fatal(err)
++			}
++			ctx, session := WithPackReadSession(workingkv.WithPolicy(b.Context(), policy), 64)
++			defer session.Close()
++			buffer := make([]byte, 4096)
++			shared, err := os.Open(cache.filename(handle))
++			if err != nil {
++				b.Fatal(err)
++			}
++			defer shared.Close()
++			if _, err := shared.Stat(); err != nil {
++				b.Fatal(err)
++			}
++			b.SetBytes(int64(len(buffer)))
++			b.ReportAllocs()
++			for iteration := 0; iteration < b.N; iteration++ {
++				if name == "reuse_fd" {
++					_, err := shared.ReadAt(buffer, 4096)
++					if err != nil || !bytes.Equal(buffer, data[4096:8192]) {
++						b.Fatalf("shared range mismatch: %v", err)
++					}
++					continue
++				}
++				var reader io.ReadCloser
++				if name == "read_at" {
++					file, err := os.Open(cache.filename(handle))
++					if err != nil {
++						b.Fatal(err)
++					}
++					info, err := file.Stat()
++					if err != nil || info.Size() < 8192 {
++						file.Close()
++						b.Fatalf("cache bounds: %v", err)
++					}
++					reader = struct {
++						io.Reader
++						io.Closer
++					}{io.NewSectionReader(file, 4096, int64(len(buffer))), file}
++				} else {
++					var inCache bool
++					if name == "session" {
++						reader, inCache, err = cache.loadContext(ctx, handle, len(buffer), 4096)
++					} else {
++						reader, inCache, err = cache.load(handle, len(buffer), 4096)
++					}
++					if err != nil || !inCache {
++						b.Fatalf("cache load: %v", err)
++					}
++				}
++				_, readErr := io.ReadFull(reader, buffer)
++				closeErr := reader.Close()
++				if readErr != nil || closeErr != nil || !bytes.Equal(buffer, data[4096:8192]) {
++					b.Fatalf("range mismatch: read=%v close=%v", readErr, closeErr)
++				}
++			}
++		})
++	}
++}
++
+ func listFiles(t testing.TB, c *Cache, tpe backend.FileType) map[string]struct{} {
+ 	list, err := c.list(tpe)
+ 	if err != nil {
+@@ -79,6 +163,189 @@ func listFiles(t testing.TB, c *Cache, tpe backend.FileType) map[string]struct{}
+ 	return list
+ }
+ 
++func TestM6PackReadSession(t *testing.T) {
++	if runtime.GOOS != "linux" {
++		t.Skip("snapshot-scoped descriptor reuse is Linux-only")
++	}
++	policy, err := workingkv.NewPolicy(workingkv.ModeRAM, 1<<20, "")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, session := WithPackReadSession(workingkv.WithPolicy(t.Context(), policy), 2)
++	t.Cleanup(func() { session.Close() })
++	cache := TestNewCache(t)
++	data := bytes.Repeat([]byte("deterministic-pack"), 1024)
++	handle := backend.Handle{Type: backend.PackFile, Name: vaultic.Hash(data).String()}
++	if err := cache.save(handle, bytes.NewReader(data)); err != nil {
++		t.Fatal(err)
++	}
++	for iteration := range 20 {
++		reader, found, err := cache.loadContext(ctx, handle, 100, int64(iteration))
++		if err != nil || !found {
++			t.Fatalf("load found=%t err=%v", found, err)
++		}
++		value, err := io.ReadAll(reader)
++		if err != nil || !bytes.Equal(value, data[iteration:iteration+100]) {
++			t.Fatalf("range mismatch err=%v", err)
++		}
++		if err := reader.Close(); err != nil {
++			t.Fatal(err)
++		}
++		if err := reader.Close(); err != nil {
++			t.Fatal(err)
++		}
++	}
++	if session.open != 1 || policy.Budget().Used != 2*packReaderCharge {
++		t.Fatal("reader retention or accounting mismatch", session.open, policy.Budget())
++	}
++	if reader, found, err := cache.loadContext(ctx, handle, len(data)+1, 0); reader != nil || !found || err == nil {
++		t.Fatal("short cached range accepted")
++	}
++	if err := cache.Forget(handle); err != nil {
++		t.Fatal(err)
++	}
++	if reader, found, err := cache.loadContext(ctx, handle, 100, 0); reader != nil || found || err == nil {
++		t.Fatal("forgotten file reused")
++	}
++	if err := cache.save(handle, bytes.NewReader(data)); err != nil {
++		t.Fatal(err)
++	}
++	reader, found, err := cache.loadContext(ctx, handle, 100, 0)
++	if err != nil || !found {
++		t.Fatal(err)
++	}
++	if err := session.Close(); err != nil {
++		t.Fatal(err)
++	}
++	if policy.Budget().Used == 0 {
++		t.Fatal("released active reader accounting too early")
++	}
++	if _, err := io.ReadAll(reader); err != nil {
++		t.Fatal(err)
++	}
++	if err := reader.Close(); err != nil {
++		t.Fatal(err)
++	}
++	if err := session.Close(); err != nil || policy.Budget().Used != 0 || session.open != 0 {
++		t.Fatal("reader cleanup mismatch", err, policy.Budget())
++	}
++	denied, err := workingkv.NewPolicy(workingkv.ModeRAM, 1, "")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, session := WithPackReadSession(workingkv.WithPolicy(t.Context(), denied), 2); session != nil {
++		t.Fatal("denied reader reservation admitted")
++	}
++	canceled, cancel := context.WithCancel(ctx)
++	cancel()
++	if _, session := WithPackReadSession(canceled, 2); session != nil {
++		t.Fatal("canceled reader reservation admitted")
++	}
++}
++
++func TestM6PackReadSessionPinsEvictionAndConcurrentRanges(t *testing.T) {
++	if runtime.GOOS != "linux" {
++		t.Skip("snapshot-scoped descriptor reuse is Linux-only")
++	}
++	policy, err := workingkv.NewPolicy(workingkv.ModeRAM, 1<<20, "")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, session := WithPackReadSession(workingkv.WithPolicy(t.Context(), policy), 1)
++	defer session.Close()
++	cache := TestNewCache(t)
++	data := bytes.Repeat([]byte("parallel-pack"), 1024)
++	first := backend.Handle{Type: backend.PackFile, Name: vaultic.Hash(data).String()}
++	second := backend.Handle{Type: backend.PackFile, Name: vaultic.Hash([]byte("second-pack")).String()}
++	for _, handle := range []backend.Handle{first, second} {
++		if err := cache.save(handle, bytes.NewReader(data)); err != nil {
++			t.Fatal(err)
++		}
++	}
++	held, _, err := cache.loadContext(ctx, first, 100, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	fallback, found, err := cache.loadContext(ctx, second, 100, 0)
++	if err != nil || !found || session.open != 1 {
++		t.Fatal("all-pinned fallback exceeded retention bound", err)
++	}
++	if _, pooled := fallback.(*packRangeReader); pooled {
++		t.Fatal("all-pinned entry admitted")
++	}
++	if err := fallback.Close(); err != nil {
++		t.Fatal(err)
++	}
++	group, groupCtx := errgroup.WithContext(ctx)
++	for ordinal := range 32 {
++		group.Go(func() error {
++			reader, found, err := cache.loadContext(groupCtx, first, 100, int64(ordinal))
++			if err != nil || !found {
++				return fmt.Errorf("parallel range found=%t err=%v", found, err)
++			}
++			value, readErr := io.ReadAll(reader)
++			closeErr := reader.Close()
++			if readErr != nil || closeErr != nil || !bytes.Equal(value, data[ordinal:ordinal+100]) {
++				return fmt.Errorf("parallel range mismatch read=%v close=%v", readErr, closeErr)
++			}
++			return nil
++		})
++	}
++	if err := group.Wait(); err != nil {
++		t.Fatal(err)
++	}
++	if err := held.Close(); err != nil {
++		t.Fatal(err)
++	}
++	replacement, _, err := cache.loadContext(ctx, second, 100, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if session.entries[packReaderKey{cache: cache, name: first.Name}] != nil || session.open != 1 {
++		t.Fatal("idle LRU eviction failed")
++	}
++	if err := replacement.Close(); err != nil {
++		t.Fatal(err)
++	}
++	if err := session.Close(); err != nil || policy.Budget().Used != 0 {
++		t.Fatal("eviction cleanup leaked", err, policy.Budget())
++	}
++}
++
++func TestM6PackReadSessionFallbackAndCanceledLoad(t *testing.T) {
++	if _, session := WithPackReadSession(t.Context(), 64); session != nil {
++		t.Fatal("unaccounted session admitted")
++	}
++	policy, err := workingkv.NewPolicy(workingkv.ModeRAM, 1<<20, "")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx := workingkv.WithPolicy(t.Context(), policy)
++	for _, limit := range []int{0, 65} {
++		if _, session := WithPackReadSession(ctx, limit); session != nil {
++			t.Fatal("invalid descriptor bound admitted")
++		}
++	}
++	if runtime.GOOS != "linux" {
++		return
++	}
++	ctx, session := WithPackReadSession(ctx, 2)
++	defer session.Close()
++	if _, nested := WithPackReadSession(ctx, 2); nested != nil {
++		t.Fatal("nested scope stole the original owner")
++	}
++	canceled, cancel := context.WithCancel(ctx)
++	cancel()
++	cache := TestNewCache(t)
++	handle := backend.Handle{Type: backend.PackFile, Name: vaultic.Hash([]byte("missing")).String()}
++	if reader, _, err := cache.loadContext(canceled, handle, 10, 0); reader != nil || err != context.Canceled || session.open != 0 {
++		t.Fatal("canceled load opened or retained a descriptor", err)
++	}
++	if err := session.Close(); err != nil || policy.Budget().Used != 0 {
++		t.Fatal("fallback reservation cleanup failed", err)
++	}
++}
++
+ func clearFiles(t testing.TB, c *Cache, tpe backend.FileType, valid map[string]struct{}) {
+ 	if err := c.Clear(tpe, valid); err != nil {
+ 		t.Error(err)
+diff --git a/internal/backend/cache/pack_read_session.go b/internal/backend/cache/pack_read_session.go
+new file mode 100644
+index 0000000..5ec8371
+--- /dev/null
++++ b/internal/backend/cache/pack_read_session.go
+@@ -0,0 +1,185 @@
++package cache
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"io"
++	"os"
++	"runtime"
++	"sync"
++
++	"github.com/otuschhoff/vaultic/internal/backend"
++	"github.com/otuschhoff/vaultic/internal/workingstate"
++)
++
++const packReaderCharge = 8192
++
++type packReadSessionKey struct{}
++
++type packReaderKey struct {
++	cache *Cache
++	name  string
++}
++
++type packReaderEntry struct {
++	file       *os.File
++	size       int64
++	generation uint64
++	readers    int
++	lastUse    uint64
++}
++
++type PackReadSession struct {
++	mu      sync.Mutex
++	entries map[packReaderKey]*packReaderEntry
++	limit   int
++	open    int
++	clock   uint64
++	closed  bool
++	release func()
++	err     error
++}
++
++func WithPackReadSession(ctx context.Context, limit int) (context.Context, *PackReadSession) {
++	if runtime.GOOS != "linux" || limit <= 0 || limit > 64 || ctx.Err() != nil {
++		return ctx, nil
++	}
++	if _, ok := workingstate.PolicyFrom(ctx).(interface {
++		Reserve(uint64) error
++		Release(uint64)
++	}); !ok {
++		return ctx, nil
++	}
++	if existing, _ := ctx.Value(packReadSessionKey{}).(*PackReadSession); existing != nil {
++		return ctx, nil
++	}
++	release, err := workingstate.Reserve(ctx, uint64(limit*packReaderCharge))
++	if err != nil {
++		return ctx, nil
++	}
++	if ctx.Err() != nil {
++		release()
++		return ctx, nil
++	}
++	session := &PackReadSession{limit: limit, entries: make(map[packReaderKey]*packReaderEntry, limit), release: release}
++	return context.WithValue(ctx, packReadSessionKey{}, session), session
++}
++
++func (session *PackReadSession) closeEntry(entry *packReaderEntry) error {
++	err := entry.file.Close()
++	session.err = errors.Join(session.err, err)
++	session.open--
++	if session.closed && session.open == 0 && session.release != nil {
++		session.release()
++		session.release = nil
++	}
++	return err
++}
++
++func (session *PackReadSession) Close() error {
++	if session == nil {
++		return nil
++	}
++	session.mu.Lock()
++	defer session.mu.Unlock()
++	if !session.closed {
++		session.closed = true
++		for key, entry := range session.entries {
++			delete(session.entries, key)
++			if entry.readers == 0 {
++				session.closeEntry(entry)
++			}
++		}
++		if session.open == 0 && session.release != nil {
++			session.release()
++			session.release = nil
++		}
++	}
++	return session.err
++}
++
++type packRangeReader struct {
++	*io.SectionReader
++	session *PackReadSession
++	key     packReaderKey
++	entry   *packReaderEntry
++	once    sync.Once
++	err     error
++}
++
++func (reader *packRangeReader) Close() error {
++	reader.once.Do(func() {
++		session := reader.session
++		session.mu.Lock()
++		defer session.mu.Unlock()
++		reader.entry.readers--
++		if reader.entry.readers == 0 && (session.closed || session.entries[reader.key] != reader.entry) {
++			reader.err = session.closeEntry(reader.entry)
++		}
++	})
++	return reader.err
++}
++
++func (cache *Cache) loadContext(ctx context.Context, handle backend.Handle, length int, offset int64) (io.ReadCloser, bool, error) {
++	session, _ := ctx.Value(packReadSessionKey{}).(*PackReadSession)
++	if session == nil || handle.Type != backend.PackFile || len(handle.Name) != 64 || length <= 0 || offset < 0 || int64(length) > int64(^uint64(0)>>1)-offset {
++		return cache.load(handle, length, offset)
++	}
++	if err := ctx.Err(); err != nil {
++		return nil, true, err
++	}
++	session.mu.Lock()
++	defer session.mu.Unlock()
++	if session.closed || cache == nil {
++		return cache.load(handle, length, offset)
++	}
++	key := packReaderKey{cache: cache, name: handle.Name}
++	generation := cache.generation.Load()
++	entry := session.entries[key]
++	if entry != nil && entry.generation != generation {
++		delete(session.entries, key)
++		if entry.readers == 0 {
++			if err := session.closeEntry(entry); err != nil {
++				return nil, true, err
++			}
++		}
++		entry = nil
++	}
++	if entry == nil {
++		if session.open >= session.limit {
++			var victim *packReaderEntry
++			var victimKey packReaderKey
++			for candidateKey, candidate := range session.entries {
++				if candidate.readers == 0 && (victim == nil || candidate.lastUse < victim.lastUse) {
++					victim, victimKey = candidate, candidateKey
++				}
++			}
++			if victim == nil {
++				return cache.load(handle, length, offset)
++			}
++			delete(session.entries, victimKey)
++			if err := session.closeEntry(victim); err != nil {
++				return nil, true, err
++			}
++		}
++		file, err := os.Open(cache.filename(handle))
++		if err != nil {
++			return nil, false, err
++		}
++		info, err := file.Stat()
++		if err != nil {
++			return nil, true, errors.Join(err, file.Close())
++		}
++		entry = &packReaderEntry{file: file, size: info.Size(), generation: generation}
++		session.entries[key] = entry
++		session.open++
++	}
++	if entry.size < offset+int64(length) {
++		return nil, true, fmt.Errorf("cached file %v is too short", handle)
++	}
++	session.clock++
++	entry.lastUse = session.clock
++	entry.readers++
++	return &packRangeReader{SectionReader: io.NewSectionReader(entry.file, offset, int64(length)), session: session, key: key, entry: entry}, true, nil
++}
+diff --git a/internal/index/legacyimport/import_metrics.go b/internal/index/legacyimport/import_metrics.go
+index 0dc2067..d590eed 100644
+--- a/internal/index/legacyimport/import_metrics.go
++++ b/internal/index/legacyimport/import_metrics.go
+@@ -387,6 +387,14 @@ func (telemetry *SchedulerTelemetry) Component(now time.Time) monitor.ComponentS
+ 		monitor.Metric{Name: "legacy_import_batch_bytes", Kind: monitor.MetricCounter, Unit: "bytes", Availability: monitor.AvailabilityExact, Value: scheduler.BatchBytes},
+ 		monitor.Metric{Name: "legacy_import_batch_mutations", Kind: monitor.MetricCounter, Unit: "operations", Availability: monitor.AvailabilityExact, Value: scheduler.BatchMutations},
+ 	)
++	for _, stage := range []string{"snapshot_tree_load", "snapshot_tree_decode", "snapshot_debt_write"} {
++		distribution := scheduler.Operations[stage]
++		labels := []monitor.Label{{Name: "stage", Value: stage}}
++		component.Metrics = append(component.Metrics,
++			monitor.Metric{Name: "legacy_import_stage_count", Kind: monitor.MetricCounter, Unit: "operations", Availability: monitor.AvailabilityExact, Labels: labels, Value: distribution.Count},
++			monitor.Metric{Name: "legacy_import_stage_time", Kind: monitor.MetricCounter, Unit: "microseconds", Availability: monitor.AvailabilityExact, Labels: labels, Value: uint64(max(distribution.Sum.Microseconds(), 0))},
++		)
++	}
+ 	for _, phase := range []string{"dependency_wait", "ingest_wait", "reducer_wait", "prepare_wait"} {
+ 		wait := telemetry.waits[phase]
+ 		component.Metrics = append(component.Metrics, wait.Metrics()...)
+diff --git a/internal/index/legacyimport/import_test.go b/internal/index/legacyimport/import_test.go
+index 3b96f22..8749e6b 100644
+--- a/internal/index/legacyimport/import_test.go
++++ b/internal/index/legacyimport/import_test.go
+@@ -1071,11 +1071,30 @@ func TestSchedulerTelemetryProducesValidMonitorComponent(t *testing.T) {
+ 	telemetry.startAction()
+ 	telemetry.progress(Progress{IndexesCompleted: 1, IndexesTotal: 2, QueuedPreparedPacks: 2})
+ 	telemetry.queues(2, 1, 32, 16, time.Now().Add(-time.Second))
++	for _, stage := range []string{"snapshot_tree_load", "snapshot_tree_decode", "snapshot_debt_write"} {
++		telemetry.observe(stage, 1250*time.Microsecond)
++	}
+ 	wait := telemetry.beginWait("dependency_wait")
+ 	component := telemetry.Component(time.Now())
+ 	if err := monitor.ValidateVaulticDBComponent(component); err != nil {
+ 		t.Fatal(err)
+ 	}
++	var snapshotMetrics int
++	for _, metric := range component.Metrics {
++		if len(metric.Labels) != 1 || !strings.HasPrefix(metric.Labels[0].Value, "snapshot_") {
++			continue
++		}
++		snapshotMetrics++
++		if metric.Name == "legacy_import_stage_count" && metric.Value != 1 {
++			t.Fatalf("snapshot count = %+v", metric)
++		}
++		if metric.Name == "legacy_import_stage_time" && metric.Value != 1250 {
++			t.Fatalf("snapshot time = %+v", metric)
++		}
++	}
++	if snapshotMetrics != 6 {
++		t.Fatalf("snapshot metrics = %d, want 6", snapshotMetrics)
++	}
+ 	if len(component.Operations) != 1 || len(component.Queues) != 2 || component.Queues[0].Depth != 2 {
+ 		t.Fatalf("component = %+v", component)
+ 	}
+@@ -1091,6 +1110,509 @@ func TestSchedulerTelemetryProducesValidMonitorComponent(t *testing.T) {
+ 	}
+ }
+ 
++type snapshotCacheTestSource struct {
++	*memorySource
++	mu    sync.Mutex
++	loads int
++}
++
++func (source *snapshotCacheTestSource) LoadBlob(ctx context.Context, handle vaultic.BlobHandle, buffer []byte) ([]byte, error) {
++	source.mu.Lock()
++	source.loads++
++	source.mu.Unlock()
++	return source.memorySource.LoadBlob(ctx, handle, buffer)
++}
++
++func TestM6SnapshotTreeCacheAdmissionLoadsAndPinRelease(t *testing.T) {
++	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV, workingkv.ModeAuto} {
++		t.Run(string(mode), func(t *testing.T) {
++			policy, err := workingkv.NewPolicy(mode, 512<<20, t.TempDir())
++			if err != nil {
++				t.Fatal(err)
++			}
++			counters := &snapshotMechanismCounters{}
++			ctx := context.WithValue(workingkv.WithPolicy(context.Background(), policy), snapshotMechanismContextKey{}, counters)
++			cache := newSnapshotTreeCache(ctx)
++			if cache == nil || policy.Budget().Used != snapshotTreeCacheBytes {
++				t.Fatalf("cache admission = %v, memory = %+v", cache != nil, policy.Budget())
++			}
++			defer cache.close()
++			encoded := []byte(`{"nodes":[{"name":"original","type":"file"}]}`)
++			id := vaultic.Hash(encoded)
++			source := &snapshotCacheTestSource{memorySource: &memorySource{blobs: map[vaultic.ID][]byte{id: encoded}}}
++			for range 2 {
++				tree, err := cache.loadTree(ctx, source, id)
++				if err != nil {
++					t.Fatal(err)
++				}
++				for item := range tree {
++					if item.Error != nil || item.Node.Name != "original" {
++						t.Fatalf("fresh decode = %+v", item)
++					}
++					item.Node.Name = "modified"
++				}
++			}
++			if source.loads != 1 {
++				t.Fatalf("source loads = %d, want 1", source.loads)
++			}
++			tree, err := cache.loadTree(ctx, source, id)
++			if err != nil {
++				t.Fatal(err)
++			}
++			values := counters.values()
++			if values["requests"] != 3 || values["hits"] != 2 || values["misses"] != 1 || values["backend_calls"] != uint64(source.loads) || values["backend_bytes"] != uint64(len(encoded)) || values["retains"] != 1 || values["backend_nanoseconds"] == 0 {
++				t.Fatalf("mechanism counters = %+v, source loads = %d", values, source.loads)
++			}
++			cache.close()
++			if policy.Budget().Used != snapshotTreeCacheBytes {
++				t.Fatal("released cache while its decoder still owns cached bytes")
++			}
++			for item := range tree {
++				if item.Error != nil {
++					t.Fatal(item.Error)
++				}
++				break
++			}
++			cache.close()
++			if policy.Budget().Used != 0 {
++				t.Fatalf("retained charge after early stop and double close: %+v", policy.Budget())
++			}
++		})
++	}
++}
++
++func TestM6SnapshotTreeCacheDeniedAndCancelled(t *testing.T) {
++	policy, err := workingkv.NewPolicy(workingkv.ModeRAM, snapshotTreeCacheBytes-1, "")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx := workingkv.WithPolicy(context.Background(), policy)
++	if cache := newSnapshotTreeCache(ctx); cache != nil || policy.Budget().Used != 0 {
++		t.Fatal("denied cache allocated or retained a charge")
++	}
++	if newSnapshotTreeCache(context.Background()) != nil {
++		t.Fatal("unaccounted cache admitted")
++	}
++	encoded := []byte(`{"nodes":[{"name":"original","type":"file"}]}`)
++	id := vaultic.Hash(encoded)
++	source := &snapshotCacheTestSource{memorySource: &memorySource{blobs: map[vaultic.ID][]byte{id: encoded}}}
++	var cache *snapshotTreeCache
++	for range 2 {
++		tree, err := cache.loadTree(ctx, source, id)
++		if err != nil {
++			t.Fatal(err)
++		}
++		for item := range tree {
++			if item.Error != nil {
++				t.Fatal(item.Error)
++			}
++		}
++	}
++	if source.loads != 2 {
++		t.Fatalf("fallback source loads = %d, want 2", source.loads)
++	}
++	cancelled, cancel := context.WithCancel(ctx)
++	cancel()
++	if newSnapshotTreeCache(cancelled) != nil {
++		t.Fatal("cancelled cache admitted")
++	}
++	if _, err := cache.loadTree(cancelled, source, id); !errors.Is(err, context.Canceled) || source.loads != 2 {
++		t.Fatalf("cancelled load = %v, source loads = %d", err, source.loads)
++	}
++}
++
++func TestM6SnapshotTreeCacheCollisionReuse(t *testing.T) {
++	policy, err := workingkv.NewPolicy(workingkv.ModeRAM, 512<<20, "")
++	if err != nil {
++		t.Fatal(err)
++	}
++	counters := &snapshotMechanismCounters{}
++	ctx := context.WithValue(workingkv.WithPolicy(t.Context(), policy), snapshotMechanismContextKey{}, counters)
++	cache := newSnapshotTreeCache(ctx)
++	if cache == nil {
++		t.Fatal("cache admission denied")
++	}
++	defer cache.close()
++	left := []byte(`{"nodes":[{"name":"left","type":"file"}]}`)
++	right := []byte(`{"nodes":[{"name":"right","type":"file"}]}`)
++	leftID, rightID := vaultic.Hash(left), vaultic.Hash(right)
++	rightID[0], rightID[1] = leftID[0], leftID[1]
++	source := &snapshotCacheTestSource{memorySource: &memorySource{blobs: map[vaultic.ID][]byte{leftID: left, rightID: right}}}
++	for range 3 {
++		for ordinal, id := range []vaultic.ID{leftID, rightID} {
++			tree, err := cache.loadTree(ctx, source, id)
++			if err != nil {
++				t.Fatal(err)
++			}
++			for item := range tree {
++				if item.Error != nil || item.Node.Name != []string{"left", "right"}[ordinal] {
++					t.Fatalf("collision decode changed: %+v", item)
++				}
++			}
++		}
++	}
++	values := counters.values()
++	if source.loads != 2 || values["requests"] != 6 || values["hits"] != 4 || values["misses"] != 2 || values["collision_evictions"] != 0 {
++		t.Fatalf("colliding hot trees reloaded: source loads=%d counters=%+v", source.loads, values)
++	}
++	cache.close()
++	if policy.Budget().Used != 0 {
++		t.Fatal("collision reuse leaked charge", policy.Budget())
++	}
++}
++
++func TestM6SnapshotTreeCacheBucketPinsAndReplacement(t *testing.T) {
++	policy, err := workingkv.NewPolicy(workingkv.ModeRAM, 512<<20, "")
++	if err != nil {
++		t.Fatal(err)
++	}
++	counters := &snapshotMechanismCounters{}
++	ctx := context.WithValue(workingkv.WithPolicy(t.Context(), policy), snapshotMechanismContextKey{}, counters)
++	cache := newSnapshotTreeCache(ctx)
++	if cache == nil {
++		t.Fatal("cache admission denied")
++	}
++	defer cache.close()
++	encoded := []byte(`{"nodes":[{"name":"original","type":"file"}]}`)
++	ids := make([]vaultic.ID, snapshotTreeCacheWays+1)
++	source := &snapshotCacheTestSource{memorySource: &memorySource{blobs: make(map[vaultic.ID][]byte)}}
++	for ordinal := range ids {
++		ids[ordinal] = vaultic.Hash(encoded)
++		ids[ordinal][len(ids[ordinal])-1] ^= byte(ordinal + 1)
++		source.blobs[ids[ordinal]] = encoded
++	}
++	consume := func(tree data.TreeNodeIterator) {
++		t.Helper()
++		for item := range tree {
++			if item.Error != nil || item.Node.Name != "original" {
++				t.Fatalf("bucket replay changed: %+v", item)
++			}
++		}
++	}
++	load := func(id vaultic.ID) data.TreeNodeIterator {
++		t.Helper()
++		tree, err := cache.loadTree(ctx, source, id)
++		if err != nil {
++			t.Fatal(err)
++		}
++		return tree
++	}
++	contains := func(id vaultic.ID) bool {
++		for offset := range snapshotTreeCacheWays {
++			entry := cache.entries[snapshotTreeCacheSlot(id)+offset]
++			if entry != nil && entry.id == id {
++				return true
++			}
++		}
++		return false
++	}
++	pinned := make([]data.TreeNodeIterator, snapshotTreeCacheWays)
++	for ordinal, id := range ids[:snapshotTreeCacheWays] {
++		consume(load(id))
++		pinned[ordinal] = load(id)
++	}
++	consume(load(ids[snapshotTreeCacheWays]))
++	if counters.values()["pinned_rejects"] != 1 || contains(ids[snapshotTreeCacheWays]) {
++		t.Fatal("full pinned bucket accepted a replacement", counters.values())
++	}
++	consume(pinned[0])
++	consume(load(ids[snapshotTreeCacheWays]))
++	if contains(ids[0]) || !contains(ids[snapshotTreeCacheWays]) {
++		t.Fatal("bucket did not replace the only unpinned entry")
++	}
++	for _, tree := range pinned[1:] {
++		consume(tree)
++	}
++	consume(load(ids[1]))
++	consume(load(ids[0]))
++	if !contains(ids[1]) || contains(ids[2]) || !contains(ids[0]) {
++		t.Fatal("bucket replacement did not preserve recent use")
++	}
++	if counters.values()["collision_evictions"] != 2 || cache.used > snapshotTreeCacheBytes-snapshotTreeCacheBookkeeping {
++		t.Fatal("bucket exceeded bounded replacement accounting", counters.values(), cache.used)
++	}
++	cache.close()
++	if policy.Budget().Used != 0 {
++		t.Fatal("pinned bucket leaked charge", policy.Budget())
++	}
++}
++
++func TestM6SnapshotTreeCachePinnedEvictionAndCorruption(t *testing.T) {
++	policy, err := workingkv.NewPolicy(workingkv.ModeRAM, 512<<20, "")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx := workingkv.WithPolicy(context.Background(), policy)
++	cache := newSnapshotTreeCache(ctx)
++	if cache == nil {
++		t.Fatal("cache admission denied")
++	}
++	defer cache.close()
++	encoded := []byte(`{"nodes":[{"name":"original","type":"file"}]}`)
++	id := vaultic.Hash(encoded)
++	collision := id
++	collision[len(collision)-1] ^= 1
++	source := &snapshotCacheTestSource{memorySource: &memorySource{blobs: map[vaultic.ID][]byte{id: encoded, collision: encoded}}}
++	consume := func(tree data.TreeNodeIterator) {
++		t.Helper()
++		for item := range tree {
++			if item.Error != nil {
++				t.Fatal(item.Error)
++			}
++		}
++	}
++	tree, err := cache.loadTree(ctx, source, id)
++	if err != nil {
++		t.Fatal(err)
++	}
++	consume(tree)
++	pinned, err := cache.loadTree(ctx, source, id)
++	if err != nil {
++		t.Fatal(err)
++	}
++	tree, err = cache.loadTree(ctx, source, collision)
++	if err != nil {
++		t.Fatal(err)
++	}
++	consume(tree)
++	pinnedFound := false
++	for offset := range snapshotTreeCacheWays {
++		entry := cache.entries[snapshotTreeCacheSlot(id)+offset]
++		pinnedFound = pinnedFound || entry != nil && entry.id == id && entry.readers == 1
++	}
++	if !pinnedFound {
++		t.Fatal("collision evicted pinned decoder bytes")
++	}
++	consume(pinned)
++	tree, err = cache.loadTree(ctx, source, collision)
++	if err != nil {
++		t.Fatal(err)
++	}
++	consume(tree)
++	collisionFound := false
++	for offset := range snapshotTreeCacheWays {
++		entry := cache.entries[snapshotTreeCacheSlot(id)+offset]
++		collisionFound = collisionFound || entry != nil && entry.id == collision
++	}
++	if !collisionFound {
++		t.Fatal("collision was not retained in its associative bucket")
++	}
++	corrupt := []byte(`{"nodes":[{"name":"ok","type":"file"},{"name":}]}`)
++	corruptID := vaultic.Hash(corrupt)
++	source.blobs[corruptID] = corrupt
++	for range 2 {
++		tree, err := cache.loadTree(ctx, source, corruptID)
++		if err != nil {
++			t.Fatal(err)
++		}
++		nodes, failures := 0, 0
++		for item := range tree {
++			if item.Error != nil {
++				failures++
++			} else {
++				nodes++
++			}
++		}
++		if nodes != 1 || failures != 1 {
++			t.Fatalf("corrupt replay nodes=%d errors=%d", nodes, failures)
++		}
++	}
++	cancelled, cancel := context.WithCancel(ctx)
++	cancel()
++	if _, err := cache.loadTree(cancelled, source, collision); !errors.Is(err, context.Canceled) {
++		t.Fatalf("cancelled cache hit = %v", err)
++	}
++	cache.close()
++	if policy.Budget().Used != 0 {
++		t.Fatal("error/cancellation leaked cache charge", policy.Budget())
++	}
++}
++
++func TestM6SnapshotTreeCachePreservesEverySnapshotAndDebt(t *testing.T) {
++	child := treeJSON(t, &data.Node{Name: "file", Type: data.NodeTypeFile})
++	childID := vaultic.Hash(child)
++	root := treeJSON(t, &data.Node{Name: "left", Type: data.NodeTypeDir, Subtree: &childID},
++		&data.Node{Name: "right", Type: data.NodeTypeDir, Subtree: &childID})
++	rootID := vaultic.Hash(root)
++	snapshots := make(map[vaultic.ID][]byte)
++	for ordinal := range 3 {
++		encoded := fmt.Appendf(nil, `{"tree":"%s","paths":["/source/%d"]}`, rootID.String(), ordinal)
++		snapshots[vaultic.Hash(encoded)] = encoded
++	}
++	var expected map[string][]byte
++	for _, admitted := range []bool{false, true} {
++		directory := t.TempDir()
++		if err := os.Chmod(directory, 0700); err != nil {
++			t.Fatal(err)
++		}
++		t.Setenv("VAULTIC_M6_SNAPSHOT_MECHANISM_DIR", directory)
++		budget := uint64(snapshotTreeCacheBytes - 1)
++		if admitted {
++			budget = 512 << 20
++		}
++		policy, err := workingkv.NewPolicy(workingkv.ModeRAM, budget, "")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx := workingkv.WithPolicy(context.Background(), policy)
++		source := &snapshotCacheTestSource{memorySource: &memorySource{indexes: map[vaultic.ID][]byte{},
++			snapshots: snapshots, blobs: map[vaultic.ID][]byte{rootID: root, childID: child}}}
++		store := newMemoryStore()
++		result, err := Import(ctx, source, fixedStatter{}, store, Options{SnapshotDepth: 1})
++		if err != nil {
++			t.Fatal(err)
++		}
++		if result.SnapshotsImported != 3 || result.TreesVisited != 9 || result.NodesVisited != 12 ||
++			result.CrawlDebtCreated != 24 || result.ErrorsSeen != 0 || policy.Budget().Used != 0 {
++			t.Fatalf("admitted=%t result=%+v budget=%+v", admitted, result, policy.Budget())
++		}
++		if !admitted {
++			expected = store.values
++			if source.loads != 9 {
++				t.Fatalf("fallback source loads = %d, want 9", source.loads)
++			}
++		} else if source.loads != 2 || !reflect.DeepEqual(expected, store.values) {
++			t.Fatalf("cache changed persisted snapshot/debt/checkpoint bytes or load reduction: loads=%d", source.loads)
++		}
++		encodedProbe, err := os.ReadFile(filepath.Join(directory, "snapshot-mechanism.jsonl"))
++		if err != nil {
++			t.Fatal(err)
++		}
++		lines := bytes.Split(bytes.TrimSpace(encodedProbe), []byte("\n"))
++		var finished struct {
++			Reason   string            `json:"reason"`
++			Counters map[string]uint64 `json:"counters"`
++		}
++		if err := json.Unmarshal(lines[len(lines)-1], &finished); err != nil {
++			t.Fatal(err)
++		}
++		values := finished.Counters
++		if finished.Reason != "finished" || values["requests"] != 9 || values["backend_calls"] != uint64(source.loads) || values["debt_puts"] != 24 || values["debt_calls"] == 0 || values["debt_errors"] != 0 || values["requests"] != values["hits"]+values["misses"]+values["bypasses"] {
++			t.Fatalf("finished mechanism probe = %+v", finished)
++		}
++		t.Setenv("VAULTIC_M6_SNAPSHOT_MECHANISM_DIR", "")
++		resumed, err := Import(ctx, source, fixedStatter{}, store, Options{Resume: true, SnapshotDepth: 1})
++		if err != nil || resumed.SnapshotsResumed != 3 || !reflect.DeepEqual(expected, store.values) || policy.Budget().Used != 0 {
++			t.Fatalf("cache altered resume: result=%+v err=%v budget=%+v", resumed, err, policy.Budget())
++		}
++	}
++}
++
++func TestM6SnapshotMechanismAdmissionAndRelease(t *testing.T) {
++	t.Setenv("VAULTIC_M6_SNAPSHOT_MECHANISM_DIR", "")
++	if ctx, stop, err := startSnapshotMechanism(t.Context()); err != nil || stop != nil || ctx != t.Context() {
++		t.Fatalf("disabled probe: stop=%t err=%v", stop != nil, err)
++	}
++	directory := t.TempDir()
++	if err := os.Chmod(directory, 0700); err != nil {
++		t.Fatal(err)
++	}
++	t.Setenv("VAULTIC_M6_SNAPSHOT_MECHANISM_DIR", directory)
++	if _, stop, err := startSnapshotMechanism(t.Context()); err == nil || stop != nil {
++		t.Fatal("unaccounted probe admitted")
++	}
++	denied, err := workingkv.NewPolicy(workingkv.ModeRAM, snapshotMechanismCharge-1, "")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, stop, err := startSnapshotMechanism(workingkv.WithPolicy(t.Context(), denied)); err == nil || stop != nil || denied.Budget().Used != 0 {
++		t.Fatal("denied probe retained charge", err, denied.Budget())
++	}
++	policy, err := workingkv.NewPolicy(workingkv.ModeRAM, 2*snapshotMechanismCharge, "")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx := workingkv.WithPolicy(t.Context(), policy)
++	if err := os.Chmod(directory, 0755); err != nil {
++		t.Fatal(err)
++	}
++	if _, stop, err := startSnapshotMechanism(ctx); err == nil || stop != nil || policy.Budget().Used != 0 {
++		t.Fatal("insecure probe directory admitted", err)
++	}
++	if err := os.Chmod(directory, 0700); err != nil {
++		t.Fatal(err)
++	}
++	cancelled, cancel := context.WithCancel(ctx)
++	cancel()
++	if _, stop, err := startSnapshotMechanism(cancelled); !errors.Is(err, context.Canceled) || stop != nil || policy.Budget().Used != 0 {
++		t.Fatal("cancelled probe admitted", err)
++	}
++	probed, stop, err := startSnapshotMechanism(ctx)
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = stop() })
++	if policy.Budget().Used != snapshotMechanismCharge || snapshotMechanismFrom(probed) == nil {
++		t.Fatal("probe charge/context missing", policy.Budget())
++	}
++	snapshotMechanismFrom(probed).hits.Add(7)
++	for range 2 {
++		if err := stop(); err != nil {
++			t.Fatal(err)
++		}
++	}
++	if policy.Budget().Used != 0 {
++		t.Fatal("probe charge leaked", policy.Budget())
++	}
++	filename := filepath.Join(directory, "snapshot-mechanism.jsonl")
++	before, err := os.ReadFile(filename)
++	if err != nil || !bytes.Contains(before, []byte(`"hits":7`)) {
++		t.Fatal("probe final counters missing", err)
++	}
++	if info, err := os.Stat(filename); err != nil || info.Mode().Perm() != 0600 {
++		t.Fatal("probe artifact permissions", err)
++	}
++	if _, stop, err := startSnapshotMechanism(ctx); err == nil || stop != nil || policy.Budget().Used != 0 {
++		t.Fatal("probe overwrote previous evidence", err)
++	}
++	after, err := os.ReadFile(filename)
++	if err != nil || !bytes.Equal(before, after) {
++		t.Fatal("failed admission changed evidence", err)
++	}
++}
++
++func TestM6SnapshotDiagnosticProfileAdmissionAndRelease(t *testing.T) {
++	directory := t.TempDir()
++	if err := os.Chmod(directory, 0700); err != nil {
++		t.Fatal(err)
++	}
++	t.Setenv("VAULTIC_M6_SNAPSHOT_PROFILE_DIR", directory)
++	denied, err := workingkv.NewPolicy(workingkv.ModeRAM, 1<<20, "")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if stop, err := startSnapshotDiagnosticProfile(workingkv.WithPolicy(t.Context(), denied), 1); err == nil || stop != nil || denied.Budget().Used != 0 {
++		t.Fatalf("denied profile: stop=%v err=%v budget=%+v", stop != nil, err, denied.Budget())
++	}
++	policy, err := workingkv.NewPolicy(workingkv.ModeRAM, 64<<20, "")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx := workingkv.WithPolicy(t.Context(), policy)
++	if stop, err := startSnapshotDiagnosticProfile(ctx, 2); err != nil || stop != nil || policy.Budget().Used != 0 {
++		t.Fatalf("unscheduled profile: stop=%v err=%v", stop != nil, err)
++	}
++	stop, err := startSnapshotDiagnosticProfile(ctx, 1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(stop)
++	if policy.Budget().Used != snapshotDiagnosticCharge {
++		t.Fatal("profile charge missing", policy.Budget())
++	}
++	stop()
++	stop()
++	if policy.Budget().Used != 0 {
++		t.Fatal("profile charge leaked", policy.Budget())
++	}
++	for _, suffix := range []string{".cpu.pprof", ".started.json", ".finished.json"} {
++		info, err := os.Stat(filepath.Join(directory, "snapshot-01"+suffix))
++		if err != nil || info.Size() == 0 || info.Mode().Perm() != 0600 {
++			t.Fatalf("private profile artifact %s: info=%v err=%v", suffix, info, err)
++		}
++	}
++}
++
+ func TestStage3DependencyWaitReason(t *testing.T) {
+ 	ready := []stage3LogicalBatch{{deps: []string{"busy"}}, {deps: []string{"later"}}}
+ 	inFlight := map[string]uint64{"busy": 1}
+@@ -3635,7 +4157,9 @@ func TestM6SnapshotDebtBatchByteLimitAndFailure(t *testing.T) {
+ 		t.Fatal(err)
+ 	}
+ 	store := &diagnosticDebtStore{memoryStore: newMemoryStore()}
+-	importer := treeImporter{ctx: workingkv.WithPolicy(t.Context(), policy), store: store}
++	counters := &snapshotMechanismCounters{}
++	ctx := context.WithValue(workingkv.WithPolicy(t.Context(), policy), snapshotMechanismContextKey{}, counters)
++	importer := treeImporter{ctx: ctx, store: store}
+ 	release := sync.OnceFunc(importer.admitDebtBatch())
+ 	t.Cleanup(release)
+ 	result := &Result{}
+@@ -3662,6 +4186,10 @@ func TestM6SnapshotDebtBatchByteLimitAndFailure(t *testing.T) {
+ 	if err := importer.flushDebt(); err == nil || len(importer.pendingDebt) == 0 {
+ 		t.Fatal("failed debt write discarded pending work")
+ 	}
++	values := counters.values()
++	if values["debt_calls"] != uint64(len(store.sizes)) || values["debt_errors"] != 1 || values["debt_puts"] != 101 || values["debt_durable_calls"] != values["debt_calls"] || values["debt_nanoseconds"] == 0 {
++		t.Fatalf("failed debt write counters = %+v, attempted sizes = %v", values, store.sizes)
++	}
+ 	release()
+ 	if policy.Budget().Used != 0 {
+ 		t.Fatal("failure cleanup leaked admission", policy.Budget())
+@@ -3669,6 +4197,14 @@ func TestM6SnapshotDebtBatchByteLimitAndFailure(t *testing.T) {
+ }
+ 
+ func TestM6SnapshotDebtBatchNativeReopen(t *testing.T) {
++	for _, admitted := range []bool{false, true} {
++		t.Run(fmt.Sprintf("cache-admitted-%t", admitted), func(t *testing.T) {
++			testSnapshotDebtBatchNativeReopen(t, admitted)
++		})
++	}
++}
++
++func testSnapshotDebtBatchNativeReopen(t *testing.T, admitted bool) {
+ 	binary := os.Getenv("VAULTICDB_TEST_BINARY")
+ 	if binary == "" {
+ 		t.Skip("set VAULTICDB_TEST_BINARY for native durability fixture")
+@@ -3677,6 +4213,7 @@ func TestM6SnapshotDebtBatchNativeReopen(t *testing.T) {
+ 	if err := os.Chmod(directory, 0o700); err != nil {
+ 		t.Fatal(err)
+ 	}
++	t.Setenv("VAULTIC_M6_SNAPSHOT_MECHANISM_DIR", directory)
+ 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+ 	defer cancel()
+ 	options := daemon.Options{
+@@ -3690,7 +4227,11 @@ func TestM6SnapshotDebtBatchNativeReopen(t *testing.T) {
+ 	}
+ 	defer client.Close(context.Background())
+ 	store := daemon.NewSchemaStore(client)
+-	policy, err := workingkv.NewPolicy(workingkv.ModeRAM, 16<<20, "")
++	budget := uint64(16 << 20)
++	if admitted {
++		budget = 512 << 20
++	}
++	policy, err := workingkv.NewPolicy(workingkv.ModeRAM, budget, "")
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -3699,7 +4240,8 @@ func TestM6SnapshotDebtBatchNativeReopen(t *testing.T) {
+ 		nodes[ordinal] = &data.Node{Name: fmt.Sprintf("node-%05d", ordinal), Type: data.NodeTypeFile}
+ 	}
+ 	tree := treeJSON(t, nodes...)
+-	treeID, snapshotID := vaultic.Hash(tree), vaultic.Hash([]byte("native-debt-snapshot"))
++	treeID := vaultic.Hash(tree)
++	snapshotIDs := []vaultic.ID{vaultic.Hash([]byte("native-debt-snapshot")), vaultic.Hash([]byte("native-debt-snapshot-2"))}
+ 	packID := schema.ID(vaultic.Hash([]byte("native-debt-tree-pack")))
+ 	if err := store.ImportLegacyPack(ctx, daemon.LegacyPackImport{
+ 		SourceIndex: schema.ID(vaultic.Hash([]byte("native-debt-index"))), PackID: packID,
+@@ -3714,11 +4256,38 @@ func TestM6SnapshotDebtBatchNativeReopen(t *testing.T) {
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+-	source := &memorySource{snapshots: map[vaultic.ID][]byte{snapshotID: original}, blobs: map[vaultic.ID][]byte{treeID: tree}}
++	source := &snapshotCacheTestSource{memorySource: &memorySource{
++		snapshots: map[vaultic.ID][]byte{snapshotIDs[0]: original, snapshotIDs[1]: original}, blobs: map[vaultic.ID][]byte{treeID: tree},
++	}}
+ 	result, err := Import(workingkv.WithPolicy(ctx, policy), source, fixedStatter{}, store, Options{SnapshotDepth: 1, DeferSnapshotDurability: true})
+-	if err != nil || result.SnapshotsImported != 1 || result.CrawlDebtCreated != 10000 || policy.Budget().Used != 0 {
++	if err != nil || result.SnapshotsImported != 2 || result.CrawlDebtCreated != 20000 || policy.Budget().Used != 0 {
+ 		t.Fatalf("native import result=%+v budget=%+v err=%v", result, policy.Budget(), err)
+ 	}
++	wantLoads := 2
++	if admitted {
++		wantLoads = 1
++		if policy.Budget().Peak < snapshotTreeCacheBytes {
++			t.Fatal("native cache was not charged", policy.Budget())
++		}
++	}
++	if source.loads != wantLoads {
++		t.Fatalf("native source loads=%d want=%d", source.loads, wantLoads)
++	}
++	probeBytes, err := os.ReadFile(filepath.Join(directory, "snapshot-mechanism.jsonl"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	probeLines := bytes.Split(bytes.TrimSpace(probeBytes), []byte("\n"))
++	var probe struct {
++		Reason   string            `json:"reason"`
++		Counters map[string]uint64 `json:"counters"`
++	}
++	if err := json.Unmarshal(probeLines[len(probeLines)-1], &probe); err != nil {
++		t.Fatal(err)
++	}
++	if probe.Reason != "finished" || probe.Counters["requests"] != 2 || probe.Counters["backend_calls"] != uint64(wantLoads) || probe.Counters["debt_puts"] != 20000 || probe.Counters["debt_errors"] != 0 || probe.Counters["debt_durable_calls"] != 0 || probe.Counters["debt_calls"] == 0 {
++		t.Fatalf("native mechanism probe = %+v", probe)
++	}
+ 	if err := store.MarkBulkImportComplete(ctx); err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -3732,30 +4301,32 @@ func TestM6SnapshotDebtBatchNativeReopen(t *testing.T) {
+ 	}
+ 	defer reopened.Close(context.Background())
+ 	reopenedStore := daemon.NewSchemaStore(reopened)
+-	for _, ordinal := range []int{0, 2048, 4999} {
+-		for _, reason := range []schema.DebtReason{schema.DebtMissingInode, schema.DebtUnknownFreshness} {
+-			pathHint := fmt.Sprintf("node-%05d", ordinal)
+-			errorClass := "legacy-metadata-not-live-verified"
+-			if reason == schema.DebtMissingInode {
+-				errorClass = "legacy-node-identity-or-parent-unknown"
+-			}
+-			mutation, err := debtMutation(debtWrite{snapshot: snapshotID, work: workID(pathHint), pathHint: pathHint, reason: reason, errorClass: errorClass})
+-			if err != nil {
+-				t.Fatal(err)
+-			}
+-			value, found, err := reopenedStore.Get(ctx, mutation.Key)
+-			if err != nil || !found || !bytes.Equal(value, mutation.Value) {
+-				t.Fatalf("reopened debt missing or changed: ordinal=%d reason=%d found=%t err=%v", ordinal, reason, found, err)
++	for _, snapshotID := range snapshotIDs {
++		for _, ordinal := range []int{0, 2048, 4999} {
++			for _, reason := range []schema.DebtReason{schema.DebtMissingInode, schema.DebtUnknownFreshness} {
++				pathHint := fmt.Sprintf("node-%05d", ordinal)
++				errorClass := "legacy-metadata-not-live-verified"
++				if reason == schema.DebtMissingInode {
++					errorClass = "legacy-node-identity-or-parent-unknown"
++				}
++				mutation, err := debtMutation(debtWrite{snapshot: snapshotID, work: workID(pathHint), pathHint: pathHint, reason: reason, errorClass: errorClass})
++				if err != nil {
++					t.Fatal(err)
++				}
++				value, found, err := reopenedStore.Get(ctx, mutation.Key)
++				if err != nil || !found || !bytes.Equal(value, mutation.Value) {
++					t.Fatalf("reopened debt missing or changed: snapshot=%s ordinal=%d reason=%d found=%t err=%v", snapshotID.Str(), ordinal, reason, found, err)
++				}
+ 			}
+ 		}
+-	}
+-	value, found, err := reopenedStore.Get(ctx, schema.SnapshotImportCheckpointKey(schema.ID(snapshotID)))
+-	if err != nil || !found {
+-		t.Fatal("durable snapshot checkpoint absent", err)
+-	}
+-	checkpoint, err := schema.UnmarshalSnapshotImportCheckpointRecord(value)
+-	if err != nil || checkpoint.DebtsCreated != 10000 {
+-		t.Fatal("durable checkpoint changed", checkpoint, err)
++		value, found, err := reopenedStore.Get(ctx, schema.SnapshotImportCheckpointKey(schema.ID(snapshotID)))
++		if err != nil || !found {
++			t.Fatal("durable snapshot checkpoint absent", err)
++		}
++		checkpoint, err := schema.UnmarshalSnapshotImportCheckpointRecord(value)
++		if err != nil || checkpoint.DebtsCreated != 10000 {
++			t.Fatal("durable checkpoint changed", checkpoint, err)
++		}
+ 	}
+ }
+ 
+diff --git a/internal/index/legacyimport/tree.go b/internal/index/legacyimport/tree.go
+index 75a873c..5d3ae9d 100644
+--- a/internal/index/legacyimport/tree.go
++++ b/internal/index/legacyimport/tree.go
+@@ -4,11 +4,13 @@ import (
+ 	"bytes"
+ 	"context"
+ 	"crypto/sha256"
++	"errors"
+ 	"fmt"
+ 	"math"
+ 	"path"
+ 	"time"
+ 
++	backendcache "github.com/otuschhoff/vaultic/internal/backend/cache"
+ 	"github.com/otuschhoff/vaultic/internal/data"
+ 	"github.com/otuschhoff/vaultic/internal/index/daemon"
+ 	"github.com/otuschhoff/vaultic/internal/index/schema"
+@@ -213,6 +215,7 @@ type treeImporter struct {
+ 	revisionNext     uint64
+ 	revisionEnd      uint64
+ 	reportProgress   func()
++	treeCache        *snapshotTreeCache
+ }
+ 
+ //nolint:gocognit // Existing domain flow is an explicit complexity exception; new code remains gated.
+@@ -224,9 +227,36 @@ func importSnapshots(
+ 	options Options,
+ 	result *Result,
+ 	reportProgress func(),
+-) error {
++) (resultErr error) {
++	ctx, stopMechanism, err := startSnapshotMechanism(ctx)
++	if err != nil {
++		return err
++	}
++	if stopMechanism != nil {
++		defer func() { resultErr = errors.Join(resultErr, stopMechanism()) }()
++	}
++	treeCache := newSnapshotTreeCache(ctx)
++	defer treeCache.close()
++	ctx, packReaders := backendcache.WithPackReadSession(ctx, 64)
++	defer func() { resultErr = errors.Join(resultErr, packReaders.Close()) }()
++	var diagnosticProfiles []func()
++	defer func() {
++		for _, stop := range diagnosticProfiles {
++			stop()
++		}
++	}()
+ 	return data.ForAllSnapshots(ctx, snapshots, legacySnapshotSource{source}, nil, func(snapshotID vaultic.ID, snapshot *data.Snapshot, loadErr error) error {
+ 		result.SnapshotsSeen++
++		if counters := snapshotMechanismFrom(ctx); counters != nil {
++			counters.ordinal.Store(result.SnapshotsSeen)
++		}
++		stop, err := startSnapshotDiagnosticProfile(ctx, result.SnapshotsSeen)
++		if err != nil {
++			return err
++		}
++		if stop != nil {
++			diagnosticProfiles = append(diagnosticProfiles, stop)
++		}
+ 		defer reportProgress()
+ 		if loadErr != nil {
+ 			if err := writeDebt(ctx, debtWrite{
+@@ -286,6 +316,7 @@ func importSnapshots(
+ 			ancestors:      make(map[vaultic.ID]struct{}),
+ 			pendingCurrent: make(map[string]struct{}),
+ 			reportProgress: reportProgress,
++			treeCache:      treeCache,
+ 		}
+ 		releaseDebt := importer.admitDebtBatch()
+ 		defer releaseDebt()
+@@ -337,7 +368,7 @@ func (importer *treeImporter) importTree(treeID vaultic.ID, parent *nodeIdentity
+ 	importer.ancestors[treeID] = struct{}{}
+ 	defer delete(importer.ancestors, treeID)
+ 	loadStarted := time.Now()
+-	tree, err := data.LoadTree(importer.ctx, importer.source, treeID)
++	tree, err := importer.treeCache.loadTree(importer.ctx, importer.source, treeID)
+ 	importer.options.Telemetry.observe("snapshot_tree_load", time.Since(loadStarted))
+ 	if err != nil {
+ 		if debtErr := importer.writeDebt(debtWrite{
+@@ -745,7 +776,21 @@ func (importer *treeImporter) flushDebt() error {
+ 	durable := !importer.options.DeferSnapshotDurability
+ 	writeStarted := time.Now()
+ 	err := importer.store.WriteMutableBatch(importer.ctx, importer.pendingDebt, nil, durable)
+-	importer.options.Telemetry.observe("snapshot_debt_write", time.Since(writeStarted))
++	elapsed := time.Since(writeStarted)
++	importer.options.Telemetry.observe("snapshot_debt_write", elapsed)
++	if counters := snapshotMechanismFrom(importer.ctx); counters != nil {
++		counters.debtCalls.Add(1)
++		counters.debtPuts.Add(uint64(len(importer.pendingDebt)))
++		counters.debtBytes.Add(importer.pendingDebtBytes)
++		counters.debtNanos.Add(uint64(elapsed))
++		updateSnapshotMechanismMax(&counters.debtMax, uint64(elapsed))
++		if durable {
++			counters.durableCalls.Add(1)
++		}
++		if err != nil {
++			counters.debtErrors.Add(1)
++		}
++	}
+ 	if err != nil {
+ 		return err
+ 	}
+diff --git a/internal/index/legacyimport/tree_cache.go b/internal/index/legacyimport/tree_cache.go
+new file mode 100644
+index 0000000..b49a0df
+--- /dev/null
++++ b/internal/index/legacyimport/tree_cache.go
+@@ -0,0 +1,227 @@
++package legacyimport
++
++import (
++	"bytes"
++	"context"
++	"sync"
++
++	"github.com/otuschhoff/vaultic/internal/data"
++	"github.com/otuschhoff/vaultic/internal/vaultic"
++	"github.com/otuschhoff/vaultic/internal/workingstate"
++)
++
++const (
++	snapshotTreeCacheBytes       = 256 << 20
++	snapshotTreeCacheSlots       = 1 << 16
++	snapshotTreeCacheWays        = 4
++	snapshotTreeCacheMaxTreeSize = 1 << 20
++	snapshotTreeCacheBookkeeping = 2*snapshotTreeCacheSlots*8 + 4096
++)
++
++type snapshotTreeCacheEntry struct {
++	id      vaultic.ID
++	encoded []byte
++	charge  uint64
++	readers uint64
++	lastUse uint64
++}
++
++type snapshotTreeCache struct {
++	mu      sync.Mutex
++	entries []*snapshotTreeCacheEntry
++	used    uint64
++	oldest  int
++	readers uint64
++	closed  bool
++	clock   uint64
++	release func()
++	probe   *snapshotMechanismCounters
++}
++
++func newSnapshotTreeCache(ctx context.Context) *snapshotTreeCache {
++	if ctx.Err() != nil {
++		return nil
++	}
++	if _, accounted := workingstate.PolicyFrom(ctx).(interface {
++		Reserve(uint64) error
++		Release(uint64)
++	}); !accounted {
++		return nil
++	}
++	release, err := workingstate.Reserve(ctx, snapshotTreeCacheBytes)
++	if err != nil {
++		return nil
++	}
++	if ctx.Err() != nil {
++		release()
++		return nil
++	}
++	return &snapshotTreeCache{
++		entries: make([]*snapshotTreeCacheEntry, snapshotTreeCacheSlots),
++		release: sync.OnceFunc(release),
++		probe:   snapshotMechanismFrom(ctx),
++	}
++}
++
++func snapshotTreeCacheSlot(id vaultic.ID) int {
++	return (int(id[0])<<8 | int(id[1])) & ^(snapshotTreeCacheWays - 1)
++}
++
++func (cache *snapshotTreeCache) loadTree(ctx context.Context, loader vaultic.BlobLoader, id vaultic.ID) (data.TreeNodeIterator, error) {
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	counters := snapshotMechanismFrom(ctx)
++	if counters != nil {
++		counters.requests.Add(1)
++	}
++	if cache == nil {
++		if counters == nil {
++			return data.LoadTree(ctx, loader, id)
++		}
++		counters.bypasses.Add(1)
++		encoded, err := loadSnapshotMechanismBlob(ctx, loader, id, counters)
++		if err != nil {
++			return nil, err
++		}
++		return data.NewTreeNodeIterator(bytes.NewReader(encoded))
++	}
++	cache.mu.Lock()
++	if !cache.closed {
++		base := snapshotTreeCacheSlot(id)
++		for offset := range snapshotTreeCacheWays {
++			entry := cache.entries[base+offset]
++			if entry == nil || entry.id != id {
++				continue
++			}
++			if counters != nil {
++				counters.hits.Add(1)
++			}
++			cache.clock++
++			entry.lastUse = cache.clock
++			entry.readers++
++			cache.readers++
++			cache.mu.Unlock()
++			release := sync.OnceFunc(func() { cache.unpin(entry) })
++			tree, err := data.NewTreeNodeIterator(bytes.NewReader(entry.encoded))
++			if err != nil {
++				release()
++				return nil, err
++			}
++			return func(yield func(data.NodeOrError) bool) {
++				defer release()
++				tree(yield)
++			}, nil
++		}
++	}
++	cache.mu.Unlock()
++	if counters != nil {
++		counters.misses.Add(1)
++	}
++	encoded, err := loadSnapshotMechanismBlob(ctx, loader, id, counters)
++	if err != nil {
++		return nil, err
++	}
++	tree, err := data.NewTreeNodeIterator(bytes.NewReader(encoded))
++	if err == nil && ctx.Err() == nil {
++		cache.retain(id, encoded)
++	}
++	return tree, err
++}
++
++func (cache *snapshotTreeCache) retain(id vaultic.ID, encoded []byte) {
++	if len(encoded) > snapshotTreeCacheMaxTreeSize {
++		if cache.probe != nil {
++			cache.probe.oversized.Add(1)
++		}
++		return
++	}
++	charge := 2*uint64(len(encoded)) + 256
++	cache.mu.Lock()
++	defer cache.mu.Unlock()
++	if cache.closed {
++		return
++	}
++	base := snapshotTreeCacheSlot(id)
++	slot, victim := -1, -1
++	for offset := range snapshotTreeCacheWays {
++		candidate := base + offset
++		entry := cache.entries[candidate]
++		if entry == nil {
++			if slot < 0 {
++				slot = candidate
++			}
++			continue
++		}
++		if entry.id == id {
++			return
++		}
++		if entry.readers == 0 && (victim < 0 || entry.lastUse < cache.entries[victim].lastUse) {
++			victim = candidate
++		}
++	}
++	if slot < 0 {
++		slot = victim
++	}
++	if slot < 0 {
++		if cache.probe != nil {
++			cache.probe.pinnedRejects.Add(1)
++		}
++		return
++	}
++	if entry := cache.entries[slot]; entry != nil {
++		if cache.probe != nil {
++			cache.probe.collisions.Add(1)
++		}
++		cache.used -= entry.charge
++		cache.entries[slot] = nil
++	}
++	for scanned := 0; cache.used+charge > snapshotTreeCacheBytes-snapshotTreeCacheBookkeeping; scanned++ {
++		if scanned == len(cache.entries) {
++			return
++		}
++		entry := cache.entries[cache.oldest]
++		if entry != nil && entry.readers == 0 {
++			if cache.probe != nil {
++				cache.probe.capacityEvicts.Add(1)
++			}
++			cache.used -= entry.charge
++			cache.entries[cache.oldest] = nil
++		}
++		cache.oldest = (cache.oldest + 1) % len(cache.entries)
++	}
++	cache.clock++
++	cache.entries[slot] = &snapshotTreeCacheEntry{id: id, encoded: bytes.Clone(encoded), charge: charge, lastUse: cache.clock}
++	cache.used += charge
++	if cache.probe != nil {
++		cache.probe.retains.Add(1)
++		updateSnapshotMechanismMax(&cache.probe.cachePeak, cache.used)
++	}
++}
++
++func (cache *snapshotTreeCache) unpin(entry *snapshotTreeCacheEntry) {
++	cache.mu.Lock()
++	defer cache.mu.Unlock()
++	entry.readers--
++	cache.readers--
++	cache.finishLocked()
++}
++
++func (cache *snapshotTreeCache) finishLocked() {
++	if cache.closed && cache.readers == 0 {
++		clear(cache.entries)
++		cache.entries = nil
++		cache.used = 0
++		cache.release()
++	}
++}
++
++func (cache *snapshotTreeCache) close() {
++	if cache == nil {
++		return
++	}
++	cache.mu.Lock()
++	defer cache.mu.Unlock()
++	cache.closed = true
++	cache.finishLocked()
++}
+diff --git a/internal/index/legacyimport/snapshot_diagnostic.go b/internal/index/legacyimport/snapshot_diagnostic.go
+new file mode 100644
+index 0000000..4286a07
+--- /dev/null
++++ b/internal/index/legacyimport/snapshot_diagnostic.go
+@@ -0,0 +1,83 @@
++package legacyimport
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"os"
++	"path/filepath"
++	"runtime/pprof"
++	"sync"
++	"time"
++
++	"github.com/otuschhoff/vaultic/internal/workingstate"
++)
++
++const snapshotDiagnosticCharge = 32 << 20
++
++func startSnapshotDiagnosticProfile(ctx context.Context, ordinal uint64) (func(), error) {
++	directory := os.Getenv("VAULTIC_M6_SNAPSHOT_PROFILE_DIR")
++	if directory == "" || (ordinal != 1 && ordinal != 29) {
++		return nil, nil
++	}
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	if workingstate.PolicyFrom(ctx) == nil {
++		return nil, fmt.Errorf("snapshot profiling requires an accounted working policy")
++	}
++	info, err := os.Lstat(directory)
++	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
++		return nil, fmt.Errorf("snapshot profiling requires a private directory")
++	}
++	release, err := workingstate.Reserve(ctx, snapshotDiagnosticCharge)
++	if err != nil {
++		return nil, err
++	}
++	if err := ctx.Err(); err != nil {
++		release()
++		return nil, err
++	}
++	base := filepath.Join(directory, fmt.Sprintf("snapshot-%02d", ordinal))
++	file, err := os.OpenFile(base+".cpu.pprof", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
++	if err != nil {
++		release()
++		return nil, err
++	}
++	if err := pprof.StartCPUProfile(file); err != nil {
++		_ = file.Close()
++		release()
++		return nil, err
++	}
++	started := time.Now()
++	marker, err := json.Marshal(map[string]any{
++		"schema": "m6-snapshot-profile-window-v1", "snapshot_ordinal": ordinal,
++		"cli_pid": os.Getpid(), "started_unix_ms": started.UnixMilli(),
++		"maximum_seconds": 600, "managed_charge": snapshotDiagnosticCharge,
++	})
++	if err == nil {
++		err = os.WriteFile(base+".started.json", marker, 0600)
++	}
++	if err != nil {
++		pprof.StopCPUProfile()
++		_ = file.Close()
++		release()
++		return nil, err
++	}
++	stop := sync.OnceFunc(func() {
++		pprof.StopCPUProfile()
++		syncErr := file.Sync()
++		closeErr := file.Close()
++		release()
++		finished, marshalErr := json.Marshal(map[string]any{
++			"schema": "m6-snapshot-profile-window-v1", "snapshot_ordinal": ordinal,
++			"finished_unix_ms": time.Now().UnixMilli(), "wall_seconds": time.Since(started).Seconds(),
++			"file_sync_ok": syncErr == nil, "file_close_ok": closeErr == nil,
++		})
++		if marshalErr == nil {
++			_ = os.WriteFile(base+".finished.json", finished, 0600)
++		}
++	})
++	timer := time.AfterFunc(10*time.Minute, stop)
++	return func() { timer.Stop(); stop() }, nil
++}
+diff --git a/internal/index/legacyimport/snapshot_mechanism.go b/internal/index/legacyimport/snapshot_mechanism.go
+new file mode 100644
+index 0000000..3259e2e
+--- /dev/null
++++ b/internal/index/legacyimport/snapshot_mechanism.go
+@@ -0,0 +1,170 @@
++package legacyimport
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"os"
++	"path/filepath"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	"github.com/otuschhoff/vaultic/internal/vaultic"
++	"github.com/otuschhoff/vaultic/internal/workingstate"
++)
++
++const snapshotMechanismCharge = 1 << 20
++
++type snapshotMechanismContextKey struct{}
++
++type snapshotMechanismCounters struct {
++	ordinal        atomic.Uint64
++	requests       atomic.Uint64
++	hits           atomic.Uint64
++	misses         atomic.Uint64
++	bypasses       atomic.Uint64
++	backendCalls   atomic.Uint64
++	backendBytes   atomic.Uint64
++	backendErrors  atomic.Uint64
++	backendNanos   atomic.Uint64
++	backendMax     atomic.Uint64
++	retains        atomic.Uint64
++	oversized      atomic.Uint64
++	pinnedRejects  atomic.Uint64
++	collisions     atomic.Uint64
++	capacityEvicts atomic.Uint64
++	cachePeak      atomic.Uint64
++	debtCalls      atomic.Uint64
++	debtPuts       atomic.Uint64
++	debtBytes      atomic.Uint64
++	debtNanos      atomic.Uint64
++	debtMax        atomic.Uint64
++	debtErrors     atomic.Uint64
++	durableCalls   atomic.Uint64
++}
++
++func startSnapshotMechanism(ctx context.Context) (context.Context, func() error, error) {
++	directory := os.Getenv("VAULTIC_M6_SNAPSHOT_MECHANISM_DIR")
++	if directory == "" {
++		return ctx, nil, nil
++	}
++	if err := ctx.Err(); err != nil {
++		return ctx, nil, err
++	}
++	if _, accounted := workingstate.PolicyFrom(ctx).(interface {
++		Reserve(uint64) error
++		Release(uint64)
++	}); !accounted {
++		return ctx, nil, fmt.Errorf("snapshot mechanism probe requires an accounted policy")
++	}
++	info, err := os.Lstat(directory)
++	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
++		return ctx, nil, fmt.Errorf("snapshot mechanism probe requires a private directory")
++	}
++	release, err := workingstate.Reserve(ctx, snapshotMechanismCharge)
++	if err != nil {
++		return ctx, nil, err
++	}
++	if err := ctx.Err(); err != nil {
++		release()
++		return ctx, nil, err
++	}
++	file, err := os.OpenFile(filepath.Join(directory, "snapshot-mechanism.jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
++	if err != nil {
++		release()
++		return ctx, nil, err
++	}
++	counters := &snapshotMechanismCounters{}
++	encoder := json.NewEncoder(file)
++	write := func(reason string) error {
++		return encoder.Encode(map[string]any{
++			"schema": "m6-snapshot-mechanism-v1", "cli_pid": os.Getpid(),
++			"unix_ms": time.Now().UnixMilli(), "reason": reason,
++			"managed_charge_bytes": snapshotMechanismCharge, "counters": counters.values(),
++		})
++	}
++	if err := write("started"); err != nil {
++		_ = file.Close()
++		release()
++		return ctx, nil, err
++	}
++	stop := make(chan struct{})
++	finished := make(chan struct{})
++	var finishErr error
++	go func() {
++		defer close(finished)
++		defer release()
++		ticker := time.NewTicker(15 * time.Second)
++		defer ticker.Stop()
++		var writeErr error
++		for {
++			select {
++			case <-ticker.C:
++				if writeErr == nil {
++					writeErr = write("periodic")
++				}
++			case <-stop:
++				finishErr = errors.Join(writeErr, write("finished"), file.Sync(), file.Close())
++				return
++			}
++		}
++	}()
++	closeStop := sync.OnceFunc(func() { close(stop) })
++	return context.WithValue(ctx, snapshotMechanismContextKey{}, counters), func() error {
++		closeStop()
++		<-finished
++		return finishErr
++	}, nil
++}
++
++func snapshotMechanismFrom(ctx context.Context) *snapshotMechanismCounters {
++	counters, _ := ctx.Value(snapshotMechanismContextKey{}).(*snapshotMechanismCounters)
++	return counters
++}
++
++func updateSnapshotMechanismMax(maximum *atomic.Uint64, value uint64) {
++	for previous := maximum.Load(); value > previous; previous = maximum.Load() {
++		if maximum.CompareAndSwap(previous, value) {
++			return
++		}
++	}
++}
++
++func loadSnapshotMechanismBlob(ctx context.Context, loader vaultic.BlobLoader, id vaultic.ID, counters *snapshotMechanismCounters) ([]byte, error) {
++	if counters == nil {
++		return loader.LoadBlob(ctx, vaultic.BlobHandle{Type: vaultic.TreeBlob, ID: id}, nil)
++	}
++	started := time.Now()
++	encoded, err := loader.LoadBlob(ctx, vaultic.BlobHandle{Type: vaultic.TreeBlob, ID: id}, nil)
++	if counters != nil {
++		elapsed := uint64(time.Since(started))
++		counters.backendCalls.Add(1)
++		counters.backendBytes.Add(uint64(len(encoded)))
++		counters.backendNanos.Add(elapsed)
++		updateSnapshotMechanismMax(&counters.backendMax, elapsed)
++		if err != nil {
++			counters.backendErrors.Add(1)
++		}
++	}
++	return encoded, err
++}
++
++func (counters *snapshotMechanismCounters) values() map[string]uint64 {
++	return map[string]uint64{
++		"snapshot_ordinal": counters.ordinal.Load(),
++		"requests":         counters.requests.Load(), "hits": counters.hits.Load(),
++		"misses": counters.misses.Load(), "bypasses": counters.bypasses.Load(),
++		"backend_calls": counters.backendCalls.Load(), "backend_bytes": counters.backendBytes.Load(),
++		"backend_errors": counters.backendErrors.Load(), "backend_nanoseconds": counters.backendNanos.Load(),
++		"backend_max_nanoseconds": counters.backendMax.Load(), "retains": counters.retains.Load(),
++		"oversized_rejects": counters.oversized.Load(), "pinned_rejects": counters.pinnedRejects.Load(),
++		"collision_evictions": counters.collisions.Load(), "capacity_evictions": counters.capacityEvicts.Load(),
++		"cache_peak_charge_bytes": counters.cachePeak.Load(),
++		"debt_calls":              counters.debtCalls.Load(), "debt_puts": counters.debtPuts.Load(),
++		"debt_bytes": counters.debtBytes.Load(), "debt_nanoseconds": counters.debtNanos.Load(),
++		"debt_max_nanoseconds": counters.debtMax.Load(), "debt_errors": counters.debtErrors.Load(),
++		"debt_durable_calls": counters.durableCalls.Load(),
++	}
++}
+diff --git a/internal/index/legacyimport/snapshot_equal_work_test.go b/internal/index/legacyimport/snapshot_equal_work_test.go
+new file mode 100644
+index 0000000..df6e2d1
+--- /dev/null
++++ b/internal/index/legacyimport/snapshot_equal_work_test.go
+@@ -0,0 +1,472 @@
++package legacyimport
++
++import (
++	"bytes"
++	"context"
++	"crypto/sha256"
++	"encoding/binary"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"os"
++	"path/filepath"
++	"slices"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/otuschhoff/vaultic/internal/backend/cache"
++	"github.com/otuschhoff/vaultic/internal/backend/local"
++	"github.com/otuschhoff/vaultic/internal/data"
++	"github.com/otuschhoff/vaultic/internal/index/daemon"
++	"github.com/otuschhoff/vaultic/internal/index/schema"
++	"github.com/otuschhoff/vaultic/internal/repository"
++	"github.com/otuschhoff/vaultic/internal/vaultic"
++	"github.com/otuschhoff/vaultic/internal/workingkv"
++)
++
++type m6EqualTree struct {
++	id      vaultic.ID
++	encoded []byte
++}
++
++func m6EqualEvent(t *testing.T, event map[string]any) {
++	t.Helper()
++	event["captured_unix_ms"] = time.Now().UnixMilli()
++	event["pid"] = os.Getpid()
++	encoded, err := json.Marshal(event)
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Logf("M6_EQUAL_WORK %s", encoded)
++}
++
++func m6EqualCorpus(ctx context.Context, source vaultic.BlobLoader, roots vaultic.IDs) ([]m6EqualTree, error) {
++	queue := slices.Clone(roots)
++	slices.SortFunc(queue, func(first, second vaultic.ID) int { return bytes.Compare(first[:], second[:]) })
++	seen := make(map[vaultic.ID]bool)
++	var corpus []m6EqualTree
++	var retained int
++	var retainedNodes int
++	for len(queue) != 0 && len(corpus) < 512 && retained < 64<<20 {
++		if err := ctx.Err(); err != nil {
++			return nil, err
++		}
++		id := queue[0]
++		queue = queue[1:]
++		if seen[id] {
++			continue
++		}
++		seen[id] = true
++		encoded, err := source.LoadBlob(ctx, vaultic.BlobHandle{ID: id, Type: vaultic.TreeBlob}, nil)
++		if err != nil || vaultic.Hash(encoded) != id {
++			return nil, fmt.Errorf("equal-work corpus load/hash failure: %v", err)
++		}
++		if len(encoded) > 64<<20-retained {
++			break
++		}
++		iterator, err := data.NewTreeNodeIterator(bytes.NewReader(encoded))
++		if err != nil {
++			return nil, err
++		}
++		var children vaultic.IDs
++		var treeNodes int
++		for item := range iterator {
++			if item.Error != nil {
++				return nil, item.Error
++			}
++			treeNodes++
++			if item.Node.Subtree != nil && !seen[*item.Node.Subtree] && len(children) < 4096 {
++				children = append(children, *item.Node.Subtree)
++			}
++		}
++		if retainedNodes+treeNodes > 50000 {
++			break
++		}
++		slices.SortFunc(children, func(first, second vaultic.ID) int { return bytes.Compare(first[:], second[:]) })
++		if len(queue) < 8192 {
++			queue = append(queue, children[:min(len(children), 8192-len(queue))]...)
++		}
++		corpus = append(corpus, m6EqualTree{id: id, encoded: bytes.Clone(encoded)})
++		retained += len(encoded)
++		retainedNodes += treeNodes
++	}
++	if len(corpus) == 0 {
++		return nil, errors.New("equal-work corpus is empty")
++	}
++	return corpus, nil
++}
++
++func m6EqualDecode(corpus []m6EqualTree, snapshot vaultic.ID) ([32]byte, uint64, []daemon.Mutation, error) {
++	hash := sha256.New()
++	var nodes uint64
++	var mutations []daemon.Mutation
++	for _, tree := range corpus {
++		iterator, err := data.NewTreeNodeIterator(bytes.NewReader(tree.encoded))
++		if err != nil {
++			return [32]byte{}, 0, nil, err
++		}
++		for item := range iterator {
++			if item.Error != nil {
++				return [32]byte{}, 0, nil, item.Error
++			}
++			encoded, err := json.Marshal(item.Node)
++			if err != nil {
++				return [32]byte{}, 0, nil, err
++			}
++			var length [8]byte
++			binary.BigEndian.PutUint64(length[:], uint64(len(encoded)))
++			hash.Write(length[:])
++			hash.Write(encoded)
++			nodes++
++			for _, reason := range []schema.DebtReason{schema.DebtMissingInode, schema.DebtUnknownFreshness} {
++				mutation, err := debtMutation(debtWrite{
++					snapshot: snapshot, work: tree.id,
++					pathHint: fmt.Sprintf("%s/%d/%s", tree.id.String(), nodes, item.Node.Name), reason: reason,
++				})
++				if err != nil {
++					return [32]byte{}, 0, nil, err
++				}
++				mutations = append(mutations, mutation)
++			}
++		}
++	}
++	var digest [32]byte
++	copy(digest[:], hash.Sum(nil))
++	return digest, nodes, mutations, nil
++}
++
++func m6EqualPipeline(ctx context.Context, source vaultic.BlobLoader, corpus []m6EqualTree, store TreeStore, snapshot vaultic.ID) ([32]byte, uint64, []daemon.Mutation, error) {
++	hash := sha256.New()
++	var nodes uint64
++	var verify []daemon.Mutation
++	var batch []daemon.Mutation
++	var batchBytes uint64
++	flush := func() error {
++		if len(batch) == 0 {
++			return nil
++		}
++		if err := store.WriteMutableBatch(ctx, batch, nil, false); err != nil {
++			return err
++		}
++		batch = batch[:0]
++		batchBytes = 0
++		return nil
++	}
++	for _, tree := range corpus {
++		if err := ctx.Err(); err != nil {
++			return [32]byte{}, 0, nil, err
++		}
++		encoded, err := source.LoadBlob(ctx, vaultic.BlobHandle{ID: tree.id, Type: vaultic.TreeBlob}, nil)
++		if err != nil || !bytes.Equal(encoded, tree.encoded) {
++			return [32]byte{}, 0, nil, fmt.Errorf("pipeline plaintext mismatch: %v", err)
++		}
++		iterator, err := data.NewTreeNodeIterator(bytes.NewReader(encoded))
++		if err != nil {
++			return [32]byte{}, 0, nil, err
++		}
++		for item := range iterator {
++			if item.Error != nil {
++				return [32]byte{}, 0, nil, item.Error
++			}
++			encoded, err := json.Marshal(item.Node)
++			if err != nil {
++				return [32]byte{}, 0, nil, err
++			}
++			var length [8]byte
++			binary.BigEndian.PutUint64(length[:], uint64(len(encoded)))
++			hash.Write(length[:])
++			hash.Write(encoded)
++			nodes++
++			for _, reason := range []schema.DebtReason{schema.DebtMissingInode, schema.DebtUnknownFreshness} {
++				mutation, err := debtMutation(debtWrite{snapshot: snapshot, work: tree.id,
++					pathHint: fmt.Sprintf("%s/%d/%s", tree.id.String(), nodes, item.Node.Name), reason: reason})
++				if err != nil {
++					return [32]byte{}, 0, nil, err
++				}
++				size := uint64(len(mutation.Key) + len(mutation.Value))
++				if len(batch) != 0 && (len(batch) >= 4096 || batchBytes+size > 1<<20) {
++					if err := flush(); err != nil {
++						return [32]byte{}, 0, nil, err
++					}
++				}
++				if len(verify) < 2 {
++					verify = append(verify, mutation)
++				}
++				batch = append(batch, mutation)
++				batchBytes += size
++			}
++		}
++	}
++	if len(batch) != 0 {
++		verify = append(verify, batch[len(batch)-1])
++	}
++	if err := flush(); err != nil {
++		return [32]byte{}, 0, nil, err
++	}
++	var digest [32]byte
++	copy(digest[:], hash.Sum(nil))
++	return digest, nodes, verify, nil
++}
++
++func TestM6EqualWorkCorpusDeterminism(t *testing.T) {
++	child := treeJSON(t, &data.Node{Name: "child-file", Type: data.NodeTypeFile})
++	childID := vaultic.Hash(child)
++	root := treeJSON(t, &data.Node{Name: "directory", Type: data.NodeTypeDir, Subtree: &childID})
++	rootID := vaultic.Hash(root)
++	source := &memorySource{blobs: map[vaultic.ID][]byte{rootID: root, childID: child}}
++	corpus, err := m6EqualCorpus(t.Context(), source, vaultic.IDs{rootID, rootID})
++	if err != nil || len(corpus) != 2 {
++		t.Fatalf("corpus=%d err=%v", len(corpus), err)
++	}
++	snapshot := vaultic.Hash([]byte("deterministic-snapshot"))
++	first, nodes, mutations, err := m6EqualDecode(corpus, snapshot)
++	second, repeatedNodes, repeatedMutations, repeatedErr := m6EqualDecode(corpus, snapshot)
++	if err != nil || repeatedErr != nil || nodes != 2 || repeatedNodes != nodes || first != second || len(mutations) != 4 || !slices.EqualFunc(mutations, repeatedMutations, func(first, second daemon.Mutation) bool {
++		return bytes.Equal(first.Key, second.Key) && bytes.Equal(first.Value, second.Value)
++	}) {
++		t.Fatal("equal-work replay changed facts", err, repeatedErr)
++	}
++	store := newMemoryStore()
++	pipelineDigest, pipelineNodes, _, err := m6EqualPipeline(t.Context(), source, corpus, store, snapshot)
++	if err != nil || pipelineDigest != first || pipelineNodes != nodes || len(store.values) != len(mutations) {
++		t.Fatal("pipeline changed decoder facts", err)
++	}
++	for _, mutation := range mutations {
++		if !bytes.Equal(store.values[string(mutation.Key)], mutation.Value) {
++			t.Fatal("pipeline changed exact debt bytes")
++		}
++	}
++	canceled, cancel := context.WithCancel(t.Context())
++	cancel()
++	if _, err := m6EqualCorpus(canceled, source, vaultic.IDs{rootID}); !errors.Is(err, context.Canceled) {
++		t.Fatal("corpus ignored cancellation", err)
++	}
++}
++
++func TestM6FullCatalogEqualWorkDiagnostic(t *testing.T) {
++	if os.Getenv("VAULTIC_M6_EQUAL_WORK") != "1" {
++		t.Skip("opt-in fresh full-catalog component diagnostic, not acceptance")
++	}
++	ctx, cancel := context.WithTimeout(t.Context(), 12*time.Hour)
++	defer cancel()
++	directory := os.Getenv("VAULTIC_M6_DIAGNOSTIC_STATE")
++	if directory == "" || os.Getenv("VAULTICDB_TEST_BINARY") == "" {
++		t.Fatal("private fresh state and pinned native binary are required")
++	}
++	if _, err := os.Stat(filepath.Join(directory, "db")); !errors.Is(err, os.ErrNotExist) {
++		t.Fatal("equal-work diagnostic refuses existing native state")
++	}
++	policy, err := workingkv.NewPolicy(workingkv.ModeRAM, 160<<30, "")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx = workingkv.WithPolicy(ctx, policy)
++	if err := policy.Reserve(1 << 30); err != nil {
++		t.Fatal(err)
++	}
++	defer policy.Release(1 << 30)
++	password, err := os.ReadFile(os.Getenv("VAULTIC_M6_DIAGNOSTIC_PASSWORD_FILE"))
++	if err != nil {
++		t.Fatal("equal-work password unavailable")
++	}
++	backend, err := local.Open(ctx, local.Config{Path: os.Getenv("VAULTIC_M6_DIAGNOSTIC_REPO"), Connections: 8}, func(string, ...any) {})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer backend.Close()
++	repo, err := repository.New(backend, repository.Options{Compression: repository.CompressionFastest})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer repo.Close()
++	if err := repo.SearchKey(ctx, strings.TrimRight(string(password), "\r\n"), 10, ""); err != nil {
++		t.Fatal("equal-work source unlock failed")
++	}
++	fileCache, err := cache.New(repo.Config().ID, filepath.Join(directory, "cache"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	repo.UseCache(fileCache, func(string, ...any) {})
++	started := time.Now()
++	if err := repo.LoadIndex(ctx, vaultic.NoopTerminalCounterFactory); err != nil {
++		t.Fatal("equal-work complete source preload failed", err)
++	}
++	m6EqualEvent(t, map[string]any{"stage": "source_preload", "elapsed_ns": time.Since(started).Nanoseconds()})
++	nativeOptions := daemon.Options{
++		Socket: filepath.Join(directory, "d.sock"), RepositoryID: "m6-equal-work-full-catalog",
++		DaemonPath: os.Getenv("VAULTICDB_TEST_BINARY"), DataDir: filepath.Join(directory, "db"), ObjectStore: "local",
++		WALStore: "memory", WALDataDir: filepath.Join(directory, "wal"), RebuildReset: true, FreshBulkImport: true,
++	}
++	client, err := daemon.Ensure(ctx, nativeOptions)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer client.Close(context.Background())
++	store := daemon.NewSchemaStore(client)
++	store.EnableFreshLegacyImportContext(ctx)
++	defer store.ReleaseFreshLegacyImport()
++	started = time.Now()
++	result, err := Import(ctx, repo, repo.Backend(), store, Options{PublicationLanes: 2, Telemetry: NewSchedulerTelemetry(), Progress: func(progress Progress) {
++		if progress.IndexesCompleted%100 == 0 {
++			m6EqualEvent(t, map[string]any{"stage": "catalog_progress", "indexes": progress.IndexesCompleted, "total": progress.IndexesTotal, "blobs": progress.BlobsImported})
++		}
++	}})
++	if err != nil || result.ErrorsSeen != 0 || result.IndexesImported != 10170 || result.PacksImported != 419853 || result.BlobsImported != 380166821 {
++		t.Fatalf("equal-work full catalog not established: result=%+v err=%v", result, err)
++	}
++	m6EqualEvent(t, map[string]any{"stage": "catalog_ready", "elapsed_ns": time.Since(started).Nanoseconds(), "indexes": result.IndexesImported, "packs": result.PacksImported, "blobs": result.BlobsImported})
++	var roots vaultic.IDs
++	if err := repo.List(ctx, vaultic.SnapshotFile, func(id vaultic.ID, _ int64) error {
++		original, err := repo.LoadLegacyUnpacked(ctx, vaultic.SnapshotFile, id)
++		if err != nil {
++			return err
++		}
++		var snapshot data.Snapshot
++		if err := json.Unmarshal(original, &snapshot); err != nil {
++			return err
++		}
++		if snapshot.Tree == nil {
++			return errors.New("equal-work snapshot lacks root")
++		}
++		roots = append(roots, *snapshot.Tree)
++		return nil
++	}); err != nil || len(roots) != 143 {
++		t.Fatal("equal-work complete snapshot inventory unavailable", err, len(roots))
++	}
++	corpus, err := m6EqualCorpus(ctx, repo, roots)
++	if err != nil {
++		t.Fatal(err)
++	}
++	expected, expectedNodes, _, err := m6EqualDecode(corpus, vaultic.Hash([]byte("initial-fact-digest")))
++	if err != nil {
++		t.Fatal(err)
++	}
++	measureCtx, cancelMeasure := context.WithTimeout(ctx, 30*time.Minute)
++	defer cancelMeasure()
++	var verifyMutations []daemon.Mutation
++	for round := range 5 {
++		order := []bool{false, true}
++		if round%2 == 1 {
++			slices.Reverse(order)
++		}
++		for _, pooled := range order {
++			readCtx := measureCtx
++			var session *cache.PackReadSession
++			if pooled {
++				readCtx, session = cache.WithPackReadSession(measureCtx, 64)
++				if session == nil {
++					t.Fatal("equal-work candidate reader reservation denied")
++				}
++			}
++			started = time.Now()
++			var encodedBytes uint64
++			for range 3 {
++				for _, tree := range corpus {
++					encoded, err := repo.LoadBlob(readCtx, vaultic.BlobHandle{ID: tree.id, Type: vaultic.TreeBlob}, nil)
++					if err != nil || !bytes.Equal(encoded, tree.encoded) {
++						session.Close()
++						t.Fatal("equal-work loader changed plaintext", err)
++					}
++					encodedBytes += uint64(len(encoded))
++				}
++			}
++			elapsed := time.Since(started)
++			if err := session.Close(); err != nil {
++				t.Fatal(err)
++			}
++			m6EqualEvent(t, map[string]any{"stage": "loader", "round": round, "pooled": pooled, "items": len(corpus) * 3, "bytes": encodedBytes, "elapsed_ns": elapsed.Nanoseconds()})
++		}
++		started = time.Now()
++		var decodedNodes uint64
++		for _, tree := range corpus {
++			iterator, err := data.NewTreeNodeIterator(bytes.NewReader(tree.encoded))
++			if err != nil {
++				t.Fatal(err)
++			}
++			for item := range iterator {
++				if item.Error != nil {
++					t.Fatal(item.Error)
++				}
++				decodedNodes++
++			}
++		}
++		if decodedNodes != expectedNodes {
++			t.Fatal("equal-work decoder changed node count")
++		}
++		m6EqualEvent(t, map[string]any{"stage": "decode", "round": round, "nodes": decodedNodes, "elapsed_ns": time.Since(started).Nanoseconds()})
++		started = time.Now()
++		digest, nodes, mutations, err := m6EqualDecode(corpus, vaultic.Hash([]byte(fmt.Sprintf("m6-equal-work-round-%d", round))))
++		if err != nil || digest != expected || nodes != expectedNodes || len(mutations) == 0 {
++			t.Fatal("equal-work decode changed node facts", err)
++		}
++		m6EqualEvent(t, map[string]any{"stage": "fact_validation_and_encoding", "round": round, "nodes": nodes, "elapsed_ns": time.Since(started).Nanoseconds(), "fact_sha256": fmt.Sprintf("%x", digest)})
++		verifyMutations = append(verifyMutations, mutations[0], mutations[len(mutations)/2], mutations[len(mutations)-1])
++		started = time.Now()
++		var mutationBytes uint64
++		for _, mutation := range mutations {
++			mutationBytes += uint64(len(mutation.Key) + len(mutation.Value))
++		}
++		for first := 0; first < len(mutations); {
++			last, encoded := first, uint64(0)
++			for last < len(mutations) && last-first < 4096 {
++				size := uint64(len(mutations[last].Key) + len(mutations[last].Value))
++				if last > first && encoded+size > 1<<20 {
++					break
++				}
++				encoded += size
++				last++
++			}
++			if err := store.WriteMutableBatch(measureCtx, mutations[first:last], nil, false); err != nil {
++				t.Fatal("equal-work native write failed", err)
++			}
++			first = last
++		}
++		m6EqualEvent(t, map[string]any{"stage": "native_write", "round": round, "puts": len(mutations), "bytes": mutationBytes, "elapsed_ns": time.Since(started).Nanoseconds()})
++		for _, pooled := range order {
++			pipelineCtx := measureCtx
++			var session *cache.PackReadSession
++			if pooled {
++				pipelineCtx, session = cache.WithPackReadSession(measureCtx, 64)
++				if session == nil {
++					t.Fatal("pipeline candidate reservation denied")
++				}
++			}
++			started = time.Now()
++			pipelineDigest, pipelineNodes, samples, pipelineErr := m6EqualPipeline(pipelineCtx, repo, corpus, store,
++				vaultic.Hash([]byte(fmt.Sprintf("m6-pipeline-%d-%t", round, pooled))))
++			elapsed := time.Since(started)
++			closeErr := session.Close()
++			if pipelineErr != nil || closeErr != nil || pipelineDigest != expected || pipelineNodes != expectedNodes {
++				t.Fatal("equal-work pipeline changed facts", pipelineErr, closeErr)
++			}
++			verifyMutations = append(verifyMutations, samples...)
++			m6EqualEvent(t, map[string]any{"stage": "pipeline", "round": round, "pooled": pooled,
++				"items": len(corpus), "nodes": pipelineNodes, "puts": pipelineNodes * 2,
++				"elapsed_ns": elapsed.Nanoseconds(), "fact_sha256": fmt.Sprintf("%x", pipelineDigest)})
++		}
++	}
++	if err := measureCtx.Err(); err != nil {
++		t.Fatal(err)
++	}
++	if err := store.MarkBulkImportComplete(ctx); err != nil {
++		t.Fatal("equal-work catalog finalization failed", err)
++	}
++	if err := client.Close(ctx); err != nil {
++		t.Fatal(err)
++	}
++	nativeOptions.WALStore, nativeOptions.RebuildReset, nativeOptions.FreshBulkImport = "local", false, false
++	reopened, err := daemon.Ensure(ctx, nativeOptions)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer reopened.Close(context.Background())
++	for _, mutation := range verifyMutations {
++		value, found, err := daemon.NewSchemaStore(reopened).Get(ctx, mutation.Key)
++		if err != nil || !found || !bytes.Equal(value, mutation.Value) {
++			t.Fatal("equal-work native debt bytes changed across reopen", err)
++		}
++	}
++	m6EqualEvent(t, map[string]any{"stage": "finished", "diagnostic_only": true, "full_native_catalog": true,
++		"acceptance": false, "reopened_exact_samples": len(verifyMutations), "managed_budget": policy.Budget()})
++}
+diff --git a/internal/telemetry/monitor_schema.go b/internal/telemetry/monitor_schema.go
+index e761501..36e15ec 100644
+--- a/internal/telemetry/monitor_schema.go
++++ b/internal/telemetry/monitor_schema.go
+@@ -59,6 +59,7 @@ var monitorValueSets = map[string]map[string]struct{}{
+ 		"reduce_mutation_rpc", "reduce_commit", "reduce_retry_backoff", "reduce_recovery_read", "reduce_checkpoint_read",
+ 		"planning_total", "reduction_total", "gate_wait", "transaction_total", "cleanup_total", "cleanup_scan",
+ 		"cleanup_begin", "cleanup_write", "cleanup_commit",
++		"snapshot_tree_load", "snapshot_tree_decode", "snapshot_debt_write",
+ 	),
+ 	"statistic": values(
+ 		"batches", "ingested_batches", "reduced_batches", "attempts", "ingest_attempts", "reduce_attempts",
