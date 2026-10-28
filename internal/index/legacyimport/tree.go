@@ -208,6 +208,8 @@ type treeImporter struct {
 	pendingDebtBytes uint64
 	pendingDebtKeys  map[string]struct{}
 	debtBatchItems   int
+	debtWriter       *snapshotDebtWriter
+	prefetch         *snapshotTreePrefetch
 	pendingRevisions []daemon.RevisionPublication
 	pendingCurrent   map[string]struct{}
 	revisionNext     uint64
@@ -289,14 +291,35 @@ func importSnapshots(
 		}
 		releaseDebt := importer.admitDebtBatch()
 		defer releaseDebt()
+		if options.SnapshotTreePrefetch {
+			prefetch, err := newSnapshotTreePrefetch(importer.ctx, source)
+			if err != nil {
+				return err
+			}
+			importer.prefetch = prefetch
+			defer prefetch.close()
+		}
+		if options.SnapshotDebtWriteOverlap {
+			if err := importer.startDebtWriter(); err != nil {
+				return err
+			}
+			defer importer.stopDebtWriter()
+		}
 		_, _, err = importer.importTree(*snapshot.Tree, nil, "", 0)
 		if err != nil {
 			return err
+		}
+		if importer.prefetch != nil {
+			importer.prefetch.close()
+			importer.prefetch = nil
 		}
 		if err := importer.flushRevisions(); err != nil {
 			return err
 		}
 		if err := importer.flushDebt(); err != nil {
+			return err
+		}
+		if err := importer.finishDebtWriter(); err != nil {
 			return err
 		}
 		if result.ErrorsSeen != beforeErrors {
@@ -337,7 +360,7 @@ func (importer *treeImporter) importTree(treeID vaultic.ID, parent *nodeIdentity
 	importer.ancestors[treeID] = struct{}{}
 	defer delete(importer.ancestors, treeID)
 	loadStarted := time.Now()
-	tree, err := data.LoadTree(importer.ctx, importer.source, treeID)
+	tree, err := importer.loadSnapshotTree(treeID, depth)
 	importer.options.Telemetry.observe("snapshot_tree_load", time.Since(loadStarted))
 	if err != nil {
 		if debtErr := importer.writeDebt(debtWrite{
@@ -706,6 +729,15 @@ func (importer *treeImporter) writeDebt(debt debtWrite) error {
 		key := string(mutation.Key)
 		_, duplicate := importer.pendingDebtKeys[key]
 		if importer.debtBatchItems == snapshotDebtAdmittedItems && mutationBytes > snapshotDebtAdmittedBytes {
+			if importer.debtWriter != nil {
+				if err := importer.flushDebt(); err != nil {
+					return err
+				}
+				if err := importer.finishDebtWriter(); err != nil {
+					return err
+				}
+				importer.stopDebtWriter()
+			}
 			release, err := workingstate.Reserve(importer.ctx, uint64(cap(mutation.Key)+cap(mutation.Value))*2+512)
 			if err != nil {
 				return err
@@ -740,6 +772,18 @@ func (importer *treeImporter) writeDebt(debt debtWrite) error {
 
 func (importer *treeImporter) flushDebt() error {
 	if len(importer.pendingDebt) == 0 {
+		return nil
+	}
+	if importer.debtWriter != nil {
+		started := time.Now()
+		next, err := importer.debtWriter.submit(importer.pendingDebt)
+		importer.options.Telemetry.observe("snapshot_debt_backpressure", time.Since(started))
+		if err != nil {
+			return err
+		}
+		importer.pendingDebt = next
+		clear(importer.pendingDebtKeys)
+		importer.pendingDebtBytes = 0
 		return nil
 	}
 	durable := !importer.options.DeferSnapshotDurability

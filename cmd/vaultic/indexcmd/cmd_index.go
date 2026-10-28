@@ -398,6 +398,8 @@ type indexImportOptions struct {
 	SnapshotDepth              uint
 	SnapshotWorkBudget         uint64
 	SnapshotMetadataOnly       bool
+	SnapshotDebtWriteOverlap   bool
+	SnapshotTreePrefetch       bool
 	ConfirmMetadataLossRebuild bool
 	MonitorExport              importMonitorExportOptions
 }
@@ -673,6 +675,8 @@ func newIndexImportCommand(globalOptions *global.Options) *cobra.Command {
 	flags.UintVar(&options.SnapshotDepth, "snapshot-depth", math.MaxUint, "maximum tree depth to import (zero disables snapshot import)")
 	flags.Uint64Var(&options.SnapshotWorkBudget, "snapshot-work-budget", 0, "maximum snapshot nodes to examine (zero is unlimited)")
 	flags.BoolVar(&options.SnapshotMetadataOnly, "snapshot-metadata-only", false, "import only snapshot JSON and root references using existing blob locations; skip index import and tree traversal")
+	flags.BoolVar(&options.SnapshotDebtWriteOverlap, "experimental-snapshot-debt-overlap", false, "overlap traversal with one queued debt batch in a fresh experimental import")
+	flags.BoolVar(&options.SnapshotTreePrefetch, "experimental-snapshot-tree-prefetch", false, "prefetch one size-bounded tree in a fresh experimental import")
 	flags.BoolVar(
 		&options.ConfirmMetadataLossRebuild,
 		"confirm-metadata-loss-rebuild",
@@ -821,9 +825,11 @@ func runIndexImport(
 		PreparedImportBytes: options.PreparedImportBytes, ImportBatchTimeout: options.ImportBatchTimeout,
 		WorkBudget: options.WorkBudget, SnapshotDepth: options.SnapshotDepth,
 		SnapshotWorkBudget: options.SnapshotWorkBudget, DeferSnapshotDurability: options.ForceResetOldIndex,
-		SnapshotMetadataOnly: options.SnapshotMetadataOnly,
-		Progress:             progressReporter.Update,
-		Telemetry:            telemetry,
+		SnapshotMetadataOnly:     options.SnapshotMetadataOnly,
+		SnapshotDebtWriteOverlap: options.SnapshotDebtWriteOverlap,
+		SnapshotTreePrefetch:     options.SnapshotTreePrefetch,
+		Progress:                 progressReporter.Update,
+		Telemetry:                telemetry,
 	})
 	stopStats()
 	log.Printf("legacy import scheduler: %s", formatLegacySchedulerStats(telemetry.Snapshot()))
@@ -1025,6 +1031,9 @@ func formatLegacySchedulerOperations(operations map[string]legacyimport.Duration
 func validateIndexImportOptions(options indexImportOptions) (indexImportOptions, error) {
 	if !options.FromLegacy {
 		return options, fmt.Errorf("no import source selected; --from-legacy is currently required")
+	}
+	if (options.SnapshotDebtWriteOverlap || options.SnapshotTreePrefetch) && (!options.ForceResetOldIndex || options.SnapshotMetadataOnly || options.DryRun) {
+		return options, fmt.Errorf("experimental snapshot overlap/prefetch requires a fresh non-dry-run traversal import")
 	}
 	if options.SnapshotMetadataOnly && (options.ForceResetOldIndex || options.Activate || options.Daemon.RebuildInitialize || options.WorkBudget != 0 || options.SnapshotWorkBudget != 0) {
 		return options, fmt.Errorf("--snapshot-metadata-only cannot be combined with reset, activation, rebuild initialization or traversal work budgets")
