@@ -8,7 +8,8 @@
 
 Assessment date: 2026-10-28. Code baseline: `4b174b5c8`, including the
 experimental snapshot checkpoint `cd84d564e`. This is a design and execution
-plan, not production approval or a report of newly executed workload tests.
+plan with bounded Phase 0 evidence below, not production approval or a report
+of a completed real-workload run.
 Here, **indexdb** means the daemon-backed VaulticDB/SlateDB metadata engine,
 not the temporary RAM/KV working-state backend.
 
@@ -86,6 +87,120 @@ A broader test selection encountered a Cargo target-path setup failure before
 the process test could execute. Earlier evidence also records a daemon drain
 status regression. Reproduce and classify both rather than silently excluding
 them from a production qualification gate.
+
+### Phase 0 Evidence (2026-10-28)
+
+**Exit: complete through the specific-blocker branch, not backup readiness.**
+The generated command workflow works, but its post-backup `index check` rejects
+two retained imported packs with `derived_tier_mismatch` (`want single`,
+`got unknown`). This failed check is pinned as a regression, not waived or
+reported as clean. Phase 1 must resolve the placement/derived-tier compatibility
+before it can accept readiness. No production code, activation guard, observer,
+scheduler or optimization was changed by Phase 0.
+
+The owning test is
+[`TestIndexBackupReadinessCatalogFirstBootstrap`](../../../cmd/vaultic/cmd_index_integration_test.go).
+It uses the actual command implementations and a private native process, not
+mock import/backup engines. Two historical snapshots deliberately share exactly
+one legacy tree; one historical file has no device/inode identity, while two
+other paths are genuine hardlinks. The fixture proves:
+
+- Catalog-only import and separate snapshot-reference import create six blob
+   records, two pack records and two snapshot references, with no historical
+   inode/directory revision or crawl-debt materialization.
+- Missing catalog roots, canceled import and prohibited metadata-only activation
+   return errors without publishing snapshot references. Missing/corrupt tree
+   payloads fail uncached repository checks and verified restores.
+- Both checks pass before fixture-controlled activation. This ordering is test
+   orchestration, not a new general activation/readiness guard.
+- The first full-crawl authoritative backup reads 60 source bytes and reconciles
+   four entries without verified reuse. The unchanged full crawl reads zero source
+   bytes and reuses four entries. Rename plus delete/recreate causes three changed
+   entries and reads the 20 replacement bytes. Required reconciliation failures
+   and deferred entries are zero on these successful backups.
+- Original imported catalog/snapshot bytes remain unchanged. Current records,
+   inode/directory revisions, pack/blob records and all snapshot records are
+   byte-identical across owned-daemon shutdown and persistent-local-WAL reopen.
+   Every new snapshot has a committed normalized scope and an existing root
+   directory revision; every materialized inode revision is verified. The
+   snapshot join root intentionally has synthetic zero device/inode identity;
+   this is distinct from inventing live filesystem identities.
+- All five historical/new versions restore after restart with exact file bytes,
+   paths, counts and size; hardlinks, representative file mode and mtime survive.
+- Canceled backup, rejected snapshot save and unavailable live identities return
+   errors without an acknowledged snapshot or an increased snapshot count.
+   Unknown live identities remain deferred and do not fabricate current inodes.
+   Rejected publication can leave unused data: the unused-data check passes before
+   injection, and full data/snapshot integrity still passes afterward with unused
+   checking disabled. This is not a clean unused-data result or permission to prune.
+- The post-backup metadata audit has complete coverage and rejects exactly the
+   two original imported-pack tier mismatches. Newly published packs are excluded
+   from those findings. No unrelated finding or warning is accepted by the test.
+
+The same generated workflow passed on local storage and in a new private
+directory on `/volume2/NASDA2` (NFSv3). Device/inode/parent identities are observed
+through `fs.NewLocal`, fit the schema, and remain usable through repeated full
+crawls and daemon restart. This qualifies the tested adapter/mount behavior,
+not identity continuity across server replacement, remount or every real source.
+Only generated fixtures were written; original source/repository inputs were not
+modified. No real full import, workload backup or production daemon operation ran.
+The final NFS run uses `VAULTIC_TEST_TMPDIR` and asserts observed source device
+153 plus the private repository path. Unprefixed `TEST_TMPDIR` is ignored by
+the helper; earlier such attempts ran locally and are not NFS evidence.
+
+Reproduce the command fixture with an explicit native executable:
+
+```sh
+VAULTICDB_TEST_BINARY=/private/pinned/vaulticdb \
+   go test -race ./cmd/vaultic \
+   -run '^TestIndexBackupReadinessCatalogFirstBootstrap$' -count=1 -timeout=240s
+```
+
+For NFS qualification, also set `VAULTIC_TEST_TMPDIR` to an approved private
+NFS directory, keep socket `TMPDIR` local, and verify the logged source device
+and repository path rather than accepting a passing test label alone.
+
+Retained private evidence is
+`/volume2/NASDA2/vaultic-test-m6/phase0-readiness-WXRjGgxT/`, including named JSON
+test results, native build provenance, executable pins and the evidence manifest.
+The current-source native binary was built with `--locked --features
+test-failpoints` in isolated RAM-backed storage; SHA-256:
+`322d23138c3128dc2245b1c8dd0b48627f3cb77a3475c9dfa8e4909daff79ed1`.
+The final selected race/native run executes 22 top-level tests, 78 including
+subcases, with no skips. It covers the command workflow, existing metadata-only
+guards and memory-to-local WAL handoff, imported-to-verified transitions,
+hardlink/move/deletion, cancellation, publication conflicts/failures, uncertain
+Begin ownership and pack publication outcomes. The two existing command fixtures
+still use the separately pinned repository debug executable
+`0503728b75c412a89207c31e7195f2c2c4ae4aa147239128f3c538f848a5e8e2`;
+the new workflow and native safety tests use the current-source binary above.
+These are focused runs, not a full-suite or full-workload pass.
+
+Known failures were reproduced and classified:
+
+- Default process-test setup follows a stale `target/process-tests` symlink to a
+   removed RAM build and fails before tests execute. The explicit current-source
+   `VAULTICDB_FAILURE_TEST_BINARY` bypasses it without modifying that path;
+   `TestProcessFreshLegacyImportDefersDurabilityUntilCheckpoint` then passes.
+- `TestProcessDrainRejectsEveryMutationClassAndRestarts/begin-transaction` still
+   expects `Unavailable` but receives `FailedPrecondition` wrapping an uncertain
+   Begin reconciliation with underlying `Unavailable: ... draining`. This is an
+   unchanged fail-closed status mismatch, not a successful write or a newly
+   introduced failure. It remains a production-qualification caveat; the other
+   five mutation subcases pass. Do not retry an uncertain operation merely because
+   the underlying cause is unavailable.
+
+**Minimum Phase 1 follow-through:** reproduce and fix the imported-pack placement
+and tier-summary transition transactionally, including aggregate consistency;
+do not guess imported tiers or suppress the checker finding. Then change the
+explicit blocker regression into a clean post-backup audit gate. Add the guarded
+sequential bootstrap/readiness supervisor and full-run observation already
+specified below. It must bind checks and exact catalog/snapshot coverage to the
+candidate generation, keep deferred history explicit, reject failed or uncertain
+stages, and freeze source identity continuity assumptions. The checker uses two
+workers/two RPCs in this fixture because unbounded host-derived defaults can
+exceed native scan-stream admission. This is a bounded fixture setting, not a
+large-run performance recommendation.
 
 ## How Inode Discovery Works
 
@@ -222,6 +337,10 @@ There is no prerequisite five-pair candidate benchmark,
 25 percent gain, full RAM/KV/auto matrix or historical inode backfill.
 
 ### Phase 0: Prove the Minimal Workflow on Small Fixtures
+
+**Status:** completed via the specific-blocker exit; see
+[Phase 0 evidence](#phase-0-evidence-2026-10-28). The post-backup tier audit remains
+a readiness blocker for Phase 1, not an accepted clean check.
 
 **Inputs:** current source/daemon builds, this backup-first contract, private
 generated repositories with shared trees, missing identities and multiple snapshots.

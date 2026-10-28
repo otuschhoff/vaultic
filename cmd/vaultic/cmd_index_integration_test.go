@@ -1,20 +1,26 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/otuschhoff/vaultic/internal/backend"
+	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/feature"
+	"github.com/otuschhoff/vaultic/internal/fs"
 	"github.com/otuschhoff/vaultic/internal/global"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/maintenance"
+	"github.com/otuschhoff/vaultic/internal/index/reconcile"
 	"github.com/otuschhoff/vaultic/internal/index/schema"
 	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/test"
@@ -24,6 +30,582 @@ import (
 
 func TestIndexWorkflowsImportResumeExportCheckAndRepair(t *testing.T) {
 	testIndexWorkflows(t, false)
+}
+
+type readinessReadFS struct {
+	fs.FS
+	readBytes *atomic.Uint64
+}
+
+func (filesystem readinessReadFS) OpenFile(name string, flag int, metadataOnly bool) (fs.File, error) {
+	file, err := filesystem.FS.OpenFile(name, flag, metadataOnly)
+	if err != nil {
+		return nil, err
+	}
+	return readinessReadFile{File: file, readBytes: filesystem.readBytes}, nil
+}
+
+type readinessReadFile struct {
+	fs.File
+	readBytes *atomic.Uint64
+}
+
+func (file readinessReadFile) Read(buffer []byte) (int, error) {
+	count, err := file.File.Read(buffer)
+	file.readBytes.Add(uint64(count))
+	return count, err
+}
+
+type readinessUnknownIdentityFS struct {
+	fs.FS
+}
+
+func (filesystem readinessUnknownIdentityFS) Lstat(name string) (*fs.ExtendedFileInfo, error) {
+	info, err := filesystem.FS.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	unknown := *info
+	unknown.DeviceID = 0
+	unknown.Inode = 0
+	return &unknown, nil
+}
+
+type readinessLegacyIdentityFS struct {
+	fs.FS
+	omissions *atomic.Uint64
+}
+
+func (filesystem readinessLegacyIdentityFS) OpenFile(name string, flag int, metadataOnly bool) (fs.File, error) {
+	file, err := filesystem.FS.OpenFile(name, flag, metadataOnly)
+	if err != nil || filepath.Base(name) != "alias" {
+		return file, err
+	}
+	return readinessLegacyIdentityFile{File: file, omissions: filesystem.omissions}, nil
+}
+
+func (filesystem readinessLegacyIdentityFS) Lstat(name string) (*fs.ExtendedFileInfo, error) {
+	if filepath.Base(name) == "alias" {
+		return (readinessUnknownIdentityFS{FS: filesystem.FS}).Lstat(name)
+	}
+	return filesystem.FS.Lstat(name)
+}
+
+type readinessLegacyIdentityFile struct {
+	fs.File
+	omissions *atomic.Uint64
+}
+
+func (file readinessLegacyIdentityFile) Stat() (*fs.ExtendedFileInfo, error) {
+	info, err := file.File.Stat()
+	if err != nil {
+		return nil, err
+	}
+	unknown := *info
+	unknown.DeviceID = 0
+	unknown.Inode = 0
+	return &unknown, nil
+}
+
+func (file readinessLegacyIdentityFile) ToNode(ignoreXattrListError bool, warnf func(string, ...any)) (*data.Node, error) {
+	node, err := file.File.ToNode(ignoreXattrListError, warnf)
+	if err != nil {
+		return nil, err
+	}
+	node.DeviceID = 0
+	node.Inode = 0
+	file.omissions.Add(1)
+	return node, nil
+}
+
+type readinessFailSnapshotBackend struct {
+	backend.Backend
+	attempts *atomic.Uint64
+}
+
+func (storage readinessFailSnapshotBackend) Save(ctx context.Context, handle backend.Handle, reader backend.RewindReader) error {
+	if handle.Type == backend.SnapshotFile {
+		storage.attempts.Add(1)
+		return errors.New("readiness fixture snapshot publication failure")
+	}
+	return storage.Backend.Save(ctx, handle, reader)
+}
+
+func TestIndexBackupReadinessCatalogFirstBootstrap(t *testing.T) {
+	binary := os.Getenv("VAULTICDB_TEST_BINARY")
+	if binary == "" {
+		t.Skip("explicit private native fixture binary required")
+	}
+	env, cleanup := withTestEnvironment(t)
+	defer cleanup()
+	env.globalOptions.BackendTestHook = nil
+	testRunInit(t, env.globalOptions)
+	if err := os.MkdirAll(filepath.Join(env.testdata, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"first", "nested/alias"} {
+		if err := os.WriteFile(filepath.Join(env.testdata, name), []byte("shared legacy bytes\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Link(filepath.Join(env.testdata, "first"), filepath.Join(env.testdata, "hardlink")); err != nil {
+		t.Fatal(err)
+	}
+	live, err := fs.NewLocal().Lstat(filepath.Join(env.testdata, "first"))
+	if err != nil || live.DeviceID == 0 || live.DeviceID > uint64(^uint32(0)) || live.Inode == 0 || live.Links != 2 {
+		t.Fatalf("unsupported live fixture identity: %+v, %v", live, err)
+	}
+	parent, err := fs.NewLocal().Lstat(env.testdata)
+	if err != nil || parent.DeviceID != live.DeviceID || parent.Inode == 0 {
+		t.Fatalf("unsupported live parent identity: %+v, %v", parent, err)
+	}
+	t.Logf("adapter identity: device=%d inode=%d parent_inode=%d hardlinks=%d", live.DeviceID, live.Inode, parent.Inode, live.Links)
+	firstMetadata, err := os.Stat(filepath.Join(env.testdata, "first"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacyOmissions atomic.Uint64
+	testRunBackup(t, "", []string{env.testdata}, backupOptions{FSTestHook: func(filesystem fs.FS) fs.FS {
+		return readinessLegacyIdentityFS{FS: filesystem, omissions: &legacyOmissions}
+	}}, env.globalOptions)
+	if legacyOmissions.Load() == 0 {
+		t.Fatal("legacy fixture did not contain unavailable file identity")
+	}
+	legacy := getSnapshot(t, testListSnapshots(t, env.globalOptions, 1)[0], env)
+	legacy.Time = legacy.Time.Add(time.Second)
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		printer := progress.NewTerminalPrinter(globalOptions.JSON, globalOptions.Verbosity, globalOptions.Term)
+		ctx, repo, unlock, err := openWithReadLock(ctx, globalOptions, false, printer)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		_, err = data.SaveSnapshot(ctx, repo, legacy)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	historical := testListSnapshots(t, env.globalOptions, 2)
+	originalDigest, originalFiles, originalBytes := m5Files(t, env.testdata, false)
+	runtime, err := os.MkdirTemp("", "r0-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(runtime)
+	if err := os.Chmod(runtime, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	socket := filepath.Join(runtime, "d.sock")
+	config := daemon.Options{Socket: socket, RepositoryID: repositoryID(t, env), DaemonPath: binary,
+		DataDir: filepath.Join(env.base, "readiness-db"), WALDataDir: filepath.Join(env.base, "readiness-wal"), ObjectStore: "local"}
+	client, err := daemon.Ensure(t.Context(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close(context.Background()) }()
+	store := daemon.NewSchemaStore(client)
+	readPrefix := func(prefix string) []daemon.KeyValue {
+		t.Helper()
+		var entries []daemon.KeyValue
+		var after []byte
+		for {
+			page, done, err := store.ScanPrefix(t.Context(), []byte(prefix), after, 100)
+			if err != nil || len(entries)+len(page) > 1000 || !done && len(page) == 0 {
+				t.Fatalf("fixture scan %s: entries=%d done=%v err=%v", prefix, len(entries)+len(page), done, err)
+			}
+			entries = append(entries, page...)
+			if done {
+				return entries
+			}
+			after = page[len(page)-1].Key
+		}
+	}
+	options := indexImportOptions{Daemon: indexDaemonOptions{Socket: socket}, FromLegacy: true, Resume: true}
+	for _, failure := range []string{"missing-catalog", "canceled", "metadata-only-activation"} {
+		t.Run(failure, func(t *testing.T) {
+			rejected := options
+			rejected.SnapshotMetadataOnly = true
+			rejected.Activate = failure == "metadata-only-activation"
+			err := withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+				if failure == "canceled" {
+					canceled, cancel := context.WithCancel(ctx)
+					cancel()
+					ctx = canceled
+				}
+				_, err := runIndexImport(ctx, rejected, globalOptions, globalOptions.Term)
+				return err
+			})
+			if err == nil {
+				t.Fatal("unsafe snapshot-reference import reported success")
+			}
+			if failure == "canceled" && !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancellation was not propagated: %v", err)
+			}
+		})
+	}
+	if entries := readPrefix("s:"); len(entries) != 0 {
+		t.Fatalf("failed imports published snapshot references: %v", entries)
+	}
+	for _, stage := range []string{"catalog", "snapshots"} {
+		options.SnapshotMetadataOnly = stage == "snapshots"
+		err := withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+			result, err := runIndexImport(ctx, options, globalOptions, globalOptions.Term)
+			if result.TreesVisited != 0 || result.NodesVisited != 0 || result.CrawlDebtCreated != 0 {
+				t.Fatalf("%s traversed historical metadata: %+v", stage, result)
+			}
+			if stage == "snapshots" && result.SnapshotsImported != 2 {
+				t.Fatalf("snapshot reference import: %+v", result)
+			}
+			return err
+		})
+		if err != nil {
+			t.Fatalf("%s: %v", stage, err)
+		}
+	}
+	imported := make(map[string][]byte)
+	for _, prefix := range []string{"b:", "p:", "s:"} {
+		entries := readPrefix(prefix)
+		if len(entries) == 0 {
+			t.Fatalf("empty imported %s catalog", prefix)
+		}
+		t.Logf("imported catalog: prefix=%s records=%d", prefix, len(entries))
+		for _, entry := range entries {
+			imported[string(entry.Key)] = entry.Value
+		}
+	}
+	var sharedRoot schema.ID
+	for _, id := range historical {
+		record, err := schema.UnmarshalSnapshotRecord(imported[string(schema.SnapshotKey(schema.ID(id)))])
+		if err != nil || record.LegacyTree == (schema.ID{}) || record.RootInode != 0 || record.RootFSID != 0 {
+			t.Fatalf("historical reference acquired invented identity: %+v, %v", record, err)
+		}
+		if sharedRoot != (schema.ID{}) && sharedRoot != record.LegacyTree {
+			t.Fatal("fixture snapshots do not share their legacy tree")
+		}
+		sharedRoot = record.LegacyTree
+	}
+	for _, prefix := range []string{"iv:", "dv:", "q:"} {
+		entries, _, err := store.ScanPrefix(t.Context(), []byte(prefix), nil, 10)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("historical graph unexpectedly materialized: prefix=%s entries=%d err=%v", prefix, len(entries), err)
+		}
+	}
+	root, err := schema.UnmarshalBlobRecord(imported[string(schema.BlobKey(sharedRoot))])
+	if err != nil || len(root.Locations) == 0 {
+		t.Fatalf("missing root location: %+v, %v", root, err)
+	}
+	location := root.Locations[0]
+	packName := vaultic.ID(location.PackID).String()
+	packPath := filepath.Join(env.repo, "data", packName[:2], packName)
+	packBytes, err := os.ReadFile(packPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, failure := range []string{"corrupt-tree", "missing-tree"} {
+		t.Run(failure, func(t *testing.T) {
+			t.Cleanup(func() {
+				if err := os.WriteFile(packPath, packBytes, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			})
+			if failure == "missing-tree" {
+				err = os.Remove(packPath)
+			} else {
+				corrupt := bytes.Clone(packBytes)
+				corrupt[location.Offset] ^= 0xff
+				err = os.WriteFile(packPath, corrupt, 0o600)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			uncached := env.globalOptions
+			uncached.NoCache = true
+			if _, _, err := testRunCheckOutput(t, uncached, true); err == nil {
+				t.Fatal("repository check accepted an unreadable historical tree")
+			}
+			if err := testRunRestoreAssumeFailure(t, historical[0].String(), restoreOptions{Target: t.TempDir(), Verify: true}, uncached); err == nil {
+				t.Fatal("restore accepted an unreadable historical tree")
+			}
+		})
+	}
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		result, err := runIndexCheck(ctx, indexCheckOptions{Daemon: options.Daemon, MaxFindings: 100, Workers: 2, RPCConcurrency: 2}, globalOptions, globalOptions.Term)
+		if !result.Clean() || result.HasWarnings() {
+			t.Fatalf("catalog-first check: %+v", result)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	testRunCheck(t, env.globalOptions)
+	defer feature.TestSetFlag(t, feature.Flag, feature.SlateDBAuthoritative, true)()
+	options.SnapshotMetadataOnly = false
+	options.Activate = true
+	err = withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+		result, err := runIndexImport(ctx, options, globalOptions, globalOptions.Term)
+		if result.TreesVisited != 0 || result.IndexesResumed == 0 {
+			t.Fatalf("fixture activation retraversed history: %+v", result)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.globalOptions.MetadataDaemonSocket = socket
+	verifyRestore := func(id vaultic.ID, digest string, files, size uint64) {
+		t.Helper()
+		target, err := os.MkdirTemp(env.base, "restore-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = testRunRestoreAssumeFailure(t, id.String()+":"+toPathInSnapshot(env.testdata), restoreOptions{Target: target, Verify: true}, env.globalOptions)
+		if err != nil {
+			t.Fatal(err)
+		}
+		actualDigest, actualFiles, actualBytes := m5Files(t, target, false)
+		if actualDigest != digest || actualFiles != files || actualBytes != size {
+			t.Fatalf("restored content mismatch: %s %d %d; want %s %d %d", actualDigest, actualFiles, actualBytes, digest, files, size)
+		}
+		first, err := os.Stat(filepath.Join(target, "first"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first.Mode().Perm() != firstMetadata.Mode().Perm() || !first.ModTime().Equal(firstMetadata.ModTime()) {
+			t.Fatalf("restored file metadata mismatch: mode=%v mtime=%v", first.Mode(), first.ModTime())
+		}
+		linked, err := os.Stat(filepath.Join(target, "hardlink"))
+		if err != nil || !os.SameFile(first, linked) {
+			t.Fatal("restored hardlink identity lost", err)
+		}
+	}
+	for _, id := range historical {
+		verifyRestore(id, originalDigest, originalFiles, originalBytes)
+	}
+	var readBytes atomic.Uint64
+	var published []vaultic.ID
+	backup := func() reconcile.Metrics {
+		t.Helper()
+		jsonOptions := env.globalOptions
+		jsonOptions.JSON = true
+		readBytes.Store(0)
+		backupConfig := backupOptions{GroupBy: data.SnapshotGroupByOptions{Host: true, Path: true}, FSTestHook: func(filesystem fs.FS) fs.FS {
+			return readinessReadFS{FS: filesystem, readBytes: &readBytes}
+		}}
+		output, err := testRunBackupOutput(t, backupConfig, jsonOptions, []string{env.testdata})
+		if err != nil {
+			t.Fatalf("authoritative backup: %v\n%s", err, output)
+		}
+		var metrics reconcile.Metrics
+		var observed bool
+		var snapshotID vaultic.ID
+		for _, line := range bytes.Split(output, []byte{'\n'}) {
+			var kind struct {
+				MessageType string     `json:"message_type"`
+				SnapshotID  vaultic.ID `json:"snapshot_id"`
+			}
+			if err := json.Unmarshal(line, &kind); err != nil {
+				if len(bytes.TrimSpace(line)) != 0 {
+					t.Fatal(err)
+				}
+				continue
+			}
+			if kind.MessageType == "summary" {
+				snapshotID = kind.SnapshotID
+			}
+			if kind.MessageType == "reconciliation_stats" {
+				if err := json.Unmarshal(line, &metrics); err != nil {
+					t.Fatal(err)
+				}
+				observed = true
+			}
+		}
+		if !observed || metrics.Failed != 0 || metrics.Deferred != 0 || metrics.Reconciled+metrics.Reused == 0 || snapshotID == (vaultic.ID{}) {
+			t.Fatalf("incomplete authoritative reconciliation: %+v\n%s", metrics, output)
+		}
+		t.Logf("snapshot=%s scanned=%d changed=%d reused=%d reconciled=%d deferred=%d failed=%d source_read_bytes=%d", snapshotID,
+			metrics.Scanned, metrics.Changed, metrics.Reused, metrics.Reconciled, metrics.Deferred, metrics.Failed, readBytes.Load())
+		published = append(published, snapshotID)
+		return metrics
+	}
+	first := backup()
+	if first.Reused != 0 || first.Changed == 0 || readBytes.Load() == 0 {
+		t.Fatalf("first backup trusted unverified history: %+v", first)
+	}
+	second := backup()
+	if second.Reused == 0 || second.Changed != 0 || readBytes.Load() != 0 {
+		t.Fatalf("second full crawl failed verified reuse: %+v", second)
+	}
+	if err := os.Rename(filepath.Join(env.testdata, "nested"), filepath.Join(env.testdata, "moved")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(env.testdata, "moved/alias")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(env.testdata, "moved/alias"), []byte("replacement content\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed := backup()
+	if changed.Changed == 0 {
+		t.Fatalf("changed full crawl missed replacement: %+v", changed)
+	}
+	digest, files, size := m5Files(t, env.testdata, false)
+	ids := testListSnapshots(t, env.globalOptions, 5)
+	expected := make(map[vaultic.ID]bool)
+	for _, id := range append(append(vaultic.IDs{}, historical...), published...) {
+		expected[id] = true
+	}
+	if len(expected) != 5 {
+		t.Fatalf("expected five distinct snapshots: %v", expected)
+	}
+	for _, id := range ids {
+		if !expected[id] {
+			t.Fatalf("unexpected snapshot %s", id)
+		}
+	}
+	graph := make(map[string][]daemon.KeyValue)
+	for _, prefix := range []string{"b:", "p:", "s:", "i:", "d:", "iv:", "dv:"} {
+		graph[prefix] = readPrefix(prefix)
+		if len(graph[prefix]) == 0 {
+			t.Fatalf("missing published graph records: %s", prefix)
+		}
+	}
+	for key, value := range imported {
+		actual, found, err := store.Get(t.Context(), []byte(key))
+		if err != nil || !found || !bytes.Equal(value, actual) {
+			t.Fatalf("imported catalog/reference changed: %x, found=%v err=%v", key, found, err)
+		}
+	}
+	if err := client.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	client, err = daemon.Ensure(t.Context(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store = daemon.NewSchemaStore(client)
+	for prefix, entries := range graph {
+		if !reflect.DeepEqual(entries, readPrefix(prefix)) {
+			t.Fatalf("catalog/revision graph changed across restart: %s", prefix)
+		}
+	}
+	for _, id := range published {
+		value, found, err := store.Get(t.Context(), schema.SnapshotKey(schema.ID(id)))
+		if err != nil || !found {
+			t.Fatalf("missing published snapshot %s: %v", id, err)
+		}
+		record, err := schema.UnmarshalSnapshotRecord(value)
+		if err != nil || record.LegacyTree != (schema.ID{}) || record.RootRevision == 0 || record.CommitSequence == 0 {
+			t.Fatalf("published snapshot lacks verified scope: %+v, %v", record, err)
+		}
+		rootKey := schema.DirectoryRevisionKey(record.RootFSID, record.RootInode, record.RootRevision)
+		value, found, err = store.Get(t.Context(), rootKey)
+		if err != nil || !found {
+			t.Fatalf("published snapshot root missing after restart: %x, %v", rootKey, err)
+		}
+		if _, err := schema.UnmarshalDirectoryRevision(value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, entry := range graph["iv:"] {
+		record, err := schema.UnmarshalInodeRevision(entry.Value)
+		if err != nil || record.Freshness != schema.FreshnessVerified {
+			t.Fatalf("live inode revision is not verified: %+v, %v", record, err)
+		}
+	}
+	t.Run("post-backup-derived-tier-blocker", func(t *testing.T) {
+		err := withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+			result, err := runIndexCheck(ctx, indexCheckOptions{Daemon: options.Daemon, MaxFindings: 100, Workers: 2, RPCConcurrency: 2}, globalOptions, globalOptions.Term)
+			if err == nil || result.Clean() || !result.Coverage.Complete || result.HasWarnings() || result.DerivedTierMismatch != 2 || len(result.Findings) != 2 {
+				t.Fatalf("Phase 1 compatibility blocker changed: %+v, %v", result, err)
+			}
+			for _, finding := range result.Findings {
+				id, parseErr := vaultic.ParseID(finding.Key)
+				if parseErr != nil || finding.Kind != "derived_tier_mismatch" || finding.Want != "single" || finding.Got != "unknown" {
+					t.Fatalf("unexpected metadata finding: %+v", finding)
+				}
+				if _, importedPack := imported[string(schema.PackKey(schema.ID(id)))]; !importedPack {
+					t.Fatalf("newly published pack has a tier mismatch: %+v", finding)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+	for _, id := range append(append(vaultic.IDs{}, historical...), published[:2]...) {
+		verifyRestore(id, originalDigest, originalFiles, originalBytes)
+	}
+	verifyRestore(published[2], digest, files, size)
+	testRunCheck(t, env.globalOptions)
+	t.Run("backup-canceled", func(t *testing.T) {
+		err := withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
+			ctx, cancel := context.WithCancel(ctx)
+			cancel()
+			return runBackup(ctx, backupOptions{}, globalOptions, globalOptions.Term, []string{env.testdata})
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled backup reported wrong outcome: %v", err)
+		}
+		testListSnapshots(t, env.globalOptions, 5)
+	})
+	t.Run("snapshot-publication-failure", func(t *testing.T) {
+		var attempts atomic.Uint64
+		failing := env.globalOptions
+		failing.JSON = true
+		failing.BackendTestHook = func(storage backend.Backend) (backend.Backend, error) {
+			return readinessFailSnapshotBackend{Backend: storage, attempts: &attempts}, nil
+		}
+		output, err := testRunBackupOutput(t, backupOptions{}, failing, []string{env.testdata})
+		if err == nil || attempts.Load() == 0 {
+			t.Fatalf("publication failure did not propagate: attempts=%d err=%v\n%s", attempts.Load(), err, output)
+		}
+		for _, line := range bytes.Split(output, []byte{'\n'}) {
+			var event struct {
+				SnapshotID string `json:"snapshot_id"`
+			}
+			if json.Unmarshal(line, &event) == nil && event.SnapshotID != "" {
+				t.Fatalf("failed publication reported committed snapshot: %s", line)
+			}
+		}
+		testListSnapshots(t, env.globalOptions, 5)
+	})
+	t.Run("unavailable-live-identity", func(t *testing.T) {
+		before := readPrefix("i:")
+		jsonOptions := env.globalOptions
+		jsonOptions.JSON = true
+		output, err := testRunBackupOutput(t, backupOptions{FSTestHook: func(filesystem fs.FS) fs.FS {
+			return readinessUnknownIdentityFS{FS: filesystem}
+		}}, jsonOptions, []string{env.testdata})
+		if err == nil {
+			t.Fatalf("unavailable root identity reported successful backup:\n%s", output)
+		}
+		var deferred uint64
+		for _, line := range bytes.Split(output, []byte{'\n'}) {
+			var event struct {
+				MessageType string `json:"message_type"`
+				Deferred    uint64 `json:"deferred"`
+				SnapshotID  string `json:"snapshot_id"`
+			}
+			if json.Unmarshal(line, &event) == nil {
+				if event.SnapshotID != "" {
+					t.Fatalf("unavailable identity acknowledged snapshot: %s", line)
+				}
+				if event.MessageType == "reconciliation_stats" {
+					deferred = event.Deferred
+				}
+			}
+		}
+		if deferred == 0 || !reflect.DeepEqual(before, readPrefix("i:")) {
+			t.Fatalf("unknown identities were not preserved as deferred: deferred=%d", deferred)
+		}
+		testListSnapshots(t, env.globalOptions, 5)
+	})
+	if stdout, stderr, err := testRunCheckOutput(t, env.globalOptions, false); err != nil {
+		t.Fatalf("failed publication damaged existing snapshots: %v\n%s\n%s", err, stdout, stderr)
+	}
 }
 
 func TestIndexSnapshotMetadataOnly(t *testing.T) {
