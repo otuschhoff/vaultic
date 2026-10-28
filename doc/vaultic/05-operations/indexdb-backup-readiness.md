@@ -538,6 +538,36 @@ mandatory. This phase prepares execution, not production deployment.
 
 ### Phase 2: Complete the First Observed Full Backup
 
+**Status (2026-10-28): blocked before execution, not accepted.** Read-only
+preflight against Phase 1 commit `ed595bbc9e8804dc8ac57ceeccdbeece2c609902`
+reverified all 271 prior evidence checksums and the four accepted fixture outcomes.
+All 52 configured source roots are available; the original profile matches the
+prior frozen pilot, and directory-name counts remain 10,170 indexes and 143
+snapshots. Available NFS space was 283,030,914,727,936 bytes, above the frozen
+floor. These checks do not verify all pack/blob contents or qualify source
+identity continuity; root device/inode observations are only point-in-time facts.
+
+Separate approval of a reviewed independently writable real target was requested
+but was unavailable. No repository copy, sealed execution contract, import,
+activation, backup or production change was performed. In the current namespace,
+none of the 55 protected paths (52 source roots plus repository/profile/password)
+has kernel read-only protection. A properly reviewed launch sandbox must establish
+and reverify that protection; file permissions or an unprotected direct invocation
+are not substitutes. Do not mount/remount host sources or change production to
+work around this gate. The private create-only preflight report, source-root
+identities and checksums are retained under
+`/volume2/NASDA2/vaultic-test-m6/phase2-preflight-20261028`.
+
+**Resume:** obtain explicit private-target approval, prepare an independent
+writable copy with no shared writable files, qualify identity continuity for all
+source mounts, and freeze the complete inventory and explicit historical restore
+IDs. Seal/validate the existing supervisor contract and run it inside the approved
+read-only-input/private-write sandbox. Revalidate profile, source identities,
+capacity, pins and limits at launch; the preflight is not a reusable execution
+authorization. Retain the acknowledged snapshot, complete checks/restores/reopen
+evidence and full-run metrics before changing this status to accepted. No further
+implementation or optimization is justified solely by the missing approval.
+
 **Inputs:** Phase 1 acceptance, reviewed private writable target, full source scope,
 resource limits, observers and rollback/stop plan.
 
