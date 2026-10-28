@@ -65,6 +65,10 @@ The [metadata resilience runbook](05-operations/metadata-resilience.md) covers
 bootstrap recovery, writer transfer, deferred crawl guarantees, journal
 reconciliation and emergency restore, quotas, expiry, and abandonment.
 
+The [indexdb backup readiness design](05-operations/indexdb-backup-readiness.md)
+assesses import, checks, live inode discovery and backup, and defines gated
+execution phases for qualifying regular indexdb-backed backups.
+
 ## Conventions
 
 - Every document links back to its section index and, where useful, sideways
