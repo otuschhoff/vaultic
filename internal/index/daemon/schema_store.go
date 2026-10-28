@@ -14,7 +14,6 @@ import (
 	"github.com/otuschhoff/vaultic/internal/repository/crypto"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
-	"github.com/otuschhoff/vaultic/internal/workingstate"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -906,16 +905,19 @@ func (s *SchemaStore) EnableFreshLegacyImport() {
 }
 
 func (s *SchemaStore) EnableFreshLegacyImportContext(ctx context.Context) {
-	if workingstate.PolicyFrom(ctx) == nil {
-		s.freshImportSeen = newIDSeenFilter(freshImportInitialCapacity, freshImportSeenMaxBytes, freshImportFalsePositive)
-	} else {
-		s.freshImportSeen = &idSeenFilter{fallbackToDatabase: true}
-	}
+	s.ReleaseFreshLegacyImport()
+	s.freshImportSeen = newIDSeenFilterContext(ctx, freshImportInitialCapacity, freshImportSeenMaxBytes, freshImportFalsePositive)
 	s.legacySplitMu.Lock()
 	if s.legacySplitAuth == nil {
 		s.legacySplitAuth = make(map[schema.ID]struct{})
 	}
 	s.legacySplitMu.Unlock()
+}
+
+func (s *SchemaStore) ReleaseFreshLegacyImport() {
+	if s.freshImportSeen != nil {
+		s.freshImportSeen.close()
+	}
 }
 
 func (s *SchemaStore) EnableDeferredLegacyImportCleanup() error {
