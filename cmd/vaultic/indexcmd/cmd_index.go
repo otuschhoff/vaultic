@@ -20,10 +20,12 @@ import (
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/index/legacyimport"
 	"github.com/otuschhoff/vaultic/internal/index/maintenance"
+	"github.com/otuschhoff/vaultic/internal/index/schema"
 	"github.com/otuschhoff/vaultic/internal/observability"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	"github.com/otuschhoff/vaultic/internal/ui"
 	"github.com/otuschhoff/vaultic/internal/ui/progress"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -383,6 +385,9 @@ type indexImportOptions struct {
 	ForceResetOldIndex         bool
 	DryRun                     bool
 	Activate                   bool
+	ActivationGeneration       uint64
+	ActivationSequence         uint64
+	ActivationSnapshots        uint64
 	FromLegacy                 bool
 	BatchSize                  uint32
 	PackWorkers                uint
@@ -649,6 +654,9 @@ func newIndexImportCommand(globalOptions *global.Options) *cobra.Command {
 	)
 	flags.BoolVar(&options.DryRun, "dry-run", false, "scan and validate without writing SlateDB")
 	flags.BoolVar(&options.Activate, "activate", false, "make SlateDB authoritative after a complete import")
+	flags.Uint64Var(&options.ActivationGeneration, "activation-generation", 0, "require this previously checked metadata generation for catalog-first activation")
+	flags.Uint64Var(&options.ActivationSequence, "activation-sequence", 0, "require this previously checked revision sequence for catalog-first activation")
+	flags.Uint64Var(&options.ActivationSnapshots, "activation-snapshots", 0, "require this complete historical snapshot-reference count for catalog-first activation")
 	flags.BoolVar(&options.FromLegacy, "from-legacy", true, "import from legacy JSON indexes")
 	flags.BoolVar(&options.ImportDeferCleanup, "import-defer-cleanup", false, "defer receipt cleanup durability during a fresh memory- or RADOS-WAL import")
 	flags.Uint32Var(&options.BatchSize, "batch-size", 0, "maximum mutations per daemon transaction batch (zero uses daemon limit)")
@@ -1032,6 +1040,12 @@ func validateIndexImportOptions(options indexImportOptions) (indexImportOptions,
 	if !options.FromLegacy {
 		return options, fmt.Errorf("no import source selected; --from-legacy is currently required")
 	}
+	if options.ActivationGeneration != 0 || options.ActivationSequence != 0 || options.ActivationSnapshots != 0 {
+		if !options.Activate || !options.Resume || options.ActivationGeneration == 0 || options.ActivationSnapshots == 0 ||
+			options.SnapshotDepth != 0 || options.DryRun || options.ForceResetOldIndex || options.WorkBudget != 0 || options.SnapshotWorkBudget != 0 {
+			return options, fmt.Errorf("catalog-first activation requires resume, checked generation, complete snapshot count and no traversal or work limits")
+		}
+	}
 	if (options.SnapshotDebtWriteOverlap || options.SnapshotTreePrefetch) && (!options.ForceResetOldIndex || options.SnapshotMetadataOnly || options.DryRun) {
 		return options, fmt.Errorf("experimental snapshot overlap/prefetch requires a fresh non-dry-run traversal import")
 	}
@@ -1129,6 +1143,66 @@ func activateImportedIndex(
 ) error {
 	if client == nil {
 		return fmt.Errorf("repository is already SlateDB-authoritative")
+	}
+	if options.ActivationGeneration != 0 {
+		store := daemon.NewSchemaStore(client)
+		session, err := store.BeginReadSession(ctx)
+		if err != nil {
+			return fmt.Errorf("pin catalog-first activation: %w", err)
+		}
+		defer session.Close(context.WithoutCancel(ctx))
+		ctx = session.Context()
+		if session.Identity.Generation != options.ActivationGeneration || session.Identity.Sequence != options.ActivationSequence {
+			return fmt.Errorf("catalog-first activation generation or sequence changed since validation")
+		}
+		var count uint64
+		if err := repo.List(ctx, vaultic.SnapshotFile, func(id vaultic.ID, _ int64) error {
+			value, found, err := session.Get(ctx, schema.SnapshotKey(schema.ID(id)))
+			if err != nil {
+				return err
+			}
+			if !found {
+				return fmt.Errorf("catalog-first activation missing snapshot %s", id)
+			}
+			record, err := schema.UnmarshalSnapshotRecord(value)
+			if err != nil {
+				return err
+			}
+			if record.LegacyTree == (schema.ID{}) || record.RootRevision != 0 {
+				return fmt.Errorf("catalog-first activation requires deferred historical references")
+			}
+			value, found, err = session.Get(ctx, schema.BlobKey(record.LegacyTree))
+			if err != nil {
+				return err
+			}
+			if !found {
+				return fmt.Errorf("catalog-first activation missing legacy root")
+			}
+			blob, err := schema.UnmarshalBlobRecord(value)
+			if err != nil {
+				return fmt.Errorf("catalog-first activation invalid legacy root: %w", err)
+			}
+			if len(blob.Locations) == 0 {
+				return fmt.Errorf("catalog-first activation legacy root has no locations")
+			}
+			count++
+			return nil
+		}); err != nil {
+			return err
+		}
+		if count != options.ActivationSnapshots {
+			return fmt.Errorf("catalog-first activation snapshot count %d, expected %d", count, options.ActivationSnapshots)
+		}
+		debt, _, err := session.ScanPrefix(ctx, []byte("q:"), nil, 1)
+		if err != nil {
+			return fmt.Errorf("catalog-first activation has unresolved crawl debt: %w", err)
+		}
+		if len(debt) != 0 {
+			return fmt.Errorf("catalog-first activation has unresolved crawl debt")
+		}
+		if err := session.Validate(ctx); err != nil {
+			return fmt.Errorf("validate catalog-first activation session: %w", err)
+		}
 	}
 	if err := repo.EnableSlateDBAuthority(ctx, client); err != nil {
 		return fmt.Errorf("activate SlateDB authority: %w", err)
@@ -1694,14 +1768,26 @@ func runIndexRebuildPackStats(
 		return result, err
 	}
 	defer unlock()
-	store, _, closeStore, err := openIndexStore(ctx, repo, options.Daemon)
+	storeSession, err := openStoreSession(ctx, repo, options.Daemon)
 	if err != nil {
 		return result, err
 	}
-	defer closeStore()
+	defer storeSession.CloseAndLog()
+	store := storeSession.Store
 	placementModel, err := indexMaintenancePlacementModel(repo)
 	if err != nil {
 		return result, err
+	}
+	if !options.DryRun {
+		role, roleErr := storeSession.Client.WriterStatus(ctx)
+		if roleErr != nil {
+			return result, roleErr
+		}
+		if role.Role == "read-only" {
+			if _, roleErr := storeSession.Client.PromoteWriter(ctx, "rebuild pack statistics under exclusive repository lock"); roleErr != nil {
+				return result, roleErr
+			}
+		}
 	}
 	result.PlacementRecordsChanged, err = maintenance.RebuildPlacementRecords(ctx, store, placementModel, options.DryRun)
 	if err != nil {

@@ -163,6 +163,76 @@ type packChange struct {
 	current schema.PackRecord
 }
 
+func (store *SchemaStore) ReconcilePackTier(ctx context.Context, id schema.ID, expected schema.PackRecord, placements map[uint64]schema.PlacementRecord, tier schema.PackTier) error {
+	transaction, err := store.client.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer rollbackTransaction(ctx, transaction)
+	key := schema.PackKey(id)
+	value, found, err := transaction.Get(ctx, key)
+	if err != nil {
+		return err
+	}
+	want, err := expected.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	if !found || !bytes.Equal(value, want) {
+		return status.Error(codes.Aborted, "pack changed during tier reconciliation")
+	}
+	prefix := schema.PackPlacementKey(id, 0)
+	prefix = prefix[:len(prefix)-8]
+	var after []byte
+	seen := 0
+	for {
+		entries, done, err := transaction.ScanPage(ctx, prefix, after, 128)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			parsed, err := schema.ParseKey(entry.Key)
+			if err != nil {
+				return err
+			}
+			placement, exists := placements[parsed.Backend]
+			encoded, err := placement.MarshalBinary()
+			if err != nil {
+				return err
+			}
+			if !exists || !bytes.Equal(encoded, entry.Value) {
+				return status.Error(codes.Aborted, "placements changed during tier reconciliation")
+			}
+			seen++
+		}
+		if done {
+			break
+		}
+		if len(entries) == 0 {
+			return status.Error(codes.Aborted, "placement scan made no progress")
+		}
+		after = entries[len(entries)-1].Key
+	}
+	if seen != len(placements) {
+		return status.Error(codes.Aborted, "placements changed during tier reconciliation")
+	}
+	updated := expected
+	updated.Tier = tier
+	encoded, err := updated.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	puts, err := applyPackAggregateDeltas(ctx, transaction, []packChange{{packID: id, old: &expected, current: updated}}, false)
+	if err != nil {
+		return err
+	}
+	puts = append(puts, Mutation{Key: key, Value: encoded})
+	if err := writeTransactionBatches(ctx, transaction, store.client.Limits(), puts, nil); err != nil {
+		return err
+	}
+	return transaction.Commit(ctx)
+}
+
 // applyPackAggregateDeltas folds several pack changes into one read-modify-write
 // of each aggregate. Calling updatePackAggregates per pack inside a single
 // transaction would be wrong: the reads would not observe the pending puts from

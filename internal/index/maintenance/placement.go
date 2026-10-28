@@ -208,6 +208,9 @@ func RebuildBackendPackIndex(ctx context.Context, store Store, dryRun bool) (cha
 }
 
 func RebuildDerivedTierSummary(ctx context.Context, store Store, model PlacementModel, dryRun bool) (changes uint64, resultErr error) {
+	tierWriter, _ := store.(interface {
+		ReconcilePackTier(context.Context, schema.ID, schema.PackRecord, map[uint64]schema.PlacementRecord, schema.PackTier) error
+	})
 	ctx, action, owned := monitor.DefaultProductionAccounting().StartOperationIfAbsent(ctx, "placement", "reconcile")
 	if owned {
 		defer func() { action.Done(monitor.ClassifyOutcome(resultErr)) }()
@@ -234,6 +237,15 @@ func RebuildDerivedTierSummary(ctx context.Context, store Store, model Placement
 		if pack.Tier == derived {
 			continue
 		}
+		if tierWriter != nil {
+			if !dryRun {
+				if err := tierWriter.ReconcilePackTier(ctx, schema.ID(packID), pack, placements[packID], derived); err != nil {
+					return changes, err
+				}
+			}
+			changes++
+			continue
+		}
 		pack.Tier = derived
 		encoded, encodeErr := pack.MarshalBinary()
 		if encodeErr != nil {
@@ -242,9 +254,9 @@ func RebuildDerivedTierSummary(ctx context.Context, store Store, model Placement
 		puts = append(puts, daemon.Mutation{Key: schema.PackKey(schema.ID(packID)), Value: encoded})
 	}
 	if dryRun || len(puts) == 0 {
-		return uint64(len(puts)), nil
+		return changes + uint64(len(puts)), nil
 	}
-	return uint64(len(puts)), store.WriteMutableBatch(ctx, puts, nil, false)
+	return changes + uint64(len(puts)), store.WriteMutableBatch(ctx, puts, nil, false)
 }
 
 func RebuildPlacementRecords(ctx context.Context, store Store, model PlacementModel, dryRun bool) (changes uint64, resultErr error) {

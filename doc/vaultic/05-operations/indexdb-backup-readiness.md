@@ -8,7 +8,7 @@
 
 Assessment date: 2026-10-28. Code baseline: `4b174b5c8`, including the
 experimental snapshot checkpoint `cd84d564e`. This is a design and execution
-plan with bounded Phase 0 evidence below, not production approval or a report
+plan with bounded Phase 0 and Phase 1 evidence below, not production approval or a report
 of a completed real-workload run.
 Here, **indexdb** means the daemon-backed VaulticDB/SlateDB metadata engine,
 not the temporary RAM/KV working-state backend.
@@ -87,6 +87,142 @@ A broader test selection encountered a Cargo target-path setup failure before
 the process test could execute. Earlier evidence also records a daemon drain
 status regression. Reproduce and classify both rather than silently excluding
 them from a production qualification gate.
+
+### Phase 1 Evidence and Runbook (2026-10-28)
+
+**Status: fixture-qualified implementation; no real workload or deployment.**
+The Phase 0 tier blocker is repaired by an explicit, supervised
+`index rebuild-pack-stats` step. Native tier reconciliation compares both the
+pack and complete placement evidence transactionally and moves the pack/type/tier
+aggregates together. Stale pack or placement evidence aborts. The original
+automatic creator/timing of imported placements was not established; this is a
+tested explicit compatibility repair, not a claim that import now guesses tiers.
+The command-level post-backup regression now requires a clean, complete audit.
+
+[readiness.py](../../../helpers/phase35-m6/readiness.py) is a separate, fixed
+sequential supervisor reusing the existing pilot and observer. The old comparison
+runner is unchanged. Its command sequence is catalog-only import, snapshot-reference
+import, full index check, repository check with full payload reads and unused-blob
+checking, repeated identity-bound activation check, guarded activation, complete
+profile backup, tier/statistics repair, both post-checks and verified restores of
+the frozen historical selections and every newly acknowledged snapshot. Each
+invocation reopens durable native state; there is no blind retry or failed-run reuse.
+
+The opt-in catalog-first activation flags bind the command, under its exclusive
+repository lock, to the checked generation, revision sequence and complete
+historical snapshot count. The renewable read session checks root locations and
+absence of crawl debt, and is validated again before authority changes. The
+supervisor still requires both preceding checks; these flags alone are not a
+replacement for that evidence. Ordinary full-history activation remains unchanged.
+Historical inode materialization is explicitly deferred in the receipt. No
+destructive maintenance, scheduler installation or production activation is part
+of this supervisor, and its receipt does not authorize those operations.
+
+**Evidence:** the private NFS generated-repository run used source device **153**.
+All 17 supervisor tests executed and passed, including three actual CLI activation
+rejections (changed generation, changed sequence, wrong snapshot count), then
+successful activation, backup, repair, reopen and historical/new restores. The
+final generated source was
+`/volume2/NASDA2/vaultic-test-m6/r1-2def4pe0/source`; its retained fixture and
+evidence manifest are under
+`/volume2/NASDA2/vaultic-test-m6/phase1-readiness-20261028-final-r2`.
+The current-source CLI SHA-256 is
+`3679ae56c7aabb28454b1e60f5bf0472d479cf9f37192dbb373c4ff2cb3f42e6`;
+the unchanged, current-source failpoint daemon SHA-256 is
+`322d23138c3128dc2245b1c8dd0b48627f3cb77a3475c9dfa8e4909daff79ed1`.
+No Rust source changed. These hashes pin fixture executables, not production.
+
+The native/race selection retained 31 passing cases, 10 top-level tests and zero
+skips/failures: catalog-first integration, both new tier tests and all seven named
+read-session tests. Entire `indexcmd` and `maintenance` package race suites passed.
+That final package run retained 490 passing cases, with two macOS Secure Enclave
+enrollment tests skipped on Linux and no failures.
+The activation option table rejects eight unqualified combinations. The unchanged
+pilot's seven self-tests and observer's four self-tests passed. The Phase 0
+process-test target-path and drain-status caveats below remain recorded; this is
+not a full repository or native CI pass.
+
+Supervisor tests cover create-only sealing/receipts, frozen inputs/scope/identity,
+export capacity, redirected/shared writable targets, bounded malformed events,
+missing/invalid counters, incomplete history and source-job coverage, generation
+and sequence changes, PID reuse/cardinality, observer readiness/loss, output
+capacity/runtime failure, no downstream action after failure, and preserving
+committed snapshot IDs after later observation failure. Existing maintenance
+scratch-exhaustion and native read-session renewal/failure regressions also ran.
+
+**Preparation, without execution:** supply an operator-reviewed draft JSON with
+`authorization: "private-target-only"`, canonical `root`, `repository_id`, a short
+private local `socket`, `password_file`, `restores: [{"snapshot": "<full ID>"}]`,
+and `pins` entries containing `path` for `binary`, `daemon`, `profile`,
+`source_profile`, `empty_profile`, `password` and `inventory`. The empty profile
+must actually be empty. The frozen backup profile must preserve the original
+52 sources, negative globs, markers and one-filesystem jobs. Included profiles,
+hooks, stdin/files-from, selective/experimental and skip-if-unchanged modes are
+not qualified. Keep original inputs kernel read-only before execution.
+
+The candidate must already contain a separately approved private writable copy
+of the repository at `root/repo`, not the old pilot's shared-data view. Sealing
+does not copy repository data or grant target approval. Writable symlinks and
+hardlinked files are rejected. The bounded JSONL inventory has one unique entry
+per original config/key/index/snapshot/pack object: `path`, `size`, and `sha256`
+for metadata. All 10,170 indexes, 419,853 packs and 143 snapshots must be covered;
+the import must report all 380,166,821 blob records. Original and candidate
+metadata bytes are compared with the pins; payload integrity is checked by the
+full repository check, not inferred from file sizes.
+
+```sh
+python3.12 helpers/phase35-m6/readiness.py /private/contract.json --seal /private/draft.json
+python3.12 helpers/phase35-m6/readiness.py /private/contract.json
+# Only after separate Phase 2 approval of the real writable target:
+python3.12 helpers/phase35-m6/readiness.py /private/contract.json --execute
+```
+
+The private target must be under the existing authorized evidence root. Sealing
+pins helper/binary/profile/inventory/password hashes, directory device/inode,
+resource/time limits and explicit restore IDs. The actual contract is revalidated
+before every stage. `root/readiness` and its final receipt are create-only; an
+existing run directory is not a resume authorization. The two bootstrap commands
+share one 12-hour budget. Checks retain their 12-hour bound, backup one week,
+RSS 200,000,000,000 bytes, managed memory 160 GiB, scratch 8 GiB and free-space
+floor 57,481,929,687,040 bytes. The repair command does not support the managed
+working-policy flags; it retains external RSS/runtime/disk supervision instead.
+
+The observer pre-opens collectors before launch, pins executable and PID/start
+identity, retains 250-ms RSS safety samples and five-second process diagnostics,
+and reuses import/check five-second native telemetry. Collection continues through
+native cleanup, including a final scratch measurement. Working and temporary
+scratch are summed against the shared 8-GiB ceiling; the regression rejects two
+5-GiB directories even though neither individually exceeds the limit.
+Global metadata launchers create persistent children: native
+graceful shutdown handles **SIGINT**, not SIGTERM. Unsupported-signal cleanup
+left a writer claim in the first fixture; the supported bounded graceful drain
+fixed that failure. No force takeover or automatic retry was introduced.
+
+Limits are 16 owned process identities, 128 source jobs/historical restore
+selections, 2-MiB event lines, 500,000 inventory entries, 512-MiB stdout/stderr per
+stream, 3-GiB safety samples per action, 20-GiB telemetry per action and an 8-TiB
+whole-run artifact ceiling. These are maximum capacities, not allocated output.
+The telemetry allowance covers the maximum accepted event line at five-second
+cadence over a 12-hour action. A 32-MiB physical reserve is released for the final
+receipt. Collector RSS is separately capped at 1 GiB. Raw artifacts and rejected
+stages are hash-bound by the receipt, with UTC/monotonic action timing, resource
+peaks, cleanup outcome and distinct boolean `backup_committed`,
+`verification_passed`, `observation_complete` and `readiness_accepted` fields;
+acknowledged IDs are retained separately. Optional absent counter families and
+unsupported source-call/chunking/compression/encryption timings are nullable.
+The compact cost summary derives bootstrap/backup wall time, logical throughput
+and peak combined RSS only from retained observations; it makes no causal
+bottleneck conclusion from the small fixture.
+CPU comes from identity-bound `/proc` samples; final exit ticks can be unavailable,
+and sampled CPU is not an exact process-exit accounting claim. Native/RPC summed
+time, command wall time, logical bytes and physical I/O remain separate.
+
+**Phase 2 boundary:** the small fixture deliberately substitutes generated inputs
+and test limits, not the frozen production-scale contract. It does not prove that
+the real catalog, full payload check or 52-source backup finishes within its limits.
+Real private-target approval, identity continuity across all source mounts,
+execution receipts, schedule/RPO/RTO and eventual production deployment remain
+separate gates. Performance acceptance and full historical analytics remain deferred.
 
 ### Phase 0 Evidence (2026-10-28)
 
@@ -339,8 +475,8 @@ There is no prerequisite five-pair candidate benchmark,
 ### Phase 0: Prove the Minimal Workflow on Small Fixtures
 
 **Status:** completed via the specific-blocker exit; see
-[Phase 0 evidence](#phase-0-evidence-2026-10-28). The post-backup tier audit remains
-a readiness blocker for Phase 1, not an accepted clean check.
+[Phase 0 evidence](#phase-0-evidence-2026-10-28). Phase 1 subsequently added the
+explicit compatibility repair and clean-audit gate described above.
 
 **Inputs:** current source/daemon builds, this backup-first contract, private
 generated repositories with shared trees, missing identities and multiple snapshots.
@@ -368,6 +504,10 @@ fixture proof. If source identities cannot support safe reconciliation, stop and
 design the minimum stable mapping or qualified safe fallback.
 
 ### Phase 1: Finish Guarded Bootstrap and Full-Run Observation
+
+**Status:** fixture-qualified implementation; see
+[Phase 1 evidence and runbook](#phase-1-evidence-and-runbook-2026-10-28).
+This status authorizes neither a real run nor production deployment.
 
 **Inputs:** Phase 0 proof, frozen real source/profile/exclusions, private target
 plan, pinned binaries and existing pilot/observer helpers.

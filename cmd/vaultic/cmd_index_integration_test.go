@@ -514,20 +514,14 @@ func TestIndexBackupReadinessCatalogFirstBootstrap(t *testing.T) {
 			t.Fatalf("live inode revision is not verified: %+v, %v", record, err)
 		}
 	}
-	t.Run("post-backup-derived-tier-blocker", func(t *testing.T) {
+	t.Run("post-backup-clean-audit", func(t *testing.T) {
 		err := withTermStatus(t, env.globalOptions, func(ctx context.Context, globalOptions global.Options) error {
-			result, err := runIndexCheck(ctx, indexCheckOptions{Daemon: options.Daemon, MaxFindings: 100, Workers: 2, RPCConcurrency: 2}, globalOptions, globalOptions.Term)
-			if err == nil || result.Clean() || !result.Coverage.Complete || result.HasWarnings() || result.DerivedTierMismatch != 2 || len(result.Findings) != 2 {
-				t.Fatalf("Phase 1 compatibility blocker changed: %+v, %v", result, err)
+			if _, err := runIndexRebuildPackStats(ctx, indexRebuildPackStatsOptions{Daemon: options.Daemon}, globalOptions, globalOptions.Term); err != nil {
+				return err
 			}
-			for _, finding := range result.Findings {
-				id, parseErr := vaultic.ParseID(finding.Key)
-				if parseErr != nil || finding.Kind != "derived_tier_mismatch" || finding.Want != "single" || finding.Got != "unknown" {
-					t.Fatalf("unexpected metadata finding: %+v", finding)
-				}
-				if _, importedPack := imported[string(schema.PackKey(schema.ID(id)))]; !importedPack {
-					t.Fatalf("newly published pack has a tier mismatch: %+v", finding)
-				}
+			result, err := runIndexCheck(ctx, indexCheckOptions{Daemon: options.Daemon, MaxFindings: 100, Workers: 2, RPCConcurrency: 2}, globalOptions, globalOptions.Term)
+			if err != nil || !result.Clean() || !result.Coverage.Complete || result.HasWarnings() {
+				t.Fatalf("Phase 1 compatibility blocker changed: %+v, %v", result, err)
 			}
 			return nil
 		})

@@ -1025,6 +1025,40 @@ func TestImportStatsReportsWithoutProgressAndStops(t *testing.T) {
 	stop()
 }
 
+func TestCatalogFirstActivationOptionGuards(t *testing.T) {
+	valid := indexImportOptions{FromLegacy: true, Resume: true, Activate: true,
+		ActivationGeneration: 1, ActivationSnapshots: 2}
+	if _, err := validateIndexImportOptions(valid); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"no-generation", "no-snapshots", "no-activation", "no-resume", "depth-limited", "work-limited", "dry-run", "reset"} {
+		t.Run(name, func(t *testing.T) {
+			options := valid
+			switch name {
+			case "no-generation":
+				options.ActivationGeneration = 0
+			case "no-snapshots":
+				options.ActivationSnapshots = 0
+			case "no-activation":
+				options.Activate = false
+			case "no-resume":
+				options.Resume = false
+			case "depth-limited":
+				options.SnapshotDepth = 1
+			case "work-limited":
+				options.WorkBudget = 1
+			case "dry-run":
+				options.DryRun = true
+			case "reset":
+				options.ForceResetOldIndex = true
+			}
+			if _, err := validateIndexImportOptions(options); err == nil {
+				t.Fatal("unqualified catalog-first activation was accepted")
+			}
+		})
+	}
+}
+
 func TestFormatLegacyOperationStatsIsStableAndSkipsEmpty(t *testing.T) {
 	formatted := formatLegacyOperationStats(map[string]daemon.DurationDistribution{
 		"zeta":  {Count: 2, Sum: 3 * time.Millisecond, P50: time.Millisecond, P95: 2 * time.Millisecond, P99: 2 * time.Millisecond},

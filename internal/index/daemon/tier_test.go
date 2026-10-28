@@ -84,6 +84,73 @@ func TestPublishWritesPlacementAndBackendPackAtomically(t *testing.T) {
 	}
 }
 
+func TestReconcilePackTierMovesAggregatesAndRejectsStaleState(t *testing.T) {
+	store, ctx := tierTestStore(t, "readiness-tier-reconcile")
+	published := readSessionTestPack(daemonTestID(220), daemonTestID(221))
+	published.Record.Tier = schema.TierUnknown
+	if err := store.PublishPack(ctx, published); err != nil {
+		t.Fatal(err)
+	}
+	value, _, err := store.Get(ctx, schema.PackKey(published.PackID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := schema.UnmarshalPackRecord(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReconcilePackTier(ctx, published.PackID, expected, nil, schema.TierSingle); err != nil {
+		t.Fatal(err)
+	}
+	unknown, _ := readAggregate(t, store, ctx, schema.TierAggregateKey(schema.TierUnknown))
+	single, found := readAggregate(t, store, ctx, schema.TierAggregateKey(schema.TierSingle))
+	if unknown.PackCount != 0 || !found || single.PackCount != 1 || single.PayloadSize != expected.PayloadSize {
+		t.Fatalf("tier aggregates did not move together: unknown=%+v single=%+v", unknown, single)
+	}
+	if err := store.ReconcilePackTier(ctx, published.PackID, expected, nil, schema.TierCold); err == nil {
+		t.Fatal("stale tier reconciliation overwrote a newer pack")
+	}
+	if cold, found := readAggregate(t, store, ctx, schema.TierAggregateKey(schema.TierCold)); found && cold.PackCount != 0 {
+		t.Fatalf("failed reconciliation changed aggregates: %+v", cold)
+	}
+	value, _, err = store.Get(ctx, schema.PackKey(published.PackID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err := schema.UnmarshalPackRecord(value)
+	if err != nil || actual.Tier != schema.TierSingle {
+		t.Fatalf("failed reconciliation changed pack: %+v, %v", actual, err)
+	}
+}
+
+func TestReconcilePackTierRejectsChangedPlacements(t *testing.T) {
+	store, ctx := tierTestStore(t, "readiness-tier-placement-change")
+	published := readSessionTestPack(daemonTestID(222), daemonTestID(223))
+	published.Record.Tier = schema.TierUnknown
+	published.Placements = map[uint64]schema.PlacementRecord{42: {State: schema.PlacementLive}}
+	if err := store.PublishPack(ctx, published); err != nil {
+		t.Fatal(err)
+	}
+	value, _, err := store.Get(ctx, schema.PackKey(published.PackID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := schema.UnmarshalPackRecord(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReconcilePackTier(ctx, published.PackID, expected, nil, schema.TierSingle); err == nil {
+		t.Fatal("changed placement evidence was accepted")
+	}
+	unknown, found := readAggregate(t, store, ctx, schema.TierAggregateKey(schema.TierUnknown))
+	if !found || unknown.PackCount != 1 {
+		t.Fatalf("failed repair changed aggregates: %+v found=%v", unknown, found)
+	}
+	if err := store.ReconcilePackTier(ctx, published.PackID, expected, published.Placements, schema.TierSingle); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDeletePendingWritesPerPlacementDeleteQueue(t *testing.T) {
 	store, ctx := tierTestStore(t, "phase12-placement-delete-pending")
 	packID, blobID := daemonTestID(212), daemonTestID(213)
