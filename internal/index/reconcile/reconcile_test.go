@@ -1668,6 +1668,53 @@ func TestParentCycleIsRejected(t *testing.T) {
 	}
 }
 
+func TestCrossFilesystemMountpointRootDirectoryPublishesAndDefersSubmountChild(t *testing.T) {
+	store := newFakeStore()
+	filesystem := &fakeFS{entries: map[string]fs.ExtendedFileInfo{
+		"/":                dirInfo(1, 1),
+		"/mnt":             dirInfo(1, 2),
+		"/mnt/export":      dirInfo(2, 100),
+		"/mnt/export/file": fileInfo(2, 101, 8, 1),
+	}}
+	reconciler, err := New(context.Background(), filesystem, store, Options{Workers: 2, QueueDepth: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler.Observe("/mnt/export/file", "/mnt/export/file", fileNode("file", 1))
+	reconciler.Observe("/mnt/export", "/mnt/export", &data.Node{Name: "export", Type: data.NodeTypeDir})
+	if err := reconciler.Close(); err != nil {
+		t.Fatal(err)
+	}
+	metrics := reconciler.Metrics()
+	if metrics.Deferred != 0 || metrics.Failed != 0 || metrics.Reconciled != 2 {
+		t.Fatalf("mountpoint root metrics = %#v", metrics)
+	}
+	if pendingDebtCount(store) != 0 {
+		t.Fatalf("mountpoint root wrote pending debt: %d", pendingDebtCount(store))
+	}
+	exportDir, err := schema.UnmarshalDirectoryRevision(currentValue(t, store, schema.CurrentDirectoryKey(2, 100)))
+	if err != nil || exportDir.ParentInode != 0 || exportDir.Known&schema.KnownParent != 0 ||
+		len(exportDir.Children) != 1 || exportDir.Children[0].Name != "file" {
+		t.Fatalf("mountpoint root directory = %#v, err=%v", exportDir, err)
+	}
+
+	// If the parent directory /mnt (fsid 1) is also observed in the same crawl,
+	// the cross-filesystem child edge from /mnt -> /mnt/export (fsid 2) must still be deferred.
+	reconciler, err = New(context.Background(), filesystem, store, Options{Workers: 2, QueueDepth: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler.Observe("/mnt/export", "/mnt/export", &data.Node{Name: "export", Type: data.NodeTypeDir})
+	reconciler.Observe("/mnt", "/mnt", &data.Node{Name: "mnt", Type: data.NodeTypeDir})
+	if err := reconciler.Close(); err != nil {
+		t.Fatal(err)
+	}
+	submountMetrics := reconciler.Metrics()
+	if submountMetrics.Deferred != 1 || submountMetrics.Failed != 0 || pendingDebtCount(store) != 1 {
+		t.Fatalf("submount child metrics = %#v, debt=%d", submountMetrics, pendingDebtCount(store))
+	}
+}
+
 func TestUnavailableIdentityIsDeferredAndFailedDebtIsRetried(t *testing.T) {
 	store := newFakeStore()
 	filesystem := testFilesystem()

@@ -262,12 +262,18 @@ func TestPlacementPlanRemovesSatisfiedRequest(t *testing.T) {
 func TestSingleBackendPlacementPlanDoesNoSchedulerWork(t *testing.T) {
 	store := &memoryStore{values: make(map[string][]byte)}
 	packID := vaultic.NewRandomID()
+	importedID := vaultic.NewRandomID()
 	now := time.Unix(1_700_000_000, 0)
 	store.set(t, schema.PackKey(schema.ID(packID)), schema.PackRecord{
 		Type: schema.PackData, PhysicalSize: 100, PhysicalSizeKnown: true,
 		PayloadSize: 80, HeaderSize: 20, BlobCount: 1,
 		CreationTime: now.UnixNano(), CreationTimeKnown: true,
 		Lifecycle: schema.PackPublished, Tier: schema.TierSingle, RetentionSource: schema.RetentionUnknown,
+	})
+	store.set(t, schema.PackKey(schema.ID(importedID)), schema.PackRecord{
+		Type: schema.PackData, PhysicalSize: 100, PhysicalSizeKnown: true,
+		PayloadSize: 80, HeaderSize: 20, BlobCount: 1,
+		Lifecycle: schema.PackImported, Tier: schema.TierUnknown, RetentionSource: schema.RetentionUnknown,
 	})
 	model := PlacementModel{
 		Backends: []PlacementBackend{{ID: "single", Hash: 1, Role: "primary", FailureDomain: "single"}},
@@ -282,7 +288,7 @@ func TestSingleBackendPlacementPlanDoesNoSchedulerWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Unsatisfied != 0 || result.Overdue != 0 || result.RequestsWritten != 0 {
+	if result.PacksScanned != 1 || result.Unsatisfied != 0 || result.Overdue != 0 || result.RequestsWritten != 0 {
 		t.Fatalf("single backend scheduled work: %#v", result)
 	}
 }

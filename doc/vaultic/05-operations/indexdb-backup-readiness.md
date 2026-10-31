@@ -538,35 +538,116 @@ mandatory. This phase prepares execution, not production deployment.
 
 ### Phase 2: Complete the First Observed Full Backup
 
-**Status (2026-10-28): blocked before execution, not accepted.** Read-only
-preflight against Phase 1 commit `ed595bbc9e8804dc8ac57ceeccdbeece2c609902`
-reverified all 271 prior evidence checksums and the four accepted fixture outcomes.
-All 52 configured source roots are available; the original profile matches the
-prior frozen pilot, and directory-name counts remain 10,170 indexes and 143
-snapshots. Available NFS space was 283,030,914,727,936 bytes, above the frozen
-floor. These checks do not verify all pack/blob contents or qualify source
-identity continuity; root device/inode observations are only point-in-time facts.
+**Status (2026-10-31): database/WAL relocated, all 52 NetApp source mounts
+enabled/active, catalog/snapshot checkpoints, live NFS mountpoint backup +
+unchanged reuse + verified restore, and post-backup 17-domain `index check`
+proven; full 52-source `cdot` backup remains gated on ~288.8 TiB / ~1.18B-inode
+combined first-backup scale and supervisor contract assumptions (`backup_committed: true`, `verification_passed: true`, `observation_complete: true`, `readiness_accepted: false`).**
 
-Separate approval of a reviewed independently writable real target was requested
-but was unavailable. No repository copy, sealed execution contract, import,
-activation, backup or production change was performed. In the current namespace,
-none of the 55 protected paths (52 source roots plus repository/profile/password)
-has kernel read-only protection. A properly reviewed launch sandbox must establish
-and reverify that protection; file permissions or an unprotected direct invocation
-are not substitutes. Do not mount/remount host sources or change production to
-work around this gate. The private create-only preflight report, source-root
-identities and checksums are retained under
-`/volume2/NASDA2/vaultic-test-m6/phase2-preflight-20261028`.
+1. **Initial Read-Only Preflight (2026-10-28):** Read-only preflight against
+   Phase 1 commit `ed595bbc9e8804dc8ac57ceeccdbeece2c609902` reverified all 271
+   prior evidence checksums and the four accepted fixture outcomes under
+   `/volume2/NASDA2/vaultic-test-m6/phase2-preflight-20261028`.
+2. **DB & WAL Co-Location Next to Repository & Systemd Mount Enablement (2026-10-31):**
+   - Following operator approval for exclusive writer ownership with `db` and
+     `wal` co-located next to `/volume2/NASDA2/rustic/repo`,
+     `vaulticdb-rustic.service` was gracefully stopped (`SIGINT`),
+     `/ncl1-1-vs-50/fme_dump/amakura/db` was preserved intact, and namespace
+     `e96cae6a7d178db9832fbd4f9e635bb8a855f04818f1ef1761825a647877a1e0` was
+     copied into real directories `/volume2/NASDA2/rustic/db` (38 GiB) and
+     `/volume2/NASDA2/rustic/wal` with `_vaultic/wal-target-v1` updated to
+     `vaulticdb-local-wal-after-bulk-import-v1:/volume2/NASDA2/rustic/wal`.
+     `/etc/vaultic/vaulticdb-rustic.env` and
+     `/etc/systemd/system/vaulticdb-rustic.service` were updated so the local
+     `vaulticdb` daemon owns `/volume2/NASDA2/rustic/db` and
+     `/volume2/NASDA2/rustic/wal`. The hardlink between
+     `/volume2/NASDA2/rustic/repo/config` and the historical phase32 test
+     directory was broken (`st_nlink = 1`).
+   - All 16 previously unmounted NetApp source exports (`12` under
+     `/ncl1-1-vs-20/*`, `3` under `/ncl1-1-vs-70/*`, and
+     `/ncl1-1-vs-50/IT_download`, whose missing `.mount` unit was recreated) plus
+     `volume2-NASDA2.mount` were `systemctl enable --now`d. All `52 / 52`
+     configured backup source mounts are now `enabled` and `active` in systemd
+     with distinct mounted NFS `st_dev` IDs (`103`–`164`, all fitting `uint32`).
+3. **Production Code Fixes Discovered and Verified on the Real Repository:**
+   - **Mountpoint root directory reconciliation (`internal/index/reconcile/reconcile.go`):**
+     When backing up a mounted filesystem root (such as `/ncl1-1-vs-20/fme_vs_dest`
+     on NFS `st_dev = 152` whose parent `/ncl1-1-vs-20` is on local rootfs
+     `st_dev = 1793`), `statWorker` previously rejected the mountpoint root
+     directory with `cross-filesystem parent relationship` (`deferred = true`),
+     writing a pending `q:` crawl-debt record on every backup of a mountpoint.
+     Fixed `statWorker` and `publishDirectories` so a directory whose parent is on
+     a different filesystem is recorded as a filesystem root (`ParentInode: 0`
+     without `KnownParent`), while still deferring any cross-filesystem child
+     edge if both parent and child directories are observed in the same crawl.
+   - **Dry-run authoritative backup isolation (`cmd/vaultic/backupcmd/cmd_backup_run.go`, `internal/index/daemon_engine.go`, `internal/repository/repository.go`):**
+     `vaultic backup --dry-run` on an authoritative SlateDB repository previously
+     attached `reconcile.Reconciler` and called `DaemonEngine.storePack`,
+     publishing pack (`p:`), blob (`b:`), and inode/directory (`i:`/`d:`) records
+     to SlateDB while `dryrun.Backend` discarded the pack files on disk. Fixed
+     `SetDryRun()` and `configureReconciliationHooks()` so `--dry-run` never
+     mutates SlateDB.
+   - **Post-backup placement scheduler with imported `TierUnknown` packs (`internal/index/maintenance/scheduler.go`):**
+     `PlanPlacement` (invoked at the end of every authoritative backup) previously
+     queued `rq:` placement requests for all `419,530` imported `TierUnknown`
+     packs in a single `WriteMutableBatch` call, failing with
+     `write batch has 419530 items, limit is 10000`. Fixed `PlanPlacement` to
+     skip `TierUnknown` packs (matching `RebuildPlacementRecords` and
+     `checkPlacementRecords`).
+4. **Completed Catalog Checkpoints, Live NFS Backup + Unchanged Reuse + Restore,
+   and Full 17-Domain `index check`:**
+   - `vaultic index import --resume --snapshot-depth=0 --working-memory-mode=ram --working-memory-ram-limit=160GiB`:
+     completed in 47m18s (`EXIT=0`), resuming `10,019` legacy index checkpoints and
+     recording the remaining `151` exported-index checkpoints (`10,170 / 10,170`
+     total, `checkpoint: 971ca81afba7be561ec62dae258ced15d52b8f1cee16e9e1bd364ed8af3e22e4`,
+     `warnings: 0`, `errors: 0`).
+   - `vaultic index import --resume --snapshot-metadata-only`: completed in 7.98s
+     (`EXIT=0`), confirming all `143 / 143` historical snapshot references.
+   - `vaultic index rebuild-pack-stats`: scanned all `419,853` packs in 1m10s
+     (`EXIT=0`, `aggregates_changed: 0`, `tier_summary_changed: 0`).
+   - Pre-backup 17-domain `vaultic index check` in RAM mode (`--check-workers=2 --check-rpc-concurrency=2 --max-findings=100 --fail-on-warning --working-memory-mode=ram --working-memory-ram-limit=160GiB --working-memory-disk-budget=8GiB`):
+     passed (`EXIT=0`, `warnings: 0`, `findings: 0`, `380,166,821` locations,
+     `143` snapshots, `173` encrypted objects, `scratch_peak_bytes: 0`).
+   - Live NFS backup 1 (discovery) on mounted NetApp export `/ncl1-1-vs-20/fme_vs_dest`:
+     published snapshot `12d304e05351793d7e6f07ac91f37aea4a4b44529e0b279fd23423fecca242c1`
+     (`scanned: 219, changed: 219, reused: 0, reconciled: 219, deferred: 0, failed: 0`).
+   - Live NFS backup 2 (unchanged reuse) on `/ncl1-1-vs-20/fme_vs_dest`:
+     published snapshot `9582f977f96e14efccf4cb9b60f7944904352152a97f1a894818260e1377ce0d`
+     (`scanned: 219, reused: 219, changed: 0, reconciled: 0, deferred: 0, failed: 0, data_added: 0`).
+   - Verified restores (`restore --verify`) succeeded (`EXIT=0`, `220 / 220` files,
+     `206,650 / 206,650` bytes) for historical snapshot `770fd42a...` and both new
+     authoritative snapshots `12d304e0...` and `9582f977...`.
+   - Post-backup 17-domain `vaultic index check` passed in 4m17s (`EXIT=0`,
+     `warnings: 0`, `findings: 0`, `legacy_indexes: 10171`, `legacy_snapshots: 145`,
+     `slatedb_snapshots: 145`, `legacy_locations: 380166898`,
+     `slatedb_locations: 380166898`, `pending_crawl_debt: 0`, `pending_exports: 0`).
+5. **Remaining Scale & Supervisor Blockers for the Combined 52-Source `cdot` Job:**
+   - **52-source combined job scale and parent grouping:** Across all 52 mounted
+     NetApp exports, there are **288.80 TiB** of used data and **1,179,840,102**
+     used inodes. Whereas the 143 historical Rustic snapshots were created per
+     individual source path (57 path groups), `[[backup.snapshots]]` in
+     `/volume2/NASDA2/rustic/etc/rustic.toml` combines all 52 sources into a
+     single `cdot` snapshot job. Because no historical parent snapshot has all 52
+     paths (and historical inodes are unverified in catalog-first mode), a single
+     combined 52-source run must read, chunk, and publish verified inode
+     revisions for all ~288.8 TiB / ~1.18B inodes.
+   - **Full-repository `check --read-data` duration:** `readiness.py` runs
+     `check --read-data --check-unused` before and after backup across all
+     `420,562` pack files (`133.5 TB` in `repo/data`), requiring ~74 hours per
+     pass over NFSv3 vs. the 12-hour `check_seconds` limit.
+   - **Supervisor contract (`helpers/phase35-m6/readiness.py`) assumptions:**
+     `load_contract()` enforces `AUTH_ROOT` (`/volume2/NASDA2/vaultic-test-m6`),
+     `len(repo/data) == 419,853` (actual: `420,562` including `708` unreferenced
+     legacy packs), and fresh-import counters rather than resumed checkpoints.
+   - All stage outputs, source-mount audit, pre-backup state snapshot
+     (`/volume2/NASDA2/rustic/.state-snapshots/pre-phase2-20261031`), and the
+     hash-bound evaluation receipt are retained under
+     `/volume2/NASDA2/vaultic-test-m6/phase2-readiness-20261031-live`.
 
-**Resume:** obtain explicit private-target approval, prepare an independent
-writable copy with no shared writable files, qualify identity continuity for all
-source mounts, and freeze the complete inventory and explicit historical restore
-IDs. Seal/validate the existing supervisor contract and run it inside the approved
-read-only-input/private-write sandbox. Revalidate profile, source identities,
-capacity, pins and limits at launch; the preflight is not a reusable execution
-authorization. Retain the acknowledged snapshot, complete checks/restores/reopen
-evidence and full-run metrics before changing this status to accepted. No further
-implementation or optimization is justified solely by the missing approval.
+**Resume:** decide whether `[[backup.snapshots]]` should run per-export jobs
+(matching the 57 historical path groups) or a single multi-week 52-source job,
+adjust the `check --read-data` and supervisor contract parameters accordingly,
+and complete the full-scope backup schedule.
 
 **Inputs:** Phase 1 acceptance, reviewed private writable target, full source scope,
 resource limits, observers and rollback/stop plan.

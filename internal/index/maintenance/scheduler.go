@@ -464,7 +464,7 @@ func PlanPlacement(ctx context.Context, store Store, options PlacementSchedulerO
 	puts := make([]daemon.Mutation, 0)
 	deletes := make([][]byte, 0)
 	for packID, pack := range packs {
-		if pack.Lifecycle == schema.PackDeleted || pack.Lifecycle == schema.PackDeletePending {
+		if pack.Lifecycle == schema.PackDeleted || pack.Lifecycle == schema.PackDeletePending || pack.Tier == schema.TierUnknown {
 			continue
 		}
 		_, wasPromoted := promoted[packID]

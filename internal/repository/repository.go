@@ -71,6 +71,8 @@ type Repository struct {
 	zeroChunkOnce sync.Once
 	zeroChunkID   vaultic.ID
 
+	dryRun bool
+
 	closeOnce sync.Once
 	closeErr  error
 }
@@ -390,6 +392,9 @@ func (r *Repository) ResolveEngineFromBackend(ctx context.Context) (enginepkg.En
 		}
 		engine := enginepkg.NewDaemonEngine(client, enginepkg.NewLegacyEngine(r.idx))
 		engine.SetTierPolicy(r.tierPolicy())
+		if r.dryRun {
+			engine.SetDryRun()
+		}
 		r.SetEngine(engine)
 		return engine, nil
 	}
@@ -636,7 +641,11 @@ func (r *Repository) HotCold() (hot, cold backend.Backend, ok bool) {
 
 // SetDryRun sets the repo backend into dry-run mode.
 func (r *Repository) SetDryRun() {
+	r.dryRun = true
 	r.be = dryrun.New(r.be)
+	if engine, ok := r.engine.(*enginepkg.DaemonEngine); ok {
+		engine.SetDryRun()
+	}
 }
 
 func (r *Repository) Checker() *Checker {

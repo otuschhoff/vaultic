@@ -995,6 +995,9 @@ func configureBackupHooks(ctx context.Context, run *backupRun) error {
 }
 
 func configureReconciliationHooks(ctx context.Context, run *backupRun) error {
+	if run.options.DryRun {
+		return nil
+	}
 	if run.authoritativeEngine != nil {
 		reconciler, err := reconcile.New(ctx, run.targetFS, run.authoritativeEngine.SchemaStore(), reconcile.Options{
 			PathIndexPaths: run.repo.Config().PathIndexPaths,

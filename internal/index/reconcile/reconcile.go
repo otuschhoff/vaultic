@@ -528,8 +528,12 @@ func (reconciler *Reconciler) statWorker() {
 			}
 		}
 		if err == nil && prepared.identity.fsid != prepared.parent.fsid {
-			err = fmt.Errorf("cross-filesystem parent relationship")
-			prepared.deferred = true
+			if info.Mode.IsDir() {
+				prepared.parent = identity{}
+			} else {
+				err = fmt.Errorf("cross-filesystem parent relationship")
+				prepared.deferred = true
+			}
 		}
 		if err == nil && prepared.identity == prepared.parent && info.Mode.IsDir() {
 			err = fmt.Errorf("directory %q forms a parent cycle", item.sourcePath)
@@ -1178,7 +1182,10 @@ func (reconciler *Reconciler) publishDirectories(directories []preparedItem, pub
 			)
 		}
 		known := schema.KnownMTime | schema.KnownCTime | schema.KnownSize | schema.KnownMode
-		known |= schema.KnownUID | schema.KnownGID | schema.KnownParent | schema.KnownPath
+		known |= schema.KnownUID | schema.KnownGID | schema.KnownPath
+		if directory.parent.inode != 0 {
+			known |= schema.KnownParent
+		}
 		record := schema.DirectoryRevision{
 			ParentInode: directory.parent.inode, Children: children,
 			MTime: directory.stat.ModTime.UnixNano(), CTime: directory.stat.ChangeTime.UnixNano(), Size: uint64(directory.stat.Size),

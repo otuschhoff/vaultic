@@ -429,6 +429,19 @@ func TestIndexBackupReadinessCatalogFirstBootstrap(t *testing.T) {
 		published = append(published, snapshotID)
 		return metrics
 	}
+	dryRunConfig := backupOptions{DryRun: true, GroupBy: data.SnapshotGroupByOptions{Host: true, Path: true}}
+	if _, err := testRunBackupOutput(t, dryRunConfig, env.globalOptions, []string{env.testdata}); err != nil {
+		t.Fatalf("dry-run authoritative backup: %v", err)
+	}
+	if got := len(readPrefix("p:")); got != 2 {
+		t.Fatalf("dry-run authoritative backup published pack metadata: got=%d want=2", got)
+	}
+	for _, prefix := range []string{"i:", "d:", "iv:", "dv:", "q:"} {
+		entries, _, err := store.ScanPrefix(t.Context(), []byte(prefix), nil, 10)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("dry-run authoritative backup mutated metadata: prefix=%s entries=%d err=%v", prefix, len(entries), err)
+		}
+	}
 	first := backup()
 	if first.Reused != 0 || first.Changed == 0 || readBytes.Load() == 0 {
 		t.Fatalf("first backup trusted unverified history: %+v", first)

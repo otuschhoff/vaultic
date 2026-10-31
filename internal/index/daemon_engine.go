@@ -237,6 +237,7 @@ type DaemonEngine struct {
 	session          *daemon.ReadSession
 	lookup           *CachedBlobLookup
 	backupLoaded     bool
+	dryRun           bool
 	closeOnce        sync.Once
 	closeErr         error
 }
@@ -367,6 +368,18 @@ func (engine *DaemonEngine) SchemaStore() *daemon.SchemaStore { return engine.st
 
 func (engine *DaemonEngine) Client() *daemon.Client { return engine.client }
 
+func (engine *DaemonEngine) SetDryRun() {
+	engine.mu.Lock()
+	engine.dryRun = true
+	engine.mu.Unlock()
+}
+
+func (engine *DaemonEngine) isDryRun() bool {
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	return engine.dryRun
+}
+
 func (engine *DaemonEngine) SetNextSnapshotRoot(rootKey []byte) {
 	engine.mu.Lock()
 	engine.nextSnapshotRoot = append([]byte(nil), rootKey...)
@@ -376,6 +389,9 @@ func (engine *DaemonEngine) SetNextSnapshotRoot(rootKey []byte) {
 func (engine *DaemonEngine) MarkSnapshotPending(ctx context.Context, id vaultic.ID, originalJSON []byte) error {
 	if err := engine.lookupError(ctx); err != nil {
 		return err
+	}
+	if engine.isDryRun() {
+		return nil
 	}
 	engine.mu.Lock()
 	rootKey := append([]byte(nil), engine.nextSnapshotRoot...)
@@ -394,6 +410,9 @@ func (engine *DaemonEngine) MarkSnapshotPending(ctx context.Context, id vaultic.
 }
 
 func (engine *DaemonEngine) MarkSnapshotFailed(ctx context.Context, id vaultic.ID, failure error) error {
+	if engine.isDryRun() {
+		return nil
+	}
 	engine.mu.Lock()
 	delete(engine.pendingSnapshots, id)
 	engine.mu.Unlock()
@@ -416,6 +435,9 @@ func (engine *DaemonEngine) PublishSnapshotScopeWithCrawl(
 	defer engine.writeMu.Unlock()
 	if err := engine.lookupError(ctx); err != nil {
 		return err
+	}
+	if engine.isDryRun() {
+		return nil
 	}
 	engine.mu.Lock()
 	originalJSON, found := engine.pendingSnapshots[id]
@@ -582,6 +604,9 @@ func (engine *DaemonEngine) storePack(
 	defer engine.writeMu.RUnlock()
 	if err := engine.lookupError(ctx); err != nil {
 		return err
+	}
+	if engine.isDryRun() {
+		return engine.legacy.StorePack(ctx, id, blobs, repo)
 	}
 	engine.mu.Lock()
 	priorErr := engine.exportErr
@@ -905,6 +930,9 @@ func (engine *DaemonEngine) acknowledgeSavedIndex(ctx context.Context, index *le
 }
 
 func (engine *DaemonEngine) acknowledgePacks(ctx context.Context, pending []vaultic.ID) error {
+	if engine.isDryRun() {
+		return nil
+	}
 	for start := 0; start < len(pending); start += vaultic.BlobLookupBatchSize {
 		end := min(start+vaultic.BlobLookupBatchSize, len(pending))
 		ids := make([]schema.ID, end-start)
