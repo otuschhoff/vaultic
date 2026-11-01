@@ -1094,6 +1094,48 @@ summed parallel RPC durations. Gated read/publication tests verify that holding
 either DB dependency propagates to callbacks and releasing it resumes progress.
 The new instrumentation is not deployed; production remains unchanged/stopped.
 
+**Real-Source Qualification Gates (2026-11-01):**
+
+The live-source workload is the first 10,000 eligible lexical entries under
+`/ncl1-1-vs-50/fme_cae1`, excluding every `.snapshot` subtree before assigning
+the cap. The sealed corrected workload has 9,209 regular files, nine symlinks and
+2,460,946,936 logical bytes; its content digest is
+`2f76a6f4397effad64c9922cc6337a836b3c4ac21b870114942e02b63b996f80`.
+This is a bounded partial workload, never a complete source baseline.
+
+Four attempts were rejected before qualification: `cap10k-a` lacked the
+subprocess authoritative feature flag; `cap10k-b` allocated almost its entire
+cap inside an excluded NetApp snapshot and actually processed only one file;
+`cap10k-c` used the forbidden on-demand/dry-run combination in its preflight;
+`cap10k-d` incorrectly compared regular-file summary counts with the digest's
+regular-file-plus-symlink count. Its processed byte count matched exactly;
+source reinspection confirmed that all nine extra entries were symlinks.
+Their private evidence is retained under
+`/volume2/NASDA2/vaultic-test-m6/critical-path-fme_cae1-20261101-*`.
+None establishes sustained source throughput or an accepted A/B result.
+
+The untimed count preflight uses full-catalog lookup with `--dry-run`; the
+timed main backup retains on-demand lookup. Native fixture coverage verifies
+that this combination leaves the durable sequence unchanged and no active
+transactions or write intents. A native CLI regression also verifies summary
+classification with a symlink. On each historical clone, preflight and actual
+processed counts must equal the separately sealed regular-file count, while
+the restored digest/count includes every selected symlink. Acceptance additionally
+requires matching selected trees, verified restored content, bounded provenance
+and encrypted daemon reopen. Lookup startup is not main-phase timing.
+
+Snapshot-consistent read-only production inventory at durable sequence 857514
+found 419,864 pack records, 145 snapshot records, zero crawl-debt records and
+one pending compatibility-export pack. The pending pack is 8,813,968 bytes
+with 10,329 blobs; its ciphertext content-address hash matches
+`bbb317d2bfbc75a504209a09306dce9caae5a70f284eb81f5c3559259862c590`.
+All three prefix scans completed; zero Commit RPCs were issued and the durable
+sequence was unchanged. Exact IDs/counts are retained in the create-only
+`production-partial-audit-2m.json` artifact in `cap10k-d`.
+This is an inventory and content-address check, not a full metadata consistency
+proof. Recovery and any production pilot remain gated; no full crawl or
+schedule has been resumed.
+
 **Pathdiff Qualification Order:**
 
 No pathdiff systemd unit or executable was found in the deployment locations

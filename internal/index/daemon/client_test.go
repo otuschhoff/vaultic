@@ -204,7 +204,8 @@ func TestProductionPartialStateReadOnly(t *testing.T) {
 	defer session.Close(context.Background())
 	counts := make(map[string]uint64)
 	complete := make(map[string]bool)
-	var pendingBytes, missingPendingFiles, unknownPendingSizes uint64
+	var pendingBytes, pendingBlobs, missingPendingFiles, unknownPendingSizes uint64
+	var pendingIDs []string
 	for _, prefix := range []string{"s:", "q:", "p:"} {
 		complete[prefix] = false
 		counts[prefix] = 0
@@ -232,6 +233,7 @@ func TestProductionPartialStateReadOnly(t *testing.T) {
 					}
 					if record.Lifecycle == schema.PackExportPending {
 						counts["pending_packs"]++
+						pendingBlobs += uint64(record.BlobCount)
 						if record.PhysicalSizeKnown {
 							pendingBytes += record.PhysicalSize
 						} else {
@@ -242,6 +244,7 @@ func TestProductionPartialStateReadOnly(t *testing.T) {
 							t.Fatal(err)
 						}
 						id := fmt.Sprintf("%x", key.ID)
+						pendingIDs = append(pendingIDs, id)
 						if _, err := os.Stat(filepath.Join("/volume2/NASDA2/rustic/repo/data", id[:2], id)); errors.Is(err, os.ErrNotExist) {
 							missingPendingFiles++
 						} else if err != nil {
@@ -269,6 +272,7 @@ func TestProductionPartialStateReadOnly(t *testing.T) {
 	}
 	payload, err := json.MarshalIndent(map[string]any{
 		"counts": counts, "complete": complete, "pending_pack_bytes": pendingBytes,
+		"pending_blob_count": pendingBlobs, "pending_pack_ids": pendingIDs,
 		"missing_pending_files": missingPendingFiles, "unknown_pending_sizes": unknownPendingSizes,
 		"last_durable_sequence": after.LastDurableSequence, "generation": session.Identity.Generation,
 		"decision_sequence": session.Identity.Sequence, "read_only": true, "full_consistency_check": false,

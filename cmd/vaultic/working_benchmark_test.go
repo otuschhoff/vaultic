@@ -223,6 +223,7 @@ func TestPublicationQualificationOnDemandBackup(t *testing.T) {
 	environment, cleanup := withTestEnvironment(t)
 	defer cleanup()
 	testSetupBackupData(t, environment)
+	rtest.OK(t, os.Symlink(".", filepath.Join(environment.testdata, "qualification-symlink")))
 	environment.globalOptions.BackendTestHook = nil
 	rtest.OK(t, withTermStatus(t, environment.globalOptions, func(ctx context.Context, options global.Options) error {
 		printer := progress.NewTerminalPrinter(true, 0, options.Term)
@@ -250,6 +251,47 @@ func TestPublicationQualificationOnDemandBackup(t *testing.T) {
 		rtest.OK(t, os.Chmod(scratch, 0700))
 		password := filepath.Join(t.TempDir(), "password")
 		rtest.OK(t, os.WriteFile(password, []byte(options.Password+"\n"), 0600))
+		before, err := client.WriterStatus(ctx)
+		if err != nil {
+			return err
+		}
+		preflight := t.TempDir()
+		publicationQualificationCommand(t, preflight, "preflight", "/root/proj/vaultic/bin/phase35-critical-path/linux-amd64/vaultic",
+			"--repo="+options.Repo, "--password-file="+password, "--metadata-daemon-socket="+daemonOptions.Socket,
+			"--metadata-encryption-mode=required", "--metadata-passphrase-file="+passphrase, "--no-cache", "--json",
+			"backup", "--dry-run", "--force", "--no-scan", "--one-file-system", environment.testdata)
+		paths, err := boundedLiveSourcePaths(environment.testdata, 10_000)
+		if err != nil {
+			return err
+		}
+		regularFiles := publicationQualificationRegularFiles(t, environment.testdata, paths)
+		output, err := os.ReadFile(filepath.Join(preflight, "preflight.stdout.log"))
+		if err != nil {
+			return err
+		}
+		matched := false
+		for _, line := range bytes.Split(output, []byte{'\n'}) {
+			var event struct {
+				MessageType string `json:"message_type"`
+				Files       uint64 `json:"total_files_processed"`
+			}
+			if json.Unmarshal(line, &event) == nil && event.MessageType == "summary" {
+				if event.Files != regularFiles {
+					return fmt.Errorf("native preflight regular-file count differs: processed=%d selected=%d", event.Files, regularFiles)
+				}
+				matched = true
+			}
+		}
+		if !matched {
+			return fmt.Errorf("native preflight omitted summary")
+		}
+		after, err := client.WriterStatus(ctx)
+		if err != nil {
+			return err
+		}
+		if before.LastDurableSequence != after.LastDurableSequence || after.ActiveTransactions != 0 || after.ActiveWriteIntents != 0 {
+			return fmt.Errorf("native count preflight changed durable state")
+		}
 		publicationQualificationCommand(t, t.TempDir(), "backup", "/root/proj/vaultic/bin/phase35-throughput/linux-amd64/vaultic",
 			"--repo="+options.Repo, "--password-file="+password, "--metadata-daemon-socket="+daemonOptions.Socket,
 			"--metadata-encryption-mode=required", "--metadata-passphrase-file="+passphrase, "--no-cache", "--json",
@@ -577,6 +619,19 @@ func TestBoundedLiveSourcePaths(t *testing.T) {
 	}
 }
 
+func publicationQualificationRegularFiles(t *testing.T, source string, paths []string) uint64 {
+	t.Helper()
+	var count uint64
+	for _, path := range paths {
+		info, err := os.Lstat(filepath.Join(source, path))
+		rtest.OK(t, err)
+		if info.Mode().IsRegular() {
+			count++
+		}
+	}
+	return count
+}
+
 func TestPrepareFmeCAE1Qualification(t *testing.T) {
 	root := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT")
 	if root == "" {
@@ -599,19 +654,20 @@ func TestPrepareFmeCAE1Qualification(t *testing.T) {
 		selected[path] = true
 	}
 	digest, files, size := m5FilesSelected(t, manifest.Source, false, selected)
+	regularFiles := publicationQualificationRegularFiles(t, manifest.Source, manifest.Paths)
 	if files == 0 || size > 64<<30 {
 		t.Fatal("selected source is empty or exceeds the 64 GiB logical-byte safety ceiling")
 	}
 	for name, value := range map[string]any{
 		"inode-manifest.json":     manifest,
-		"source-observation.json": map[string]any{"sha256": digest, "files": files, "bytes": size, "entries": len(manifest.Paths)},
+		"source-observation.json": map[string]any{"sha256": digest, "files": files, "regular_files": regularFiles, "bytes": size, "entries": len(manifest.Paths)},
 	} {
 		encoded, err := json.MarshalIndent(value, "", "  ")
 		rtest.OK(t, err)
 		rtest.OK(t, os.WriteFile(filepath.Join(root, name), append(encoded, '\n'), 0600))
 		rtest.OK(t, os.Chmod(filepath.Join(root, name), 0600))
 	}
-	t.Logf("source=%s entries=%d cap=%d files=%d bytes=%d sha256=%s", manifest.Source, len(manifest.Paths), manifest.InodeLimit, files, size, digest)
+	t.Logf("source=%s entries=%d cap=%d non_directory_entries=%d regular_files=%d bytes=%d sha256=%s", manifest.Source, len(manifest.Paths), manifest.InodeLimit, files, regularFiles, size, digest)
 }
 
 func TestBoundedSourceRoundTrip(t *testing.T) {
@@ -643,6 +699,9 @@ func TestBoundedSourceRoundTrip(t *testing.T) {
 		selected[path] = true
 	}
 	expected, files, size := m5FilesSelected(t, source, false, selected)
+	if files != 3 || publicationQualificationRegularFiles(t, source, manifest.Paths) != 2 {
+		t.Fatal("regular-file summary scope must exclude the separately verified symlink")
+	}
 	actual, actualFiles, actualSize := m5FilesSelected(t, restoredSource, false, selected)
 	if expected != actual || files != actualFiles || size != actualSize {
 		t.Fatal("bounded restored content or symlink differs")
@@ -706,7 +765,7 @@ func TestPublicationBackupQualification(t *testing.T) {
 	defer feature.TestSetFlag(t, feature.Flag, feature.SlateDBAuthoritative, true)()
 	source := filepath.Join(root, "input")
 	var digest string
-	var files, size uint64
+	var files, regularFiles, size uint64
 	var sourceManifest backupcmd.BoundedInodeManifest
 	if os.Getenv("VAULTIC_PHASE35_THROUGHPUT_SOURCE") != "" {
 		if os.Getenv("VAULTIC_PHASE35_THROUGHPUT_SOURCE") != "/ncl1-1-vs-50/fme_cae1" || onDemand != "1" || resumeVerification != "" {
@@ -722,12 +781,17 @@ func TestPublicationBackupQualification(t *testing.T) {
 		encoded, err = os.ReadFile(filepath.Join(root, "source-observation.json"))
 		rtest.OK(t, err)
 		var observation struct {
-			SHA256 string `json:"sha256"`
-			Files  uint64 `json:"files"`
-			Bytes  uint64 `json:"bytes"`
+			SHA256       string `json:"sha256"`
+			Files        uint64 `json:"files"`
+			RegularFiles uint64 `json:"regular_files"`
+			Bytes        uint64 `json:"bytes"`
 		}
 		rtest.OK(t, json.Unmarshal(encoded, &observation))
 		digest, files, size = observation.SHA256, observation.Files, observation.Bytes
+		regularFiles = observation.RegularFiles
+		if regularFiles == 0 || regularFiles > files || regularFiles != publicationQualificationRegularFiles(t, source, sourceManifest.Paths) {
+			t.Fatal("sealed regular-file count is missing or changed")
+		}
 	} else if frozen := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_INPUT"); frozen != "" {
 		if filepath.Base(frozen) != "input" {
 			t.Fatal("frozen sample must be an owned input directory")
@@ -906,7 +970,13 @@ func TestPublicationBackupQualification(t *testing.T) {
 				}
 				backupArgs = append(backupArgs, source)
 				if sourceManifest.Source != "" {
-					preflightArgs := append(append([]string(nil), backupArgs...), "--dry-run")
+					preflightArgs := make([]string, 0, len(backupArgs)+1)
+					for _, argument := range backupArgs {
+						if argument != "--metadata-on-demand" {
+							preflightArgs = append(preflightArgs, argument)
+						}
+					}
+					preflightArgs = append(preflightArgs, "--dry-run")
 					publicationQualificationCommand(t, cell, "preflight", candidate, preflightArgs...)
 					output, err := os.ReadFile(filepath.Join(cell, "preflight.stdout.log"))
 					rtest.OK(t, err)
@@ -917,8 +987,8 @@ func TestPublicationBackupQualification(t *testing.T) {
 							Files       uint64 `json:"total_files_processed"`
 						}
 						if json.Unmarshal(line, &event) == nil && event.MessageType == "summary" {
-							if event.Files != files {
-								t.Fatalf("preflight count differs: processed=%d sealed=%d", event.Files, files)
+							if event.Files != regularFiles {
+								t.Fatalf("preflight regular-file count differs: processed=%d sealed=%d", event.Files, regularFiles)
 							}
 							matched = true
 						}
@@ -931,7 +1001,7 @@ func TestPublicationBackupQualification(t *testing.T) {
 					if state.LastDurableSequence != before.LastDurableSequence || state.ActiveTransactions != 0 || state.ActiveWriteIntents != 0 {
 						t.Fatal("dry-run preflight changed private durable state")
 					}
-					t.Logf("bounded preflight accepted %d files; main-backup timing starts next", files)
+					t.Logf("bounded preflight accepted %d regular files; main-backup timing starts next", regularFiles)
 				}
 				wall, cliCPU = publicationQualificationCommand(t, cell, "backup", candidate, backupArgs...)
 				after, err = client.WriterStatus(t.Context())
@@ -981,8 +1051,8 @@ func TestPublicationBackupQualification(t *testing.T) {
 					FilesProcessed uint64 `json:"total_files_processed"`
 				}
 				if json.Unmarshal(line, &event) == nil && event.MessageType == "summary" {
-					if sourceManifest.Source != "" && event.FilesProcessed != files {
-						t.Fatalf("bounded source count differs: processed=%d sealed=%d; no throughput acceptance", event.FilesProcessed, files)
+					if sourceManifest.Source != "" && event.FilesProcessed != regularFiles {
+						t.Fatalf("bounded source regular-file count differs: processed=%d sealed=%d; no throughput acceptance", event.FilesProcessed, regularFiles)
 					}
 					snapshotID = event.SnapshotID
 				}
