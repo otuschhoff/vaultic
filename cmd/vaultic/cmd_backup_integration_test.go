@@ -151,7 +151,14 @@ func TestBackupPerSourceAuthoritative(t *testing.T) {
 		options.MetadataEncryptionMode = "required"
 		options.MetadataPassphraseFile = passphrase
 		sources := []string{filepath.Join(environment.testdata, "0", "0"), filepath.Join(environment.testdata, "0", "tests")}
-		backup := backupOptions{SnapshotPerSource: true, GroupBy: data.SnapshotGroupByOptions{Host: true, Path: true}}
+		for _, source := range sources {
+			for index := range 128 {
+				if err := os.WriteFile(filepath.Join(source, fmt.Sprintf("publication-group-%03d", index)), []byte("grouped publication fixture\n"), 0600); err != nil {
+					return err
+				}
+			}
+		}
+		backup := backupOptions{SnapshotPerSource: true, MetadataPublicationGroupSize: 64, GroupBy: data.SnapshotGroupByOptions{Host: true, Path: true}}
 		for range 2 {
 			if err := runBackup(ctx, backup, options, options.Term, sources); err != nil {
 				return err

@@ -727,7 +727,39 @@ func TestSchemaStoreConcurrentRevisionAllocationAndImmutability(t *testing.T) {
 	}
 }
 
+func TestAllocatedPublicationGroupInputBounds(t *testing.T) {
+	for _, count := range []int{1, 4, MaxAllocatedPublicationGroupSize} {
+		if err := ValidateAllocatedPublicationGroupInputs(make([]ReconciledRevision, count)); err != nil {
+			t.Fatalf("count=%d: %v", count, err)
+		}
+	}
+	for name, requests := range map[string][]ReconciledRevision{
+		"empty":   nil,
+		"count":   make([]ReconciledRevision, MaxAllocatedPublicationGroupSize+1),
+		"content": {{ContentIDs: make([]schema.ID, 4097)}},
+		"bytes":   {{RevisionValue: make([]byte, (8<<20)+1)}},
+		"debt":    {{DebtKeys: make([][]byte, 1025)}},
+		"related": {{RelatedPuts: make([]Mutation, 1025)}},
+		"parents": {{HardlinkParents: make([]schema.HardlinkParentRef, 1025)}},
+	} {
+		if err := ValidateAllocatedPublicationGroupInputs(requests); err == nil {
+			t.Fatalf("%s limit accepted", name)
+		}
+	}
+	if err := ValidateAllocatedPublicationGroupInputs([]ReconciledRevision{{RevisionValue: make([]byte, 8<<20), ContentIDs: make([]schema.ID, 4096)}}); err != nil {
+		t.Fatalf("exact content/byte boundaries: %v", err)
+	}
+}
+
 func TestSchemaStoreAllocatedGroupReadYourWrites(t *testing.T) {
+	testSchemaStoreAllocatedGroupReadYourWrites(t, 4, 256)
+}
+
+func TestSchemaStoreWideAllocatedGroupReadYourWrites(t *testing.T) {
+	testSchemaStoreAllocatedGroupReadYourWrites(t, 31, 16)
+}
+
+func testSchemaStoreAllocatedGroupReadYourWrites(t *testing.T, groupSize, readBatchLimit int) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	client, err := Ensure(ctx, Options{
@@ -737,6 +769,7 @@ func TestSchemaStoreAllocatedGroupReadYourWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close(context.Background())
+	client.limits.MaxBatchItems = uint32(readBatchLimit)
 	store := NewSchemaStore(client)
 	content := make([]schema.ID, schema.MaxInlineContentIDs+1)
 	for index := range content {
@@ -750,8 +783,8 @@ func TestSchemaStoreAllocatedGroupReadYourWrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := store.PublishAllocatedReconciledRevisionGroup(ctx, 4, func(first uint64) ([]ReconciledRevision, error) {
-		requests := make([]ReconciledRevision, 4)
+	first, err := store.PublishAllocatedReconciledRevisionGroup(ctx, groupSize, func(first uint64) ([]ReconciledRevision, error) {
+		requests := make([]ReconciledRevision, groupSize)
 		for index := range requests {
 			inode, revision := uint64(10+index), first+uint64(index)
 			requests[index] = ReconciledRevision{
@@ -764,7 +797,7 @@ func TestSchemaStoreAllocatedGroupReadYourWrites(t *testing.T) {
 	if err != nil || first != 1 {
 		t.Fatalf("group first=%d err=%v", first, err)
 	}
-	if metrics := store.PublicationMetrics(); metrics.Planning.Count != 4 || metrics.Commit.Count != 1 ||
+	if metrics := store.PublicationMetrics(); metrics.Planning.Count != uint64(groupSize) || metrics.Commit.Count != 1 ||
 		metrics.Planning.Sum <= 0 || metrics.Commit.Sum <= 0 {
 		t.Fatalf("group stage metrics=%+v", metrics)
 	}
@@ -774,8 +807,8 @@ func TestSchemaStoreAllocatedGroupReadYourWrites(t *testing.T) {
 			t.Fatalf("reference found=%t err=%v", found, err)
 		}
 		references, err := schema.UnmarshalReferenceCountRecord(encoded)
-		if err != nil || references.TotalReferences != 5 || references.DistinctInodes != 4 ||
-			references.DistinctRevisions != 4 || references.DistinctManifests != 1 {
+		if err != nil || references.TotalReferences != uint64(groupSize+1) || references.DistinctInodes != uint64(groupSize) ||
+			references.DistinctRevisions != uint64(groupSize) || references.DistinctManifests != 1 {
 			t.Fatalf("group references=%+v err=%v", references, err)
 		}
 	}
@@ -784,7 +817,7 @@ func TestSchemaStoreAllocatedGroupReadYourWrites(t *testing.T) {
 		after.Attribution.CommitRequest.Successes-before.Attribution.CommitRequest.Successes != 1 {
 		t.Fatalf("group accounting=%+v err=%v", after, err)
 	}
-	if next, err := store.AllocateRevision(ctx); err != nil || next != 5 {
+	if next, err := store.AllocateRevision(ctx); err != nil || next != uint64(groupSize+1) {
 		t.Fatalf("next revision=%d err=%v", next, err)
 	}
 }
@@ -861,7 +894,7 @@ func TestSchemaStoreAllocatedGroupRejectsPartialPublication(t *testing.T) {
 			}
 		})
 	}
-	for _, count := range []int{0, 5} {
+	for _, count := range []int{0, MaxAllocatedPublicationGroupSize + 1} {
 		if _, err := store.PublishAllocatedReconciledRevisionGroup(ctx, count, func(uint64) ([]ReconciledRevision, error) {
 			t.Fatal("invalid count reached builder")
 			return nil, nil
@@ -1135,7 +1168,7 @@ func TestSchemaStoreAllocatedPublicationFenceAndCancellation(t *testing.T) {
 			done := make(chan result, 1)
 			count := 1
 			if variant.group {
-				count = 4
+				count = MaxAllocatedPublicationGroupSize
 			}
 			go func() {
 				first := true

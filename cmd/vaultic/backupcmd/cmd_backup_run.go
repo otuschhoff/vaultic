@@ -1071,7 +1071,9 @@ func configureReconciliationHooks(ctx context.Context, run *backupRun) error {
 	}
 	if run.authoritativeEngine != nil {
 		reconciler, err := reconcile.New(ctx, run.targetFS, run.authoritativeEngine.SchemaStore(), reconcile.Options{
-			PathIndexPaths: run.repo.Config().PathIndexPaths,
+			PathIndexPaths:          run.repo.Config().PathIndexPaths,
+			PublicationGroupSize:    run.options.MetadataPublicationGroupSize,
+			AtomicPublicationGroups: run.options.MetadataPublicationGroupSize > 4,
 		})
 		if err != nil {
 			return fmt.Errorf("start authoritative metadata reconciliation: %w", err)

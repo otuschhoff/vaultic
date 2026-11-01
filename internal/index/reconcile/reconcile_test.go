@@ -1001,6 +1001,64 @@ func publicationTestBatch(first, count int) []preparedItem {
 	return batch
 }
 
+type publicationLookupStore struct {
+	*fakeStore
+	lookupMu  sync.Mutex
+	sizes     []int
+	failBatch bool
+}
+
+func (store *publicationLookupStore) MultiGet(ctx context.Context, keys [][]byte) ([]daemon.KeyValue, []bool, error) {
+	store.lookupMu.Lock()
+	store.sizes = append(store.sizes, len(keys))
+	store.lookupMu.Unlock()
+	if store.failBatch && len(keys) > 1 {
+		return nil, nil, errors.New("injected grouped lookup failure")
+	}
+	return store.fakeStore.MultiGet(ctx, keys)
+}
+
+func TestPublicationGroupBatchesCurrentLookupsWithoutRetainingCache(t *testing.T) {
+	store := &publicationLookupStore{fakeStore: newFakeStore()}
+	reconciler := &Reconciler{ctx: t.Context(), filesystem: testFilesystem(), store: store}
+	batch := publicationTestBatch(0, publicationConcurrency)
+	for index := range batch {
+		batch[index].node.Content = nil
+		batch[index].node.Size = 0
+		batch[index].stat.Size = 0
+	}
+	published := make(map[string]publishedItem)
+	reconciler.publishInodes(batch, published)
+	if len(reconciler.errors) != 0 || len(published) != len(batch) || !slices.Equal(store.sizes, []int{len(batch)}) {
+		t.Fatalf("first publication: lookups=%v errors=%v published=%d", store.sizes, reconciler.errors, len(published))
+	}
+	for _, item := range batch {
+		if item.existingRecord != nil {
+			t.Fatal("group cache escaped publication lifetime")
+		}
+	}
+	reconciler.publishInodes(batch, published)
+	if len(reconciler.errors) != 0 || reconciler.Metrics().Reused != uint64(len(batch)) || store.sizes[1] != len(batch) {
+		t.Fatalf("repeated publication did not load fresh current pointers: lookups=%v metrics=%+v errors=%v", store.sizes, reconciler.Metrics(), reconciler.errors)
+	}
+}
+
+func TestPublicationGroupedLookupFailureFallsBackToIndependentReads(t *testing.T) {
+	store := &publicationLookupStore{fakeStore: newFakeStore(), failBatch: true}
+	reconciler := &Reconciler{ctx: t.Context(), filesystem: testFilesystem(), store: store}
+	batch := publicationTestBatch(0, publicationConcurrency)
+	published := make(map[string]publishedItem)
+	reconciler.publishInodes(batch, published)
+	if len(reconciler.errors) != 0 || len(published) != len(batch) || len(store.sizes) != len(batch)+1 || store.sizes[0] != len(batch) {
+		t.Fatalf("scalar fallback: lookups=%v errors=%v published=%d", store.sizes, reconciler.errors, len(published))
+	}
+	for _, size := range store.sizes[1:] {
+		if size != 1 {
+			t.Fatalf("fallback lookup size=%d", size)
+		}
+	}
+}
+
 func TestPublicationRevisionBlocksAreLazyAndGroupScoped(t *testing.T) {
 	store := &blockAllocationStore{fakeStore: newFakeStore()}
 	reconciler := &Reconciler{ctx: context.Background(), filesystem: testFilesystem(), store: store}
@@ -1033,7 +1091,7 @@ func TestPublicationRevisionBlocksAreLazyAndGroupScoped(t *testing.T) {
 		}
 	}
 	metrics := reconciler.Metrics()
-	if metrics.PublicationGroups != [publicationConcurrency]uint64{0, 0, 0, 4} ||
+	if metrics.PublicationGroups != [daemon.MaxAllocatedPublicationGroupSize]uint64{0, 0, 0, 4} ||
 		metrics.RevisionAllocationCalls != 3 || metrics.RevisionAllocationFailures != 0 ||
 		metrics.RevisionsReserved != 12 || metrics.InodeRevisionsAssigned != 9 ||
 		metrics.InodePublicationCalls != 9 || metrics.InodePublicationFailures != 0 ||
@@ -1063,7 +1121,7 @@ func TestPublicationMetricsEmptyPartialAndScalarGroups(t *testing.T) {
 				calls = 4
 			}
 			metrics := reconciler.Metrics()
-			if metrics.PublicationGroups != [publicationConcurrency]uint64{1, 1, 1, 1} ||
+			if metrics.PublicationGroups != [daemon.MaxAllocatedPublicationGroupSize]uint64{1, 1, 1, 1} ||
 				metrics.RevisionAllocationCalls != calls || metrics.RevisionsReserved != 10 || metrics.InodeRevisionsAssigned != 10 ||
 				metrics.InodePublicationCalls != 10 || metrics.InodePublicationFailures != 0 || metrics.RevisionAllocationFailures != 0 {
 				t.Fatalf("publication attribution: %+v", metrics)
@@ -1189,6 +1247,43 @@ func TestAtomicGroupModesAndUnsupportedStore(t *testing.T) {
 	reconciler.publishInodes(publicationTestBatch(0, 4), published)
 	if len(published) != 0 || len(reconciler.errors) != 4 || store.next != 0 || reconciler.Metrics().AtomicGroupCalls != 0 {
 		t.Fatalf("unsupported group: published=%d errors=%v next=%d", len(published), reconciler.errors, store.next)
+	}
+}
+
+func TestAtomicPublicationGroupBounds(t *testing.T) {
+	for _, options := range []Options{
+		{PublicationGroupSize: -1}, {PublicationGroupSize: 65, AtomicPublicationGroups: true},
+		{PublicationGroupSize: 5},
+	} {
+		if _, err := options.withDefaults(); err == nil {
+			t.Fatalf("invalid options accepted: %+v", options)
+		}
+	}
+	for _, size := range []int{1, 4, 64} {
+		if _, err := (Options{PublicationGroupSize: size, AtomicPublicationGroups: true}).withDefaults(); err != nil {
+			t.Fatalf("size=%d: %v", size, err)
+		}
+	}
+	reconciler := &Reconciler{ctx: t.Context(), filesystem: testFilesystem(), store: newFakeStore(), options: Options{AtomicPublicationGroups: true}}
+	batch := publicationTestBatch(0, 64)
+	for index := range batch {
+		batch[index].node.Content = make(vaultic.IDs, 1024)
+	}
+	if prefix := reconciler.atomicPublicationPrefix(batch); prefix != 4 {
+		t.Fatalf("content-bound prefix=%d, want 4", prefix)
+	}
+	batch = publicationTestBatch(0, 1)
+	batch[0].debtKeys = make([][]byte, 1025)
+	for index := range batch[0].debtKeys {
+		batch[0].debtKeys[index] = fmt.Appendf(nil, "debt:%d", index)
+	}
+	if prefix := reconciler.atomicPublicationPrefix(batch); prefix != 0 {
+		t.Fatalf("oversized singleton prefix=%d", prefix)
+	}
+	published := make(map[string]publishedItem)
+	reconciler.publishInodes(batch, published)
+	if len(published) != 1 || len(reconciler.errors) != 0 || reconciler.Metrics().AtomicGroupCalls != 0 || reconciler.Metrics().InodePublicationCalls != 1 {
+		t.Fatalf("scalar fallback: published=%d errors=%v metrics=%+v", len(published), reconciler.errors, reconciler.Metrics())
 	}
 }
 
@@ -2084,6 +2179,7 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 	streams := publicationTestLimit(t, "VAULTICDB_TEST_PUBLICATION_STREAMS", 1, 4)
 	flushIntervalMS := publicationTestLimit(t, "VAULTICDB_TEST_PUBLICATION_FLUSH_MS", 100, 1000)
 	traceGroups := os.Getenv("VAULTICDB_TEST_PUBLICATION_PROGRESS") == "1"
+	atomicGroupSize := publicationTestLimit(t, "VAULTICDB_TEST_PUBLICATION_GROUP_SIZE", publicationConcurrency, daemon.MaxAllocatedPublicationGroupSize)
 	if traceGroups && streams != 1 {
 		t.Fatal("per-group stage attribution requires one stream")
 	}
@@ -2096,6 +2192,12 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 			groupSize := publicationConcurrency
 			if mode == "scalar" {
 				groupSize = 1
+			}
+			if mode == "atomic-group" {
+				groupSize = atomicGroupSize
+			}
+			if count%(groupSize*streams) != 0 {
+				t.Fatal("publication inode count must be divisible by configured group size times stream count")
 			}
 			t.Run(fmt.Sprintf("shared=%t/mode=%s", shared, mode), func(t *testing.T) {
 				ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -2126,7 +2228,7 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 				store := daemon.NewSchemaStore(client)
 				reconciler := &Reconciler{
 					ctx: ctx, filesystem: testFilesystem(), store: store,
-					options: Options{AtomicInodePublication: mode == "atomic", AtomicPublicationGroups: mode == "atomic-group"},
+					options: Options{AtomicInodePublication: mode == "atomic", AtomicPublicationGroups: mode == "atomic-group", PublicationGroupSize: groupSize},
 				}
 				before, err := client.WriterStatus(ctx)
 				if err != nil || before.EngineFlushIntervalMS != uint64(flushIntervalMS) {
@@ -2205,17 +2307,29 @@ func TestDaemonBackedPublicationAttribution(t *testing.T) {
 				}
 				allocationCalls := uint64(count / groupSize)
 				publicationCalls, groupCalls := uint64(count), uint64(0)
+				var expectedGroups [daemon.MaxAllocatedPublicationGroupSize]uint64
+				for offset := 0; offset < count; offset += groupSize {
+					for remaining := groupSize; remaining > 0; {
+						size := remaining
+						if mode == "atomic-group" {
+							size = min(size, 4096/contentCount)
+							groupCalls++
+						}
+						expectedGroups[size-1]++
+						remaining -= size
+					}
+				}
 				if mode == "atomic" || mode == "atomic-group" {
 					allocationCalls = 0
 				}
 				if mode == "atomic-group" {
-					publicationCalls, groupCalls = 0, uint64(count/groupSize)
+					publicationCalls = 0
 				}
 				if len(published) != count || metrics.RevisionAllocationCalls != allocationCalls ||
 					metrics.RevisionsReserved != uint64(count) || metrics.InodeRevisionsAssigned != uint64(count) ||
 					metrics.InodePublicationCalls != publicationCalls || metrics.AtomicGroupCalls != groupCalls || metrics.AtomicGroupFailures != 0 ||
 					metrics.InodePublicationFailures != 0 || metrics.RevisionAllocationFailures != 0 ||
-					metrics.PublicationGroups[groupSize-1] != uint64(count/groupSize) {
+					metrics.PublicationGroups != expectedGroups {
 					t.Fatalf("publication: metrics=%+v published=%d", metrics, len(published))
 				}
 				after, err := client.WriterStatus(ctx)

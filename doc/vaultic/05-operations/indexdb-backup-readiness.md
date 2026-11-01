@@ -895,6 +895,50 @@ and address metadata lookup/read amplification without weakening encryption,
 durability, consistency, or observation safeguards. Do not automatically restart
 production merely because a microbenchmark improves.
 
+**Local Throughput Implementation (2026-11-01):**
+
+Checkpoint commit `7e733c75d` precedes these performance changes. Production
+remains stopped; neither the production daemon nor its pinned profile was changed.
+CPU samples showed read/decryption/copy amplification, while native publication
+attribution also exposed serial groups waiting on separate revision-reservation
+and publication flushes. The 100 ms durable flush policy remains unchanged.
+
+Current-pointer lookup is prefetched per independent publication group. Current
+inode/reference-count and manifest-edge reads are batched within the publication
+transaction, retaining pending-count precedence, shared-content read-your-writes,
+conflict retry and durable acknowledgment. Reference reads use at most 256 keys
+per RPC and obey the negotiated batch-item limit.
+
+`backup --metadata-publication-group-size=64` opts into wider atomic groups.
+The default remains four; zero also selects four. Sizes above four use one
+transaction for revision allocation and changed-inode publication. Groups split
+at the existing 4,096-content-ID, 8 MiB input and per-inode related-metadata
+limits; individually oversized inputs retain scalar publication. Existing
+duplicate-identity/path, hardlink and directory ordering boundaries remain.
+
+Local native attribution, 128 inodes and the same 100 ms flush policy:
+
+| Fixture | Regular groups of four | Wide atomic groups | Logical result |
+| --- | --- | --- | --- |
+| One content ID per inode | 6.451 s | 0.383 s, two commits | Identical snapshot hash; reopen validated |
+| 128 independent IDs per inode | 6.444 s | 1.097 s, four commits | Identical snapshot hash; reopen validated |
+| 128 shared IDs per inode | 6.452 s | 1.183 s, four commits | Identical snapshot hash; reopen validated |
+
+The 128-ID groups split at 32 members. Before reference-read batching, their
+atomic publication took about six seconds despite only four commits: increasing
+group size alone was insufficient. An offline encrypted SST test separately
+reduced 512 logical lookups from about 895 ms/1,697 backend reads to
+79 ms/96 reads using multi-get; this was a debug-build diagnostic, not production
+backup throughput.
+
+Actual encrypted per-source backup tests exercise wide groups, unchanged parents
+and verified restores. Shared-manifest transactions also pass with a negotiated
+16-item RPC limit. Boundary, rollback, fence and cancellation checks remain
+required. These disposable fixtures do not reproduce the existing 380-million-
+location production database or NFS crawl. Fresh metadata assessment, sealed
+binary/configuration pins and representative end-to-end qualification are still
+required before a production restart or a new full-scope ETA.
+
 **Pathdiff Qualification Order:**
 
 No pathdiff systemd unit or executable was found in the deployment locations

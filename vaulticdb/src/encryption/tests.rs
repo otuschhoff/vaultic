@@ -8,11 +8,14 @@ mod tests {
         Aes256Gcm, KeyInit,
     };
     use futures_util::TryStreamExt;
+    use slatedb::object_store::memory::InMemory;
     use slatedb::object_store::{
         local::LocalFileSystem, Attribute, AttributeValue, Attributes, ObjectStoreExt,
     };
-    use slatedb::object_store::memory::InMemory;
-    use slatedb::{config::{FlushOptions, FlushType}, Db, WriteBatch};
+    use slatedb::{
+        config::{FlushOptions, FlushType},
+        Db, WriteBatch,
+    };
 
     #[derive(Debug, Default)]
     struct CountingStore {
@@ -28,11 +31,20 @@ mod tests {
 
     #[async_trait]
     impl ObjectStore for CountingStore {
-        async fn put_opts(&self, location: &Path, payload: PutPayload, options: PutOptions) -> Result<PutResult> {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: PutPayload,
+            options: PutOptions,
+        ) -> Result<PutResult> {
             self.inner.put_opts(location, payload, options).await
         }
 
-        async fn put_multipart_opts(&self, location: &Path, options: PutMultipartOptions) -> Result<Box<dyn MultipartUpload>> {
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            options: PutMultipartOptions,
+        ) -> Result<Box<dyn MultipartUpload>> {
             self.inner.put_multipart_opts(location, options).await
         }
 
@@ -43,14 +55,24 @@ mod tests {
             let attributes = result.attributes.clone();
             let extensions = result.extensions.clone();
             let bytes = result.bytes().await?;
-            self.reads.lock().unwrap().push((location.to_string(), range.start, bytes.len() as u64));
+            self.reads.lock().unwrap().push((
+                location.to_string(),
+                range.start,
+                bytes.len() as u64,
+            ));
             Ok(GetResult {
                 payload: GetResultPayload::Stream(stream::once(async { Ok(bytes) }).boxed()),
-                meta, range, attributes, extensions,
+                meta,
+                range,
+                attributes,
+                extensions,
             })
         }
 
-        fn delete_stream(&self, locations: BoxStream<'static, Result<Path>>) -> BoxStream<'static, Result<Path>> {
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, Result<Path>>,
+        ) -> BoxStream<'static, Result<Path>> {
             self.inner.delete_stream(locations)
         }
 
@@ -110,8 +132,15 @@ mod tests {
     async fn partial_range_does_not_retain_decrypted_chunk_allocation() {
         let encrypted = store(Arc::new(InMemory::new()), "repo-a").with_chunk_size(64 * 1024);
         let location = Path::from("compacted/small-range.sst");
-        let plaintext = Bytes::from((0..128 * 1024).map(|index| (index % 251) as u8).collect::<Vec<_>>());
-        encrypted.put(&location, plaintext.clone().into()).await.unwrap();
+        let plaintext = Bytes::from(
+            (0..128 * 1024)
+                .map(|index| (index % 251) as u8)
+                .collect::<Vec<_>>(),
+        );
+        encrypted
+            .put(&location, plaintext.clone().into())
+            .await
+            .unwrap();
         for range in [128..192, 65504..65568, 131008..131072] {
             let mut options = GetOptions::default();
             options.range = Some(GetRange::Bounded(range.start as u64..range.end as u64));
@@ -128,39 +157,71 @@ mod tests {
     #[ignore = "offline repeated encrypted point-read measurement"]
     async fn nearby_ranges_reuse_one_authenticated_chunk_offline() {
         let encrypted = EncryptedObjectStore::new(
-            Arc::new(InMemory::new()), "repo-a", vec![EncryptionKey::new(1, [7; 32])], 1,
-        ).unwrap();
+            Arc::new(InMemory::new()),
+            "repo-a",
+            vec![EncryptionKey::new(1, [7; 32])],
+            1,
+        )
+        .unwrap();
         let location = Path::from("compacted/nearby-ranges.sst");
-        let plaintext = Bytes::from((0..DEFAULT_CHUNK_SIZE).map(|index| (index % 251) as u8).collect::<Vec<_>>());
-        encrypted.put(&location, plaintext.clone().into()).await.unwrap();
+        let plaintext = Bytes::from(
+            (0..DEFAULT_CHUNK_SIZE)
+                .map(|index| (index % 251) as u8)
+                .collect::<Vec<_>>(),
+        );
+        encrypted
+            .put(&location, plaintext.clone().into())
+            .await
+            .unwrap();
         encrypted.get_range(&location, 0..64).await.unwrap();
-        let ranges = (0..16).map(|index| index * 8192..index * 8192 + 64).collect::<Vec<_>>();
+        let ranges = (0..16)
+            .map(|index| index * 8192..index * 8192 + 64)
+            .collect::<Vec<_>>();
         let groups = 100;
-        for modes in [["individual", "manual", "get_ranges"], ["get_ranges", "manual", "individual"]] {
+        for modes in [
+            ["individual", "manual", "get_ranges"],
+            ["get_ranges", "manual", "individual"],
+        ] {
             for mode in modes {
                 let started = std::time::Instant::now();
                 for _ in 0..groups {
                     match mode {
                         "manual" => {
-                            let chunk = encrypted.get_range(&location, 0..DEFAULT_CHUNK_SIZE as u64).await.unwrap();
+                            let chunk = encrypted
+                                .get_range(&location, 0..DEFAULT_CHUNK_SIZE as u64)
+                                .await
+                                .unwrap();
                             for range in &ranges {
                                 assert_eq!(&chunk[range.clone()], &plaintext[range.clone()]);
                             }
                         }
                         "get_ranges" => {
-                            let requested = ranges.iter().map(|range| range.start as u64..range.end as u64).collect::<Vec<_>>();
+                            let requested = ranges
+                                .iter()
+                                .map(|range| range.start as u64..range.end as u64)
+                                .collect::<Vec<_>>();
                             let actual = encrypted.get_ranges(&location, &requested).await.unwrap();
                             for (result, range) in actual.iter().zip(&ranges) {
                                 assert_eq!(result, &plaintext.slice(range.clone()));
                             }
                         }
-                        _ => for range in &ranges {
-                            let actual = encrypted.get_range(&location, range.start as u64..range.end as u64).await.unwrap();
-                            assert_eq!(actual, plaintext.slice(range.clone()));
+                        _ => {
+                            for range in &ranges {
+                                let actual = encrypted
+                                    .get_range(&location, range.start as u64..range.end as u64)
+                                    .await
+                                    .unwrap();
+                                assert_eq!(actual, plaintext.slice(range.clone()));
+                            }
                         }
                     }
                 }
-                let requests = groups * if mode == "individual" { ranges.len() } else { 1 };
+                let requests = groups
+                    * if mode == "individual" {
+                        ranges.len()
+                    } else {
+                        1
+                    };
                 eprintln!("mode={mode} groups={groups} requests={requests} ciphertext_bytes={} elapsed_ms={}",
                     requests * (DEFAULT_CHUNK_SIZE + TAG_SIZE), started.elapsed().as_millis());
             }
@@ -171,63 +232,113 @@ mod tests {
     #[ignore = "offline persisted encrypted SST read attribution"]
     async fn encrypted_sst_nearby_gets_vs_multi_get_offline() {
         let raw = Arc::new(CountingStore::default());
-        let encrypted: Arc<dyn ObjectStore> = Arc::new(EncryptedObjectStore::new(
-            raw.clone(), "repo-a", vec![EncryptionKey::new(1, [7; 32])], 1,
-        ).unwrap());
+        let encrypted: Arc<dyn ObjectStore> = Arc::new(
+            EncryptedObjectStore::new(
+                raw.clone(),
+                "repo-a",
+                vec![EncryptionKey::new(1, [7; 32])],
+                1,
+            )
+            .unwrap(),
+        );
         let path = "encrypted-nearby-sst";
-        let writer = Db::builder(path, encrypted.clone()).with_db_cache_disabled().build().await.unwrap();
+        let writer = Db::builder(path, encrypted.clone())
+            .with_db_cache_disabled()
+            .build()
+            .await
+            .unwrap();
         let mut batch = WriteBatch::new();
         for ordinal in 0..4096u32 {
-            batch.put(format!("key:{ordinal:05}"), vec![(ordinal % 251) as u8; 1024]);
+            batch.put(
+                format!("key:{ordinal:05}"),
+                vec![(ordinal % 251) as u8; 1024],
+            );
         }
         writer.write(batch).await.unwrap();
-        writer.flush_with_options(FlushOptions { flush_type: FlushType::MemTable }).await.unwrap();
+        writer
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
         writer.close().await.unwrap();
 
-        let keys = (1024..1040).map(|ordinal| format!("key:{ordinal:05}")).collect::<Vec<_>>();
-        for modes in [["individual", "batch"], ["batch", "individual"]] {
+        let keys = (1024..1040)
+            .map(|ordinal| format!("key:{ordinal:05}"))
+            .collect::<Vec<_>>();
+        let groups = 32;
+        for modes in [
+            ["individual", "batch", "cached"],
+            ["cached", "batch", "individual"],
+        ] {
             let mut individual = None;
             let mut batched = None;
             for mode in modes {
-                let reader = Db::builder(path, encrypted.clone()).with_db_cache_disabled().build().await.unwrap();
+                let builder = Db::builder(path, encrypted.clone());
+                let reader = if mode == "cached" {
+                    builder.build().await.unwrap()
+                } else {
+                    builder.with_db_cache_disabled().build().await.unwrap()
+                };
+                if mode == "cached" {
+                    for key in &keys {
+                        reader.get(key).await.unwrap();
+                    }
+                }
                 raw.reads.lock().unwrap().clear();
                 let started = std::time::Instant::now();
-                let results = if mode == "batch" {
-                    reader.multi_get(&keys).await.unwrap()
-                } else {
-                    let mut results = Vec::new();
-                    for key in &keys {
-                        results.push(reader.get(key).await.unwrap());
-                    }
-                    results
-                };
+                let mut results = Vec::new();
+                for _ in 0..groups {
+                    results = if mode == "batch" {
+                        reader.multi_get(&keys).await.unwrap()
+                    } else {
+                        let mut results = Vec::new();
+                        for key in &keys {
+                            results.push(reader.get(key).await.unwrap());
+                        }
+                        results
+                    };
+                }
                 let elapsed = started.elapsed();
                 assert_eq!(results.len(), keys.len());
                 for (offset, value) in results.into_iter().enumerate() {
-                    assert_eq!(value.unwrap(), Bytes::from(vec![((1024 + offset) % 251) as u8; 1024]));
+                    assert_eq!(
+                        value.unwrap(),
+                        Bytes::from(vec![((1024 + offset) % 251) as u8; 1024])
+                    );
                 }
                 let reads = std::mem::take(&mut *raw.reads.lock().unwrap());
                 let mut by_class = std::collections::BTreeMap::new();
                 let mut by_size = std::collections::BTreeMap::new();
                 for (location, start, bytes) in reads {
-                    let class = if location.contains("/wal/") { "wal" }
-                        else if location.contains(".sst") { "sst" }
-                        else if location.contains("manifest") { "manifest" }
-                        else { "other" };
+                    let class = if location.contains("/wal/") {
+                        "wal"
+                    } else if location.contains(".sst") {
+                        "sst"
+                    } else if location.contains("manifest") {
+                        "manifest"
+                    } else {
+                        "other"
+                    };
                     let totals = by_class.entry(class).or_insert((0usize, 0u64, 0u64));
                     totals.0 += 1;
                     totals.1 += bytes;
                     totals.2 = totals.2.max(start);
                     *by_size.entry((class, bytes)).or_insert(0usize) += 1;
                 }
-                assert!(by_class.values().map(|totals| totals.0).sum::<usize>() > 0);
-                let sst = *by_class.get("sst").expect("persisted SST must be read");
+                let sst = by_class.get("sst").copied().unwrap_or_default();
                 if mode == "batch" {
                     batched = Some(sst);
+                } else if mode == "cached" {
+                    assert_eq!(
+                        sst.0, 0,
+                        "warm cached point reads must not reach encrypted SST storage"
+                    );
                 } else {
                     individual = Some(sst);
                 }
-                eprintln!("mode={mode} elapsed_us={} reads_by_class={by_class:?} reads_by_size={by_size:?}", elapsed.as_micros());
+                eprintln!("mode={mode} operations={} elapsed_us={} reads_by_class={by_class:?} reads_by_size={by_size:?}",
+                    groups * keys.len(), elapsed.as_micros());
                 reader.close().await.unwrap();
             }
             let individual = individual.unwrap();
@@ -299,13 +410,9 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let inner: Arc<dyn ObjectStore> =
             Arc::new(LocalFileSystem::new_with_prefix(&root).unwrap());
-        let encrypted = EncryptedObjectStore::new(
-            inner,
-            "repo-a",
-            vec![EncryptionKey::new(1, [7; 32])],
-            1,
-        )
-        .unwrap();
+        let encrypted =
+            EncryptedObjectStore::new(inner, "repo-a", vec![EncryptionKey::new(1, [7; 32])], 1)
+                .unwrap();
         let mut attributes = Attributes::new();
         attributes.insert(
             Attribute::Metadata("slatedb-put-id".into()),
@@ -365,7 +472,12 @@ mod tests {
             .unwrap();
         let mut batch = WriteBatch::new();
         batch.put(b"plaintext-key", b"plaintext-value");
-        db.write(batch).await.unwrap().await_durable().await.unwrap();
+        db.write(batch)
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
 
         let objects = raw_wal.list(None).try_collect::<Vec<_>>().await.unwrap();
         assert!(!objects.is_empty());
@@ -377,8 +489,12 @@ mod tests {
                 .bytes()
                 .await
                 .unwrap();
-            assert!(!raw.windows(b"plaintext-key".len()).any(|window| window == b"plaintext-key"));
-            assert!(!raw.windows(b"plaintext-value".len()).any(|window| window == b"plaintext-value"));
+            assert!(!raw
+                .windows(b"plaintext-key".len())
+                .any(|window| window == b"plaintext-key"));
+            assert!(!raw
+                .windows(b"plaintext-value".len())
+                .any(|window| window == b"plaintext-value"));
         }
         db.close().await.unwrap();
     }
@@ -466,7 +582,14 @@ mod tests {
             plaintext.slice(7..137)
         );
 
-        let mut raw = inner.get(&path).await.unwrap().bytes().await.unwrap().to_vec();
+        let mut raw = inner
+            .get(&path)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+            .to_vec();
         raw[HEADER_SIZE + 5 * (16 + TAG_SIZE)] ^= 1;
         inner.put(&path, raw.into()).await.unwrap();
         assert!(encrypted.get(&path).await.is_err());

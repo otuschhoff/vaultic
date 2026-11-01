@@ -144,6 +144,8 @@ type backupOptions struct {
 	DeferredExpiry            time.Duration
 	AcknowledgeMetadataBypass bool
 
+	MetadataPublicationGroupSize int
+
 	readConcurrencyFlag *pflag.Flag
 	FSTestHook          func(fs.FS) fs.FS
 }
@@ -237,6 +239,7 @@ func (options *backupOptions) AddFlags(f *pflag.FlagSet) {
 	f.StringSliceVar(&options.ProfileNames, "name", nil, "run named [[backup.snapshots]] profile job (repeatable)")
 	f.BoolVar(&options.SnapshotPerSource, "snapshot-per-source", false, "create an independent snapshot for each source")
 	f.BoolVar(&options.CoalesceSources, "coalesce-sources", false, "combine all sources of each backup job in one snapshot (default)")
+	f.IntVar(&options.MetadataPublicationGroupSize, "metadata-publication-group-size", 4, "maximum metadata publication group size (0 uses 4; 1-64; sizes above 4 use atomic groups)")
 	f.BoolVar(&options.Init, "init", false, "initialize the repository if it does not exist")
 	f.BoolVar(&options.List, "ls", false, "list the contents of the created snapshot")
 
@@ -554,6 +557,9 @@ func readFilenamesRaw(r io.Reader) (names []string, err error) {
 
 // Check returns an error when an invalid combination of options was set.
 func (options backupOptions) Check(globalOptions global.Options, args []string) error {
+	if options.MetadataPublicationGroupSize < 0 || options.MetadataPublicationGroupSize > 64 {
+		return errors.Fatal("--metadata-publication-group-size must be between 0 and 64 (0 uses 4)")
+	}
 	if options.SnapshotPerSource && options.CoalesceSources {
 		return errors.Fatal("--snapshot-per-source and --coalesce-sources are mutually exclusive")
 	}

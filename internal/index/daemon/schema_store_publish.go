@@ -167,11 +167,13 @@ func (store *SchemaStore) publishAllocatedReconciledRevisionOnce(
 	return revision, nil
 }
 
+const MaxAllocatedPublicationGroupSize = 64
+
 func (store *SchemaStore) PublishAllocatedReconciledRevisionGroup(
 	ctx context.Context, count int, build func(uint64) ([]ReconciledRevision, error),
 ) (uint64, error) {
-	if count < 1 || count > 4 || build == nil {
-		return 0, fmt.Errorf("allocated publication group requires 1 to 4 revisions and a builder")
+	if count < 1 || count > MaxAllocatedPublicationGroupSize || build == nil {
+		return 0, fmt.Errorf("allocated publication group requires 1 to %d revisions and a builder", MaxAllocatedPublicationGroupSize)
 	}
 	backoff := 100 * time.Microsecond
 	for range revisionAllocationAttempts {
@@ -259,13 +261,22 @@ func (store *SchemaStore) publishAllocatedReconciledRevisionGroupOnce(
 }
 
 func validateAllocatedPublicationGroup(requests []ReconciledRevision, first uint64) error {
-	contentIDs, inputBytes := 0, 0
 	seen := make(map[string]bool, len(requests))
 	for index, request := range requests {
 		if request.Revision != first+uint64(index) || seen[string(request.CurrentKey)] {
 			return fmt.Errorf("publication group has mismatched revisions or duplicate identities")
 		}
 		seen[string(request.CurrentKey)] = true
+	}
+	return ValidateAllocatedPublicationGroupInputs(requests)
+}
+
+func ValidateAllocatedPublicationGroupInputs(requests []ReconciledRevision) error {
+	if len(requests) < 1 || len(requests) > MaxAllocatedPublicationGroupSize {
+		return fmt.Errorf("publication group exceeds inode count limit")
+	}
+	contentIDs, inputBytes := 0, 0
+	for _, request := range requests {
 		contentIDs += len(request.ContentIDs)
 		inputBytes += len(request.RevisionValue)
 		if len(request.RelatedPuts) > 1024 || len(request.DebtKeys) > 1024 || len(request.HardlinkParents) > 1024 {
@@ -424,30 +435,39 @@ func planHistoricalReferences(
 }
 
 func planCurrentInodeReferences(ctx context.Context, transaction *Transaction, input reconciledRevisionInput, plan reconciledRevisionPlan) error {
+	keys := make([][]byte, 0, 2*len(plan.newUnique))
 	for _, id := range plan.newUnique {
+		keys = append(keys, schema.ReverseInodeKey(id, input.currentParsed.FSID, input.currentParsed.Inode), schema.ReferenceCountKey(id))
+	}
+	values, found, err := publicationMultiGet(ctx, transaction, keys)
+	if err != nil {
+		return err
+	}
+	for index, id := range plan.newUnique {
 		key := schema.ReverseInodeKey(id, input.currentParsed.FSID, input.currentParsed.Inode)
-		_, found, err := transaction.Get(ctx, key)
-		if err != nil {
-			return err
-		}
 		value, err := (schema.ReverseInodeRecord{LatestRevision: input.reconciled.Revision, State: schema.ReferenceCurrent}).MarshalBinary()
 		if err != nil {
 			return err
 		}
 		plan.puts[string(key)] = Mutation{Key: key, Value: value}
 		countKey := schema.ReferenceCountKey(id)
-		count, err := transactionReferenceCount(ctx, transaction, plan.puts, countKey)
+		var count schema.ReferenceCountRecord
+		if mutation, pending := plan.puts[string(countKey)]; pending {
+			count, err = schema.UnmarshalReferenceCountRecord(mutation.Value)
+		} else if found[2*index+1] {
+			count, err = schema.UnmarshalReferenceCountRecord(values[2*index+1].Value)
+		}
 		if err != nil {
 			return err
 		}
 		occurrences := countID(input.reconciled.ContentIDs, id)
 		if math.MaxUint64-count.TotalReferences < occurrences || count.DistinctRevisions == math.MaxUint64 ||
-			(!found && count.DistinctInodes == math.MaxUint64) {
+			(!found[2*index] && count.DistinctInodes == math.MaxUint64) {
 			return fmt.Errorf("reference count overflow")
 		}
 		count.TotalReferences += occurrences
 		count.DistinctRevisions++
-		if !found {
+		if !found[2*index] {
 			count.DistinctInodes++
 		}
 		count.UpdateSequence = input.reconciled.Revision
@@ -470,8 +490,16 @@ func planCurrentManifestReferences(ctx context.Context, transaction *Transaction
 			segmentByID[id] = uint32(index / schema.DefaultContentSegmentIDs)
 		}
 	}
-	for id, segment := range segmentByID {
-		if err := planCurrentManifestReference(ctx, transaction, input.reconciled.Revision, plan, id, segment); err != nil {
+	keys := make([][]byte, len(plan.newUnique))
+	for index, id := range plan.newUnique {
+		keys[index] = schema.ReverseManifestKey(id, plan.manifestID)
+	}
+	_, found, err := publicationMultiGet(ctx, transaction, keys)
+	if err != nil {
+		return err
+	}
+	for index, id := range plan.newUnique {
+		if err := planCurrentManifestReference(ctx, transaction, input.reconciled.Revision, plan, id, segmentByID[id], found[index]); err != nil {
 			return err
 		}
 	}
@@ -485,12 +513,9 @@ func planCurrentManifestReference(
 	plan reconciledRevisionPlan,
 	id schema.ID,
 	segment uint32,
+	found bool,
 ) error {
 	key := schema.ReverseManifestKey(id, plan.manifestID)
-	_, found, err := transaction.Get(ctx, key)
-	if err != nil {
-		return err
-	}
 	value, err := (schema.ReverseManifestRecord{Segment: segment, State: schema.ReferenceCurrent}).MarshalBinary()
 	if err != nil {
 		return err
@@ -733,6 +758,22 @@ func transactionContentIDs(ctx context.Context, transaction *Transaction, record
 	default:
 		return nil, fmt.Errorf("invalid content mode")
 	}
+}
+
+func publicationMultiGet(ctx context.Context, transaction *Transaction, keys [][]byte) ([]KeyValue, []bool, error) {
+	values := make([]KeyValue, 0, len(keys))
+	found := make([]bool, 0, len(keys))
+	for len(keys) > 0 {
+		count := min(len(keys), 256, int(transaction.client.limits.MaxBatchItems))
+		batchValues, batchFound, err := transaction.MultiGet(ctx, keys[:count])
+		if err != nil {
+			return nil, nil, err
+		}
+		values = append(values, batchValues...)
+		found = append(found, batchFound...)
+		keys = keys[count:]
+	}
+	return values, found, nil
 }
 
 func transactionReferenceCount(ctx context.Context, transaction *Transaction, puts map[string]Mutation, key []byte) (schema.ReferenceCountRecord, error) {

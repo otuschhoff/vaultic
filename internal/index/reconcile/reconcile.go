@@ -39,6 +39,7 @@ type Options struct {
 	Authoritative           *AuthoritativeCrawlScope
 	AtomicInodePublication  bool
 	AtomicPublicationGroups bool
+	PublicationGroupSize    int
 }
 
 type AuthoritativeCrawlScope struct {
@@ -62,6 +63,13 @@ func (options Options) withDefaults() (Options, error) {
 	if options.BatchSize == 0 {
 		options.BatchSize = DefaultBatchSize
 	}
+	if options.PublicationGroupSize == 0 {
+		options.PublicationGroupSize = publicationConcurrency
+	}
+	if options.PublicationGroupSize < 1 || options.PublicationGroupSize > daemon.MaxAllocatedPublicationGroupSize ||
+		options.PublicationGroupSize > publicationConcurrency && !options.AtomicPublicationGroups {
+		return Options{}, fmt.Errorf("larger reconciliation publication groups require atomic publication and a size up to %d", daemon.MaxAllocatedPublicationGroupSize)
+	}
 	if options.Workers < 1 || options.QueueDepth < 1 || options.BatchSize < 1 || options.BatchSize > 10_000 {
 		return Options{}, fmt.Errorf("invalid reconciliation worker, queue, or batch limit")
 	}
@@ -73,48 +81,48 @@ func (options Options) withDefaults() (Options, error) {
 }
 
 type Metrics struct {
-	Scanned                                   uint64                         `json:"scanned"`
-	Reused                                    uint64                         `json:"reused"`
-	Changed                                   uint64                         `json:"changed"`
-	Deferred                                  uint64                         `json:"deferred"`
-	Failed                                    uint64                         `json:"failed"`
-	FailedCanceled                            uint64                         `json:"failed_canceled"`
-	Reconciled                                uint64                         `json:"reconciled"`
-	PublicationGroups                         [publicationConcurrency]uint64 `json:"publication_groups_by_size"`
-	PublicationGroupNS                        uint64                         `json:"publication_group_ns"`
-	ExistingRecordLookupNS                    uint64                         `json:"existing_record_lookup_ns"`
-	PublicationWorkerWaitNS                   uint64                         `json:"publication_worker_wait_ns"`
-	RevisionAllocationCalls                   uint64                         `json:"revision_allocation_calls"`
-	RevisionAllocationFailures                uint64                         `json:"revision_allocation_failures"`
-	RevisionAllocationFailedCanceled          uint64                         `json:"revision_allocation_failed_canceled"`
-	RevisionAllocationRecoveredAborts         uint64                         `json:"revision_allocation_recovered_aborts"`
-	RevisionAllocationTerminalAborts          uint64                         `json:"revision_allocation_terminal_aborts"`
-	RevisionAllocationRecoveredRetryCalls     uint64                         `json:"revision_allocation_recovered_retry_calls"`
-	RevisionAllocationTerminalRetryCalls      uint64                         `json:"revision_allocation_terminal_retry_calls"`
-	RevisionAllocationNS                      uint64                         `json:"revision_allocation_ns"`
-	RevisionsReserved                         uint64                         `json:"revisions_reserved"`
-	InodeRevisionsAssigned                    uint64                         `json:"inode_revisions_assigned"`
-	InodePublicationCalls                     uint64                         `json:"inode_publication_calls"`
-	InodePublicationFailures                  uint64                         `json:"inode_publication_failures"`
-	InodePublicationRecoveredAborts           uint64                         `json:"inode_publication_recovered_aborts"`
-	InodePublicationTerminalAborts            uint64                         `json:"inode_publication_terminal_aborts"`
-	InodePublicationRecoveredCommitAborts     uint64                         `json:"inode_publication_recovered_commit_aborts"`
-	InodePublicationTerminalCommitAborts      uint64                         `json:"inode_publication_terminal_commit_aborts"`
-	InodePublicationRecoveredRetryCalls       uint64                         `json:"inode_publication_recovered_retry_calls"`
-	InodePublicationTerminalRetryCalls        uint64                         `json:"inode_publication_terminal_retry_calls"`
-	InodePublicationNS                        uint64                         `json:"inode_publication_ns"`
-	DirectoryPublicationCalls                 uint64                         `json:"directory_publication_calls"`
-	DirectoryPublicationFailures              uint64                         `json:"directory_publication_failures"`
-	DirectoryPublicationRecoveredAborts       uint64                         `json:"directory_publication_recovered_aborts"`
-	DirectoryPublicationTerminalAborts        uint64                         `json:"directory_publication_terminal_aborts"`
-	DirectoryPublicationRecoveredCommitAborts uint64                         `json:"directory_publication_recovered_commit_aborts"`
-	DirectoryPublicationTerminalCommitAborts  uint64                         `json:"directory_publication_terminal_commit_aborts"`
-	DirectoryPublicationRecoveredRetryCalls   uint64                         `json:"directory_publication_recovered_retry_calls"`
-	DirectoryPublicationTerminalRetryCalls    uint64                         `json:"directory_publication_terminal_retry_calls"`
-	DirectoryPublicationNS                    uint64                         `json:"directory_publication_ns"`
-	AtomicGroupCalls                          uint64                         `json:"atomic_group_calls"`
-	AtomicGroupFailures                       uint64                         `json:"atomic_group_failures"`
-	AtomicGroupNS                             uint64                         `json:"atomic_group_ns"`
+	Scanned                                   uint64                                          `json:"scanned"`
+	Reused                                    uint64                                          `json:"reused"`
+	Changed                                   uint64                                          `json:"changed"`
+	Deferred                                  uint64                                          `json:"deferred"`
+	Failed                                    uint64                                          `json:"failed"`
+	FailedCanceled                            uint64                                          `json:"failed_canceled"`
+	Reconciled                                uint64                                          `json:"reconciled"`
+	PublicationGroups                         [daemon.MaxAllocatedPublicationGroupSize]uint64 `json:"publication_groups_by_size"`
+	PublicationGroupNS                        uint64                                          `json:"publication_group_ns"`
+	ExistingRecordLookupNS                    uint64                                          `json:"existing_record_lookup_ns"`
+	PublicationWorkerWaitNS                   uint64                                          `json:"publication_worker_wait_ns"`
+	RevisionAllocationCalls                   uint64                                          `json:"revision_allocation_calls"`
+	RevisionAllocationFailures                uint64                                          `json:"revision_allocation_failures"`
+	RevisionAllocationFailedCanceled          uint64                                          `json:"revision_allocation_failed_canceled"`
+	RevisionAllocationRecoveredAborts         uint64                                          `json:"revision_allocation_recovered_aborts"`
+	RevisionAllocationTerminalAborts          uint64                                          `json:"revision_allocation_terminal_aborts"`
+	RevisionAllocationRecoveredRetryCalls     uint64                                          `json:"revision_allocation_recovered_retry_calls"`
+	RevisionAllocationTerminalRetryCalls      uint64                                          `json:"revision_allocation_terminal_retry_calls"`
+	RevisionAllocationNS                      uint64                                          `json:"revision_allocation_ns"`
+	RevisionsReserved                         uint64                                          `json:"revisions_reserved"`
+	InodeRevisionsAssigned                    uint64                                          `json:"inode_revisions_assigned"`
+	InodePublicationCalls                     uint64                                          `json:"inode_publication_calls"`
+	InodePublicationFailures                  uint64                                          `json:"inode_publication_failures"`
+	InodePublicationRecoveredAborts           uint64                                          `json:"inode_publication_recovered_aborts"`
+	InodePublicationTerminalAborts            uint64                                          `json:"inode_publication_terminal_aborts"`
+	InodePublicationRecoveredCommitAborts     uint64                                          `json:"inode_publication_recovered_commit_aborts"`
+	InodePublicationTerminalCommitAborts      uint64                                          `json:"inode_publication_terminal_commit_aborts"`
+	InodePublicationRecoveredRetryCalls       uint64                                          `json:"inode_publication_recovered_retry_calls"`
+	InodePublicationTerminalRetryCalls        uint64                                          `json:"inode_publication_terminal_retry_calls"`
+	InodePublicationNS                        uint64                                          `json:"inode_publication_ns"`
+	DirectoryPublicationCalls                 uint64                                          `json:"directory_publication_calls"`
+	DirectoryPublicationFailures              uint64                                          `json:"directory_publication_failures"`
+	DirectoryPublicationRecoveredAborts       uint64                                          `json:"directory_publication_recovered_aborts"`
+	DirectoryPublicationTerminalAborts        uint64                                          `json:"directory_publication_terminal_aborts"`
+	DirectoryPublicationRecoveredCommitAborts uint64                                          `json:"directory_publication_recovered_commit_aborts"`
+	DirectoryPublicationTerminalCommitAborts  uint64                                          `json:"directory_publication_terminal_commit_aborts"`
+	DirectoryPublicationRecoveredRetryCalls   uint64                                          `json:"directory_publication_recovered_retry_calls"`
+	DirectoryPublicationTerminalRetryCalls    uint64                                          `json:"directory_publication_terminal_retry_calls"`
+	DirectoryPublicationNS                    uint64                                          `json:"directory_publication_ns"`
+	AtomicGroupCalls                          uint64                                          `json:"atomic_group_calls"`
+	AtomicGroupFailures                       uint64                                          `json:"atomic_group_failures"`
+	AtomicGroupNS                             uint64                                          `json:"atomic_group_ns"`
 }
 
 type Store interface {
@@ -156,6 +164,12 @@ type preparedItem struct {
 	prepareErr         error
 	HasMultipleParents bool
 	HardlinkParents    []schema.HardlinkParentRef
+	existingRecord     *existingPublicationRecord
+}
+
+type existingPublicationRecord struct {
+	value []byte
+	found bool
 }
 
 type publishedItem struct {
@@ -189,7 +203,7 @@ type Reconciler struct {
 	failed                                    atomic.Uint64
 	failedCanceled                            atomic.Uint64
 	reconciled                                atomic.Uint64
-	publicationGroups                         [publicationConcurrency]atomic.Uint64
+	publicationGroups                         [daemon.MaxAllocatedPublicationGroupSize]atomic.Uint64
 	publicationGroupNS                        atomic.Uint64
 	existingRecordLookupNS                    atomic.Uint64
 	publicationWorkerWaitNS                   atomic.Uint64
@@ -711,7 +725,11 @@ func (reconciler *Reconciler) processBatch(
 	hardlinks map[identity][]preparedItem,
 	published map[string]publishedItem,
 ) {
-	pending := make([]preparedItem, 0, publicationConcurrency)
+	groupSize := reconciler.options.PublicationGroupSize
+	if groupSize == 0 {
+		groupSize = publicationConcurrency
+	}
+	pending := make([]preparedItem, 0, groupSize)
 	allocate := reconciler.inodeRevisionAllocator(uint64(len(batch)))
 	flush := func() {
 		reconciler.publishInodesWithAllocator(pending, published, allocate)
@@ -745,7 +763,7 @@ func (reconciler *Reconciler) processBatch(
 			flush()
 		}
 		pending = append(pending, item)
-		if len(pending) == publicationConcurrency {
+		if len(pending) == groupSize {
 			flush()
 		}
 	}
@@ -805,10 +823,25 @@ func (reconciler *Reconciler) publishInodesWithAllocator(
 	if len(items) == 0 {
 		return
 	}
+	atomicGroup := reconciler.options.AtomicPublicationGroups
+	if atomicGroup {
+		prefix := reconciler.atomicPublicationPrefix(items)
+		if prefix == 0 {
+			prefix = 1
+			atomicGroup = false
+		}
+		if prefix < len(items) {
+			reconciler.publishInodesWithAllocator(items[:prefix], published, allocate)
+			reconciler.publishInodesWithAllocator(items[prefix:], published, allocate)
+			return
+		}
+	}
+	items = append([]preparedItem(nil), items...)
+	reconciler.prefetchExistingPublicationRecords(items)
 	started := time.Now()
 	reconciler.publicationGroups[len(items)-1].Add(1)
 	defer func() { reconciler.publicationGroupNS.Add(uint64(time.Since(started))) }()
-	if reconciler.options.AtomicPublicationGroups {
+	if atomicGroup {
 		reconciler.publishInodeGroup(items, published)
 		return
 	}
@@ -936,9 +969,59 @@ func (reconciler *Reconciler) prepareGroupMember(item preparedItem) (daemon.Reco
 	return request, binding, key, err
 }
 
+func (reconciler *Reconciler) atomicPublicationPrefix(items []preparedItem) int {
+	requests := make([]daemon.ReconciledRevision, 0, len(items))
+	for index, item := range items {
+		value, content, err := prepareInodeValue(item, false)
+		if err != nil {
+			return index
+		}
+		related, err := reconciler.pathVersionMutations(item, 1, nodeType(item.node.Type), true)
+		if err != nil {
+			return index
+		}
+		requests = append(requests, daemon.ReconciledRevision{
+			RevisionValue: value, ContentIDs: content, DebtKeys: item.debtKeys,
+			RelatedPuts: related, HardlinkParents: item.HardlinkParents,
+		})
+		if daemon.ValidateAllocatedPublicationGroupInputs(requests) != nil {
+			return index
+		}
+	}
+	return len(items)
+}
+
+func (reconciler *Reconciler) prefetchExistingPublicationRecords(items []preparedItem) {
+	if len(items) < 2 {
+		return
+	}
+	keys := make([][]byte, len(items))
+	for index, item := range items {
+		if publicationConflicts(items[:index], item) {
+			return
+		}
+		keys[index] = schema.CurrentInodeKey(item.identity.fsid, item.identity.inode)
+	}
+	started := time.Now()
+	values, found, err := reconciler.store.MultiGet(reconciler.ctx, keys)
+	reconciler.existingRecordLookupNS.Add(uint64(time.Since(started)))
+	if err != nil || len(values) != len(items) || len(found) != len(items) {
+		return
+	}
+	for index := range items {
+		items[index].existingRecord = &existingPublicationRecord{value: values[index].Value, found: found[index]}
+	}
+}
+
 func (reconciler *Reconciler) lookupExistingPublicationRecord(
 	item preparedItem, currentKey, value []byte, directory bool, content []schema.ID, priorContent *[]schema.ID,
 ) ([]byte, bool, bool, error) {
+	if record := item.existingRecord; record != nil {
+		if !record.found {
+			return nil, true, false, nil
+		}
+		return reconciler.reuseExistingRecord(item, record.value, value, directory, content, priorContent)
+	}
 	started := time.Now()
 	defer func() { reconciler.existingRecordLookupNS.Add(uint64(time.Since(started))) }()
 	values, found, err := reconciler.store.MultiGet(reconciler.ctx, [][]byte{currentKey})

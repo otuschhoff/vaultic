@@ -43,6 +43,9 @@ func TestBackupSnapshotModeValidation(t *testing.T) {
 		wantError bool
 	}{
 		{name: "default"},
+		{name: "wide-publication", options: backupOptions{MetadataPublicationGroupSize: 64}},
+		{name: "negative-publication", options: backupOptions{MetadataPublicationGroupSize: -1}, wantError: true},
+		{name: "oversized-publication", options: backupOptions{MetadataPublicationGroupSize: 65}, wantError: true},
 		{name: "per-source", options: backupOptions{SnapshotPerSource: true}},
 		{name: "coalesced", options: backupOptions{CoalesceSources: true}},
 		{name: "conflict", options: backupOptions{SnapshotPerSource: true, CoalesceSources: true}, wantError: true},
@@ -181,7 +184,7 @@ func TestBackupReportsReconciliationStats(t *testing.T) {
 	term := &ui.MockTerminal{}
 	run := &backupRun{term: term, globalOptions: global.Options{JSON: true}}
 	stats := reconcile.Metrics{
-		PublicationGroups: [4]uint64{1, 2, 3, 4}, RevisionAllocationCalls: 7, RevisionAllocationFailures: 1,
+		PublicationGroups: [daemon.MaxAllocatedPublicationGroupSize]uint64{1, 2, 3, 4}, RevisionAllocationCalls: 7, RevisionAllocationFailures: 1,
 		RevisionAllocationFailedCanceled: 1,
 		Failed:                           3, FailedCanceled: 2,
 		RevisionAllocationRecoveredAborts: 3, RevisionAllocationTerminalAborts: 2,
