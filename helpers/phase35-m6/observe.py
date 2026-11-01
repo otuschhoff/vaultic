@@ -15,20 +15,20 @@ def optional_text(path):
         return None
 
 
-def process_sample(pid):
+def process_sample(pid, diagnostics=True):
     root = Path('/proc') / str(pid)
     text = (root / 'stat').read_text()
     fields = text[text.rfind(')') + 2:].split()
     status = (root / 'status').read_text()
     rss = next((int(line.split()[1]) * 1024 for line in status.splitlines()
                 if line.startswith('VmRSS:')), None)
-    io = optional_text(root / 'io')
+    io = optional_text(root / 'io') if diagnostics else None
     return {'pid': pid, 'start_ticks': int(fields[19]), 'name': (root / 'comm').read_text().strip(),
             'state': fields[0], 'cpu_ticks': int(fields[11]) + int(fields[12]),
             'threads': int(fields[17]), 'rss_bytes': rss,
             'io': dict((key.rstrip(':'), int(value)) for key, value in
                        (line.split() for line in io.splitlines())) if io is not None else None,
-            'schedstat': optional_text(root / 'schedstat')}
+            'schedstat': optional_text(root / 'schedstat') if diagnostics else None}
 
 
 def deltas(current, previous, elapsed, ticks):

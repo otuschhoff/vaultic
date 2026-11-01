@@ -241,6 +241,9 @@ type legacyExportVerifier interface {
 
 type ExportOptions struct {
 	Full          bool
+	PendingOnly   bool
+	ExpectedPacks uint64
+	ExpectedBlobs uint64
 	DryRun        bool
 	Verify        bool
 	Since         uint64
@@ -595,6 +598,13 @@ func Export(
 	options ExportOptions,
 ) (ExportResult, error) {
 	var result ExportResult
+	if options.PendingOnly && (options.Full || options.Since != 0) {
+		return result, fmt.Errorf("pending-only export cannot be combined with full or since")
+	}
+	if (options.ExpectedPacks != 0 || options.ExpectedBlobs != 0) &&
+		(!options.PendingOnly || options.ExpectedPacks == 0 || options.ExpectedBlobs == 0) {
+		return result, fmt.Errorf("expected export counts require pending-only and positive pack and blob counts")
+	}
 	if options.PacksPerIndex == 0 {
 		options.PacksPerIndex = 1_000
 	}
@@ -614,6 +624,12 @@ func Export(
 		if record.Lifecycle == schema.PackDeleted {
 			continue
 		}
+		if options.PendingOnly {
+			if record.Lifecycle == schema.PackExportPending {
+				selected[id] = record
+			}
+			continue
+		}
 		sequence, hasCheckpoint := exported[id]
 		if options.Full || (options.Since > 0 && (!hasCheckpoint || sequence > options.Since)) ||
 			(options.Since == 0 && record.Lifecycle != schema.PackPublished) {
@@ -628,6 +644,10 @@ func Export(
 	result.PacksSelected = uint64(len(ids))
 	for _, blobs := range byPack {
 		result.BlobsSelected += uint64(len(blobs))
+	}
+	if options.ExpectedPacks != 0 && (result.PacksSelected != options.ExpectedPacks || result.BlobsSelected != options.ExpectedBlobs) {
+		return result, fmt.Errorf("pending export scope differs: selected %d packs and %d blobs, expected %d packs and %d blobs",
+			result.PacksSelected, result.BlobsSelected, options.ExpectedPacks, options.ExpectedBlobs)
 	}
 	for start := 0; start < len(ids); start += int(options.PacksPerIndex) {
 		end := min(start+int(options.PacksPerIndex), len(ids))

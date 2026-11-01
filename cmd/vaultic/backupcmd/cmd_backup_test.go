@@ -36,6 +36,28 @@ type backupCloseEngine struct {
 	stats *enginepkg.BlobLookupStats
 }
 
+func TestBackupSnapshotModeValidation(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		options   backupOptions
+		wantError bool
+	}{
+		{name: "default"},
+		{name: "per-source", options: backupOptions{SnapshotPerSource: true}},
+		{name: "coalesced", options: backupOptions{CoalesceSources: true}},
+		{name: "conflict", options: backupOptions{SnapshotPerSource: true, CoalesceSources: true}, wantError: true},
+		{name: "stdin", options: backupOptions{SnapshotPerSource: true, Stdin: true}, wantError: true},
+		{name: "command", options: backupOptions{SnapshotPerSource: true, StdinCommand: true}, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.options.Check(global.Options{}, []string{"source"})
+			if (err != nil) != test.wantError {
+				t.Fatalf("Check() = %v, wantError %t", err, test.wantError)
+			}
+		})
+	}
+}
+
 func (engine *backupCloseEngine) Close() error { return engine.close() }
 
 func (engine *backupCloseEngine) BlobLookupStats() (enginepkg.BlobLookupStats, bool) {

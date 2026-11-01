@@ -1300,6 +1300,9 @@ func rebuildCandidateName(options indexDaemonOptions) string {
 type indexExportOptions struct {
 	Daemon        indexDaemonOptions
 	Full          bool
+	PendingOnly   bool
+	ExpectedPacks uint64
+	ExpectedBlobs uint64
 	DryRun        bool
 	Verify        bool
 	Since         uint64
@@ -1325,6 +1328,9 @@ func newIndexExportCommand(globalOptions *global.Options) *cobra.Command {
 	}
 	options.Daemon.AddFlags(command.Flags())
 	command.Flags().BoolVar(&options.Full, "full", false, "export all packs instead of only packs without export checkpoints")
+	command.Flags().BoolVar(&options.PendingOnly, "pending-only", false, "export only packs awaiting compatibility publication")
+	command.Flags().Uint64Var(&options.ExpectedPacks, "expected-pending-packs", 0, "require exactly this many pending packs before writing an index")
+	command.Flags().Uint64Var(&options.ExpectedBlobs, "expected-pending-blobs", 0, "require exactly this many pending blobs before writing an index")
 	command.Flags().BoolVar(&options.DryRun, "dry-run", false, "report export work without writing JSON indexes")
 	command.Flags().BoolVar(&options.Verify, "verify", false, "read back and verify each exported JSON index")
 	command.Flags().Uint64Var(&options.Since, "since", 0, "export packs recorded after this export sequence")
@@ -1336,6 +1342,13 @@ func runIndexExport(ctx context.Context, options indexExportOptions, globalOptio
 	var result maintenance.ExportResult
 	if options.Full && options.Since != 0 {
 		return result, fmt.Errorf("--full and --since are mutually exclusive")
+	}
+	if options.PendingOnly && (options.Full || options.Since != 0) {
+		return result, fmt.Errorf("--pending-only cannot be combined with --full or --since")
+	}
+	if (options.ExpectedPacks != 0 || options.ExpectedBlobs != 0) &&
+		(!options.PendingOnly || options.ExpectedPacks == 0 || options.ExpectedBlobs == 0) {
+		return result, fmt.Errorf("expected counts require --pending-only and both positive --expected-pending-packs and --expected-pending-blobs")
 	}
 	config, err := options.Daemon.config("")
 	if err != nil {
@@ -1360,6 +1373,9 @@ func runIndexExport(ctx context.Context, options indexExportOptions, globalOptio
 		repo,
 		maintenance.ExportOptions{
 			Full:          options.Full,
+			PendingOnly:   options.PendingOnly,
+			ExpectedPacks: options.ExpectedPacks,
+			ExpectedBlobs: options.ExpectedBlobs,
 			DryRun:        options.DryRun,
 			Verify:        options.Verify,
 			Since:         options.Since,

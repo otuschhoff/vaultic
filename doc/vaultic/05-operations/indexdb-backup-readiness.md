@@ -644,10 +644,301 @@ combined first-backup scale and supervisor contract assumptions (`backup_committ
      hash-bound evaluation receipt are retained under
      `/volume2/NASDA2/vaultic-test-m6/phase2-readiness-20261031-live`.
 
-**Resume:** decide whether `[[backup.snapshots]]` should run per-export jobs
-(matching the 57 historical path groups) or a single multi-week 52-source job,
-adjust the `check --read-data` and supervisor contract parameters accordingly,
-and complete the full-scope backup schedule.
+**Snapshot modes (2026-10-31):** The default remains one snapshot containing
+all sources of each profile job, or all positional CLI sources. Set
+`snapshot-per-source = true` in `[backup]` or a `[[backup.snapshots]]` job,
+or pass `--snapshot-per-source`, to create one independent snapshot per
+resolved source. Each snapshot selects its own parent and commits independently.
+Ordinary per-source runs share one append-locked repository and load its catalog
+once per job. Archiver, reconciliation, filesystem and progress state remain
+per snapshot. Deferred and on-demand metadata sessions remain isolated.
+
+To coalesce selected directories, put them in one job and set
+`snapshot-per-source = false` and `coalesce-sources = true` on that job.
+Both modes enabled simultaneously are rejected. CLI overrides may use
+`--snapshot-per-source=false --coalesce-sources` to override inherited settings.
+Distinct named jobs are never merged. Job hooks surround the whole job, not
+each source. Partial-source errors are retained while valid sources finish;
+fatal errors stop the job without undoing earlier committed snapshots.
+
+Readiness now counts effective snapshots, accepts imported-plus-resumed index
+and snapshot completion, and treats resumed pack/blob counters as invocation
+deltas. Its private execution authorization and frozen inventory are unchanged.
+For the live repository, use the read-only evidence audit against the actual
+pre-crawl baseline, not the original import counts:
+
+```sh
+python3.12 helpers/phase35-m6/readiness.py executed-profile.toml \
+   --audit-live baseline-index-check.json backup.jsonl final-index-check.json
+```
+
+The audit validates snapshot cardinality, reconciliation, full metadata checks,
+repository identity/generation, and non-regressing catalog counts. It emits
+input hashes and `crawl_metadata_validated`, but deliberately does not grant
+`readiness_accepted`: full repository data checks, verified restores, persistent
+daemon reopen and pathdiff qualification remain separate gates. Keep the exact
+executed profile and command/observer evidence alongside these outputs.
+
+**Resume:** complete the guarded 52-source full crawl, reconcile post-run pack
+statistics, validate the live evidence, and complete the remaining gates.
+The old private-copy supervisor cannot execute against the live repository;
+its read-only-source-repository contract must not be bypassed. Full data-check
+runtime and production observation budgets require explicit review before
+regular scheduled backups. Configure and qualify pathdiff after the crawl.
+
+**One-Off Live Crawl Retry (2026-11-01):**
+
+The initial RAM-only preflight stopped at 21:31 UTC before backup, with no
+committed snapshots. A checker spool exhausted its local memory quota and
+attempted a spill, which RAM-only mode forbids even when the aggregate allowance
+has headroom. The failed receipt is retained under
+`/volume2/NASDA2/vaultic-test-m6/phase2-full-crawl-20261031-per-source`.
+The retry enables bounded KV scratch for metadata checks without increasing
+memory, disk, runtime, or observation limits. Backup remains RAM-only.
+
+The KV retry passed legacy/encryption scanning and reached `catalog_join`, but
+stopped on a mandatory sampling gap exceeding one second, again before backup.
+Its receipt is retained under
+`/volume2/NASDA2/vaultic-test-m6/phase2-full-crawl-20261031-per-source-kv`.
+Mandatory RSS, executable, swap, and process-identity sampling now runs independently
+of filesystem diagnostics and log writes, with a bounded sample queue. The
+one-second sampler guard remains enforced; sampler stalls and queue exhaustion
+abort owned work. Filesystem measurements retain their observation timestamps
+and must not become stale beyond ten seconds. Cleanup uses the same stage-specific
+scratch cap as observation rather than incorrectly reverting to 8 GiB.
+
+The independent-observer retry completed location comparison but stopped when
+the checker deleted a temporary run file between directory enumeration and size
+measurement. No backup was committed; its receipt remains under
+`/volume2/NASDA2/vaultic-test-m6/phase2-full-crawl-20261031-per-source-observed`.
+Scratch measurement now uses a single no-follow stat and tolerates concurrent
+entry deletion only. Symlink files/directories and non-ENOENT measurement errors
+still fail closed; disappearance of the working root remains an error.
+
+The scratch-safe run passed preflight and processed the first source for about
+2h45m, then stopped on another mandatory sampling gap. No snapshot was
+acknowledged; its receipt and partial reconciliation counters remain under
+`/volume2/NASDA2/vaultic-test-m6/phase2-full-crawl-20261031-per-source-scratch-safe`.
+The initiating observation failure must not be confused with the subsequent
+reconciliation cancellation cascade. Repository state was not rolled back.
+Optional `/proc` I/O and scheduling diagnostics are now collected separately
+from mandatory RSS/process/executable/swap sampling and filesystem checks.
+Their observation age is explicit, and they are retained sparsely. The
+one-second mandatory guard is unchanged; future failures retain their timing
+phase and duration. Blocked-diagnostic regressions pass, but production success
+still requires the complete live workflow. The retry begins with a fresh full
+metadata check before any further backup writes.
+
+- The production profile now explicitly sets `snapshot-per-source = true`.
+   All 52 source roots were confirmed to be active NFS mounts. Ordinary CLI
+   multi-source coalescing and explicit per-job coalescing remain available.
+- The separate `helpers/phase35-m6/live_readiness.py` supervisor uses an explicit
+   live authorization, current baseline check, binary/helper/configuration hashes,
+   source mount inode/device identities, and a pinned existing daemon process.
+   It does not import, activate, replace the daemon owner, or schedule backups.
+- Failed transient unit: `vaultic-full-crawl-20261101-light-sampler.service`. No timer was created.
+   The unchanged database owner remains `vaulticdb-rustic.service`.
+- Contract and evidence:
+   `/volume2/NASDA2/vaultic-test-m6/phase2-full-crawl-20261101-per-source-light-sampler`.
+   Contract SHA-256:
+   `c5294b6b12c6aa374f115af16ca3d1f4694fc14fe99daab0bd146f574826c9ce`.
+- Limits: 30 days for the crawl, 14 days for each check, 256 GiB combined
+   CLI/daemon RSS, 160 GiB managed backup memory, 8 GiB backup scratch,
+   96 GiB metadata-check memory/scratch, 1 TiB artifacts, and a
+   `57,481,929,687,040`-byte repository-filesystem free-space reserve.
+   The supervisor samples every 250 ms, checks identity-bound executable hashes
+   and swap, and stops its own work on breached safety limits. The CLI/supervisor
+   unit has an additional 240 GiB cgroup memory cap and swap/core dumps disabled.
+- Stages: fresh full metadata check, forced full per-source crawl without
+   pathdiff/FSEvents, pack-stat reconciliation, post-crawl full metadata check,
+   full repository `check --read-data`, then bounded snapshot-derived verified
+   restore samples for each source. Empty-directory samples are allowed only
+   when a bounded snapshot listing establishes that the directory is empty.
+- Supervisor logs are `supervisor.stdout` and `supervisor.stderr`. Stage logs,
+   observer samples, and verification records are under `readiness/`. Normal
+   completion or an observed failure writes `readiness/receipt.json`; a forcibly
+   terminated supervisor may leave only stage logs and the reserved receipt space.
+   Previously acknowledged snapshots remain committed and must not be discarded.
+- Stop procedure: `systemctl stop vaultic-full-crawl-20261101-light-sampler.service`.
+   This does not stop the independently owned database service. Do not edit
+   pinned helpers, binaries or profiles while the contract is executing.
+- Validation before launch: focused Go snapshot/profile/configuration and
+   native authoritative `restore --verify` checks passed; all 28 Python readiness
+   tests passed with the exact production CLI/native daemon and no skips.
+   Four observer unit tests also passed.
+   The broad Go suite remains affected by unrelated root-permission fixtures,
+   default test-version mismatch, and daemon process-fixture/build issues.
+
+**Preflight Verified (2026-10-31 22:40 UTC):**
+
+The initial full metadata check completed with exit 0, complete observation,
+and no observer errors, findings, or warnings. Repository generation 1 and
+sequence 567157 match the retained verification record. All 10,171 legacy indexes,
+145 snapshots, and 380,166,898 blob locations were checked. Peak combined RSS was
+82,919,006,208 bytes; measured scratch peak was 38,247,645,772 bytes, within caps.
+The imported-pack lifecycle count is 419,530; it is not the total catalog-pack
+count. The controller entered the forced per-source backup stage at 22:40:35 UTC.
+No completed source snapshots were observed at this milestone. Both preflight
+`observation.json` and `verified.json` are retained under the scratch-safe run's
+`readiness/metadata-check` directory, not the new retry's evidence root.
+
+This is a historical preflight milestone, not phase acceptance. Persistent daemon reopen,
+pathdiff qualification, resolution of all crawl findings, and final phase
+reevaluation/commit remain outstanding. Scheduling is still disabled.
+
+**Interrupted Publication Recovery (2026-11-01):**
+
+The light-sampler retry completed its full metadata preflight with exit 2,
+`metadata indexes differ`, rather than an observation failure. Backup did not
+start. It found 6,636 locations absent from legacy indexes, one missing legacy
+pack, and one pending export. All 145 snapshots still matched, with zero
+aggregate, reverse-edge, snapshot-commit, path-version, and unresolved-reference
+mismatches or pending crawl debt. The pending pack
+`f3be9c75f04b08f8e9f507ad9adad1f3cd530350d09c1dd7e45946213f7c846a`
+exists physically as an 8,661,092-byte file. These are incomplete compatibility
+publication findings after interruption, not evidence that any snapshot was
+successfully committed by that crawl.
+
+`index export --pending-only` selects only `export-pending` lifecycle records.
+It does not rewrite imported or already-published packs, unlike the broader
+default export. It rejects `--full` or nonzero `--since`. Preview uses
+`--dry-run`; execution uses `--verify` and acknowledges publication only after
+the compatibility index is written and read back. A subsequent full metadata
+check remains mandatory. Optional `--expected-pending-packs` and
+`--expected-pending-blobs` must both be positive and require `--pending-only`.
+They reject a changed selection before writing any index, within the export's
+exclusive repository lock. The supervisor forwards these counts for preview
+and execution rather than relying only on a separate preview. Tests cover lifecycle preservation, preview, resume,
+native imported-pack exclusion, and fail-closed supervisor receipts.
+
+The live supervisor offers separately selected recovery rather than adding a
+repair implicitly to the crawl stages:
+
+```sh
+python3.12 helpers/phase35-m6/live_readiness.py "$CONTRACT" \
+   --recover-pending-exports --expected-pending-packs=1 --expected-pending-blobs=6636
+```
+
+This first previews the exact reviewed pack/blob counts, then performs only the
+pending export, then runs the full post-metadata check. `--preview-pending-exports`
+stops after preview. Each mode needs a freshly sealed create-only evidence root.
+Observation failures or count mismatches stop the workflow, with reserved
+receipt space; recovery does not create a snapshot or accept readiness.
+
+The first recovery preview was blocked by a stale shared read lock belonging to
+PID 44017 on this host, timestamped 2026-10-31 16:58:47 UTC. The process was
+confirmed absent and the sole encrypted lock record archived under
+`/volume2/NASDA2/vaultic-test-m6/phase2-pending-export-recovery-20261101/stale-lock.encrypted`.
+Ordinary `unlock` cleared only stale locks; `--remove-all` was not used. The
+lock-blocked receipt remains in that root, with no export performed.
+
+The guarded retry uses unit
+`vaultic-pending-export-recovery-20261101-unlocked.service` and evidence root
+`/volume2/NASDA2/vaultic-test-m6/phase2-pending-export-recovery-20261101-unlocked`.
+Its contract SHA-256 is
+`39245455b2936ee3fae9e2d6150f8e8d20df78866c0ce01efe0f059cf9272b74`.
+The existing daemon owner and all previous safety limits are unchanged. Inspect
+its receipt and stage results separately: all three commands completed with
+exit 0 and complete observation, but the supervisor subsequently rejected the
+snapshot count because it incorrectly used post-backup accounting for recovery.
+The original failed receipt is retained, not rewritten as a success.
+
+The preview selected exactly one pack and 6,636 blobs without writing an index.
+Execution wrote verified compatibility index
+`6755f4411aa21a740f7f177cced0c1de89d87dc484286c1f7ac2e946cf196ecc`,
+with export sequence 1. The full post-recovery check validated 10,173 legacy
+indexes, 145 matching snapshots, and 380,206,676 matching blob locations, with
+zero findings, pending exports, or warnings. Its read session is
+`txn-101997-327128`, generation 1, sequence 942157. No recovery snapshot was
+created. Recovery now validates the unchanged baseline snapshot count rather
+than incorrectly expecting 52 additional snapshots. Real-validator regression
+tests accept 145 and reject 197 in this recovery-only workflow.
+
+**Recovered Full Crawl Retry (2026-11-01):**
+
+The next create-only run uses
+`vaultic-full-crawl-20261101-recovered.service`, with evidence under
+`/volume2/NASDA2/vaultic-test-m6/phase2-full-crawl-20261101-per-source-recovered`.
+Its contract SHA-256 is
+`0fec9eec2234b71dd554cbcbf00178be0f8695970a88950b114753d114a39d43`.
+The baseline is the clean full post-recovery metadata check above. All 30
+readiness/native tests pass with the rebuilt CLI, including in-lock expected-count
+rejection, unchanged-snapshot recovery accounting, and verified fixture restores.
+The pending-export Go tests also pass. The existing daemon remains PID 101997.
+
+This run begins with another full metadata check and enters the forced 52-source
+crawl only on success. Full post-crawl checks and per-source verified restores
+remain mandatory. Stop procedure:
+`systemctl stop vaultic-full-crawl-20261101-recovered.service`. Do not edit the
+pinned helpers, binaries, or profiles while it executes. No timer or pathdiff
+deployment was created; phase acceptance and the final commit remain gated.
+
+**Stopped Throughput Checkpoint (2026-11-01):**
+
+At the operator's request, `vaultic-full-crawl-20261101-recovered.service` was
+stopped before completing the first source. The independently owned
+`vaulticdb-rustic.service` remains running as PID 101997. The final retained
+status reports 15,384 backup seconds, 948,758 processed files, and
+221,881,268,444 logical processed bytes. No snapshot acknowledgment was observed.
+Systemd terminated the supervisor; its successful unit stop is not successful
+crawl validation. Stage logs and `readiness/receipt.reserve` are retained, but
+there is no final supervisor receipt. Partial repository publication was not
+rolled back and must be assessed before any future production restart.
+
+The implementation is committed as an explicitly incomplete operational
+checkpoint at the operator's request. Full source coverage, post-crawl data
+checks and restores, persistent daemon reopen, pathdiff qualification, and final
+phase acceptance remain outstanding. Scheduling stays disabled. The current
+throughput is unsuitable for a 1.5-billion-inode crawl: recent file-based inode
+proxies ranged from about 32/s to a cumulative 65/s. Further work must measure
+and address metadata lookup/read amplification without weakening encryption,
+durability, consistency, or observation safeguards. Do not automatically restart
+production merely because a microbenchmark improves.
+
+**Pathdiff Qualification Order:**
+
+No pathdiff systemd unit or executable was found in the deployment locations
+checked on 2026-10-31. The current full crawl deliberately does not use pathdiff;
+do not modify its sealed profile, helpers, or binaries to enable it mid-run.
+
+The pinned dependency receives ONTAP FPolicy events, not filesystem polling.
+Deployment needs reviewed external-engine/policy scopes, receiver reachability
+from the relevant FPolicy LIFs, authoritative SVM/volume inventory, and approved
+SSH access with verified cluster host keys. Its discovery loop can automatically
+enable policies; do not start it against production ONTAP merely to inspect
+configuration. Review and authorize those storage-side effects first. Use a
+private control socket and durable event database, and protect any diagnostic
+captures because they can contain source paths and client identifiers.
+
+Retention is disabled by default, which Vaultic's coverage verifier rejects.
+Configure a positive horizon covering the oldest source baseline start through
+the optimized run, including baseline duration, backup interval, and recovery
+margin. Receiver uptime alone is not proof of complete FPolicy event coverage.
+
+After the full crawl, post-checks, restores, and daemon reopen are validated:
+
+1. Deploy the pinned pathdiff service with persistent event retention and verify
+   its actual observation state. Build a version-1 topology map with one complete,
+   unambiguous mapping for each source: `target`, `remote_path`, `lif`, `svm_id`,
+   `svm`, `volume`, and `volume_msid`. Resolve storage identities from authoritative
+   inventory; mount names alone are not proof of SVM or volume identity.
+2. Start continuous observation before a fresh baseline backup begins. A service
+   started after the current crawl cannot attest changes since these snapshots:
+   the required window starts at each parent snapshot's backup-start timestamp.
+   Run a normal full traversal after observation starts, without `--force` or
+   selective reuse, so unchanged files can use ordinary parent-based reuse while
+   the new snapshot establishes an observed baseline. Preserve per-source mode.
+3. Qualify an unchanged optimized run using `--use-pathdiff`, the verified socket
+   and map, and `--pathdiff-require-coverage`. Verify source-specific parents and
+   snapshot contents, not just a successful exit or reduced traversal count.
+4. In controlled fixture directories, qualify creation, modification, deletion,
+   and rename, including renamed directories. Compare optimized results with a
+   full traversal and verify restores. Do not introduce test mutations into
+   production source trees without approval.
+5. Exercise late observation, reconnect/session changes, retention gaps, and
+   incorrect topology. Strict coverage must reject these before publication;
+   non-strict operation must fall back to a full traversal. Keep scheduling
+   disabled until real deployment coverage and these workflows are qualified.
 
 **Inputs:** Phase 1 acceptance, reviewed private writable target, full source scope,
 resource limits, observers and rollback/stop plan.

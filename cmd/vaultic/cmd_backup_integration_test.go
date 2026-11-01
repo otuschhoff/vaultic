@@ -16,11 +16,15 @@ import (
 
 	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/errors"
+	"github.com/otuschhoff/vaultic/internal/feature"
 	"github.com/otuschhoff/vaultic/internal/fs"
 	"github.com/otuschhoff/vaultic/internal/global"
+	metadataindex "github.com/otuschhoff/vaultic/internal/index"
+	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	rtest "github.com/otuschhoff/vaultic/internal/test"
 	"github.com/otuschhoff/vaultic/internal/ui/backup"
+	"github.com/otuschhoff/vaultic/internal/ui/progress"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
@@ -51,6 +55,123 @@ func testRunBackup(t testing.TB, dir string, target []string, options backupOpti
 
 func TestBackup(t *testing.T) {
 	testBackup(t, false)
+}
+
+func TestBackupSnapshotModes(t *testing.T) {
+	for _, mode := range []struct {
+		name    string
+		options backupOptions
+		count   int
+	}{
+		{name: "default", count: 1},
+		{name: "coalesced", options: backupOptions{CoalesceSources: true}, count: 1},
+		{name: "per-source", options: backupOptions{SnapshotPerSource: true}, count: 2},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			env, cleanup := withTestEnvironment(t)
+			defer cleanup()
+			testSetupBackupData(t, env)
+			sources := []string{filepath.Join(env.testdata, "0", "0"), filepath.Join(env.testdata, "0", "tests")}
+			testRunBackup(t, "", sources, mode.options, env.globalOptions)
+			first := testListSnapshots(t, env.globalOptions, mode.count)
+			parents := make(map[string]vaultic.ID)
+			for _, id := range first {
+				snapshot := testLoadSnapshot(t, env.globalOptions, id)
+				rtest.Assert(t, len(snapshot.Paths) == len(sources)/mode.count, "unexpected snapshot paths: %v", snapshot.Paths)
+				parents[strings.Join(snapshot.Paths, "\x00")] = id
+			}
+			testRunBackup(t, "", sources, mode.options, env.globalOptions)
+			withParent := 0
+			for _, id := range testListSnapshots(t, env.globalOptions, mode.count*2) {
+				snapshot := testLoadSnapshot(t, env.globalOptions, id)
+				if snapshot.Parent == nil {
+					continue
+				}
+				parent, ok := parents[strings.Join(snapshot.Paths, "\x00")]
+				rtest.Assert(t, ok && snapshot.Parent.Equal(parent), "unexpected parent for %v: %v", snapshot.Paths, snapshot.Parent)
+				withParent++
+			}
+			rtest.Assert(t, withParent == mode.count, "got %d incremental snapshots, want %d", withParent, mode.count)
+		})
+	}
+}
+
+func TestBackupPerSourceInputsAndDryRun(t *testing.T) {
+	env, cleanup := withTestEnvironment(t)
+	defer cleanup()
+	testSetupBackupData(t, env)
+	source := filepath.Join(env.testdata, "0", "0")
+	other := filepath.Join(env.testdata, "0", "tests")
+	list := filepath.Join(t.TempDir(), "sources")
+	rtest.OK(t, os.WriteFile(list, []byte(other+"\n"), 0600))
+	options := backupOptions{SnapshotPerSource: true, FilesFromVerbatim: []string{list}}
+	testRunBackup(t, "", []string{source}, options, env.globalOptions)
+	for _, id := range testListSnapshots(t, env.globalOptions, 2) {
+		snapshot := testLoadSnapshot(t, env.globalOptions, id)
+		rtest.Assert(t, len(snapshot.Paths) == 1, "files-from was expanded again: %v", snapshot.Paths)
+	}
+	options.DryRun = true
+	testRunBackup(t, "", []string{source}, options, env.globalOptions)
+	testListSnapshots(t, env.globalOptions, 2)
+	options.DryRun = false
+	err := testRunBackupAssumeFailure(t, "", []string{source, filepath.Join(env.testdata, "missing")}, options, env.globalOptions)
+	rtest.Assert(t, errors.Is(err, ErrInvalidSourceData), "partial-source error lost: %v", err)
+	testListSnapshots(t, env.globalOptions, 4)
+}
+
+func TestBackupPerSourceAuthoritative(t *testing.T) {
+	binary := testVaulticDBBinary(t)
+	defer feature.TestSetFlag(t, feature.Flag, feature.SlateDBAuthoritative, true)()
+	environment, cleanup := withTestEnvironment(t)
+	defer cleanup()
+	testSetupBackupData(t, environment)
+	environment.globalOptions.BackendTestHook = nil
+	err := withTermStatus(t, environment.globalOptions, func(ctx context.Context, options global.Options) error {
+		printer := progress.NewTerminalPrinter(true, 0, options.Term)
+		repo, err := global.OpenRepository(ctx, options, printer)
+		if err != nil {
+			return err
+		}
+		repositoryID := repo.Config().ID
+		err = metadataindex.Activate(ctx, repo.Backend(), repositoryID)
+		err = errors.Join(err, repo.Close())
+		if err != nil {
+			return err
+		}
+		passphrase := filepath.Join(t.TempDir(), "passphrase")
+		rtest.OK(t, os.WriteFile(passphrase, []byte("test recovery passphrase\n"), 0600))
+		daemonOptions := daemon.Options{Socket: testMetadataSocket(t), RepositoryID: repositoryID,
+			DaemonPath: binary, DataDir: t.TempDir(), EncryptionMode: "initialize", PassphraseFile: passphrase}
+		client, err := daemon.Ensure(ctx, daemonOptions)
+		if err != nil {
+			return err
+		}
+		defer client.Close(ctx)
+		options.MetadataDaemonSocket = daemonOptions.Socket
+		options.MetadataEncryptionMode = "required"
+		options.MetadataPassphraseFile = passphrase
+		sources := []string{filepath.Join(environment.testdata, "0", "0"), filepath.Join(environment.testdata, "0", "tests")}
+		backup := backupOptions{SnapshotPerSource: true, GroupBy: data.SnapshotGroupByOptions{Host: true, Path: true}}
+		for range 2 {
+			if err := runBackup(ctx, backup, options, options.Term, sources); err != nil {
+				return err
+			}
+		}
+		parents := 0
+		for _, id := range testListSnapshots(t, options, 4) {
+			snapshot := testLoadSnapshot(t, options, id)
+			rtest.Assert(t, len(snapshot.Paths) == 1, "unexpected authoritative paths: %v", snapshot.Paths)
+			if snapshot.Parent != nil {
+				parent := testLoadSnapshot(t, options, *snapshot.Parent)
+				rtest.Assert(t, slices.Equal(parent.Paths, snapshot.Paths), "cross-source authoritative parent")
+				parents++
+			}
+			rtest.OK(t, testRunRestoreAssumeFailure(t, id.String(), restoreOptions{Target: t.TempDir(), Verify: true}, options))
+		}
+		rtest.Assert(t, parents == 2, "got %d authoritative parents, want 2", parents)
+		return nil
+	})
+	rtest.OK(t, err)
 }
 
 func TestBackupWithFilesystemSnapshots(t *testing.T) {

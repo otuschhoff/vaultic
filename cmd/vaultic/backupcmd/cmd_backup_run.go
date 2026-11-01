@@ -42,6 +42,35 @@ import (
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
+type backupRepositorySession struct {
+	ctx              context.Context
+	repo             *repository.Repository
+	closeRepo        func()
+	indexLoaded      bool
+	snapshots        vaultic.Lister
+	createdSnapshots vaultic.IDSet
+}
+
+type backupSnapshotView struct {
+	vaultic.ListerLoaderUnpacked
+	session *backupRepositorySession
+}
+
+func (view backupSnapshotView) List(ctx context.Context, kind vaultic.FileType, fn func(vaultic.ID, int64) error) error {
+	if err := view.session.snapshots.List(ctx, kind, fn); err != nil {
+		return err
+	}
+	for id := range view.session.createdSnapshots {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := fn(id, 0); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 type backupRun struct {
 	ctx           context.Context
 	options       backupOptions
@@ -55,6 +84,8 @@ type backupRun struct {
 	timeStamp     time.Time
 	start         time.Time
 	vssConfig     fs.VSSConfig
+
+	repositorySession *backupRepositorySession
 
 	repo                *repository.Repository
 	deferredActive      bool
@@ -153,9 +184,17 @@ func (hooks *backupHooks) wireDeferredUploader(options *archiver.SnapshotOptions
 }
 
 func runBackupPipeline(ctx context.Context, options backupOptions, globalOptions global.Options, term ui.Terminal, args []string) (resultErr error) {
+	return runBackupPipelineWithSession(ctx, options, globalOptions, term, args, nil)
+}
+
+func runBackupPipelineWithSession(ctx context.Context, options backupOptions, globalOptions global.Options, term ui.Terminal, args []string, session *backupRepositorySession) (resultErr error) {
+	if session != nil && session.ctx != nil {
+		ctx = session.ctx
+	}
 	ctx, action := telemetry.DefaultProductionAccounting().StartOperation(ctx, "backup", "planning", "")
 	defer func() { action.Done(telemetry.ClassifyOutcome(resultErr)) }()
 	run := &backupRun{ctx: ctx, options: options, globalOptions: globalOptions, term: term, args: args, success: true}
+	run.repositorySession = session
 	if err := prepareBackupTargets(run); err != nil {
 		return err
 	}
@@ -201,8 +240,10 @@ func (run *backupRun) close() {
 		provider, reportsLookups := run.repo.Engine().(interface {
 			BlobLookupStats() (enginepkg.BlobLookupStats, bool)
 		})
-		if err := run.repo.Close(); err != nil {
-			run.printer.E("close backup repository: %v", err)
+		if run.repositorySession == nil || run.repositorySession.repo != run.repo {
+			if err := run.repo.Close(); err != nil {
+				run.printer.E("close backup repository: %v", err)
+			}
 		}
 		if reportsLookups {
 			if stats, enabled := provider.BlobLookupStats(); enabled {
@@ -360,6 +401,11 @@ func openBackupSources(ctx context.Context, run *backupRun) (context.Context, er
 }
 
 func openBackupRepository(ctx context.Context, run *backupRun) (context.Context, error) {
+	if session := run.repositorySession; session != nil && session.repo != nil {
+		run.repo = session.repo
+		run.ctx = ctx
+		return ctx, nil
+	}
 	run.deferredActive = run.options.AllowDeferredCommit && run.options.DeferredMode != "auto"
 	run.metadataBypassed = run.options.DeferredMode == "data-plane-only"
 	var err error
@@ -375,6 +421,10 @@ func openBackupRepository(ctx context.Context, run *backupRun) (context.Context,
 	}
 	if err != nil {
 		return ctx, err
+	}
+	if session := run.repositorySession; session != nil {
+		session.ctx, session.repo, session.closeRepo = ctx, run.repo, run.closeRepo
+		run.closeRepo = nil
 	}
 	if run.deferredActive {
 		emitDeferredMode(run)
@@ -419,7 +469,19 @@ func emitDeferredMode(run *backupRun) {
 
 func loadBackupParent(run *backupRun) error {
 	if !run.options.Stdin && !run.deferredActive {
-		parent, err := findParentSnapshot(run.ctx, run.repo, run.options, run.targets, run.timeStamp)
+		var parentRepo vaultic.ListerLoaderUnpacked = run.repo
+		if session := run.repositorySession; session != nil && !run.options.Force {
+			if session.snapshots == nil {
+				var err error
+				session.snapshots, err = vaultic.MemorizeList(run.ctx, run.repo, vaultic.SnapshotFile)
+				if err != nil {
+					return err
+				}
+				session.createdSnapshots = vaultic.NewIDSet()
+			}
+			parentRepo = backupSnapshotView{ListerLoaderUnpacked: run.repo, session: session}
+		}
+		parent, err := findParentSnapshot(run.ctx, parentRepo, run.options, run.targets, run.timeStamp)
 		if err != nil {
 			return err
 		}
@@ -433,6 +495,9 @@ func loadBackupParent(run *backupRun) error {
 	if run.deferredActive {
 		return nil
 	}
+	if run.repositorySession != nil && run.repositorySession.indexLoaded {
+		return nil
+	}
 	if !run.globalOptions.JSON {
 		run.printer.V("load index files")
 	}
@@ -441,7 +506,13 @@ func loadBackupParent(run *backupRun) error {
 			ScratchDirectory: run.options.MetadataScratch, CacheBytes: run.options.MetadataCacheMiB << 20, Concurrency: 4,
 		})
 	}
-	return run.repo.LoadIndex(run.ctx, run.printer)
+	if err := run.repo.LoadIndex(run.ctx, run.printer); err != nil {
+		return err
+	}
+	if run.repositorySession != nil {
+		run.repositorySession.indexLoaded = true
+	}
+	return nil
 }
 
 func openBackupFilesystem(run *backupRun) (resultErr error) {
@@ -1144,6 +1215,9 @@ func executeBackup(run *backupRun) error {
 	}
 	var err error
 	run.snapshot, run.snapshotID, run.summary, err = run.archiver.Snapshot(run.ctx, run.targets, run.snapshotOpts)
+	if err == nil && !run.options.DryRun && run.repositorySession != nil && run.repositorySession.createdSnapshots != nil && !run.snapshotID.IsNull() {
+		run.repositorySession.createdSnapshots.Insert(run.snapshotID)
+	}
 	if err == nil && run.deferredActive {
 		err = publishDeferredBackup(run)
 	}

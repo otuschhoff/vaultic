@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/otuschhoff/vaultic/internal/global"
+	rtest "github.com/otuschhoff/vaultic/internal/test"
 )
 
 func TestProfileAppliesBackupAndGlobalFlags(t *testing.T) {
@@ -40,6 +42,39 @@ func TestProfileAppliesBackupAndGlobalFlags(t *testing.T) {
 	}
 	if got := backup.Flags().Lookup("read-concurrency").Value.String(); got != "3" {
 		t.Fatalf("profile read-concurrency = %q, want 3", got)
+	}
+}
+
+func TestProfileBackupSnapshotModes(t *testing.T) {
+	t.Setenv("VAULTIC_PASSWORD", rtest.TestPassword)
+	for _, test := range []struct {
+		name  string
+		flags []string
+		count int
+	}{
+		{name: "inherited-per-source", count: 3},
+		{name: "coalesced-override", flags: []string{"--snapshot-per-source=false", "--coalesce-sources"}, count: 2},
+		{name: "selected-job", flags: []string{"--name=first"}, count: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			environment, cleanup := withTestEnvironment(t)
+			defer cleanup()
+			testSetupBackupData(t, environment)
+			source := filepath.Join(environment.testdata, "0", "0")
+			other := filepath.Join(environment.testdata, "0", "tests")
+			profile := filepath.Join(t.TempDir(), "profile.toml")
+			contents := fmt.Sprintf("[backup]\nsnapshot-per-source = true\n[[backup.snapshots]]\nname = 'first'\nsources = [%q, %q]\n[[backup.snapshots]]\nname = 'second'\nsources = [%q]\n", source, other, source)
+			rtest.OK(t, os.WriteFile(profile, []byte(contents), 0600))
+			err := withTermStatus(t, environment.globalOptions, func(ctx context.Context, options global.Options) error {
+				saved := options
+				root := newRootCommand(&options)
+				options = saved
+				root.SetArgs(append([]string{"--use-profile=" + profile, "backup"}, test.flags...))
+				return root.ExecuteContext(ctx)
+			})
+			rtest.OK(t, err)
+			testListSnapshots(t, environment.globalOptions, test.count)
+		})
 	}
 }
 

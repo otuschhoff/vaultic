@@ -49,7 +49,7 @@ EXIT STATUS
 ===========
 
 Exit status is 0 if the command was successful.
-Exit status is 1 if there was a fatal error (no snapshot created).
+Exit status is 1 if there was a fatal error (earlier snapshots may already be committed).
 Exit status is 3 if some source data could not be read (incomplete snapshot created).
 Exit status is 10 if the repository does not exist.
 Exit status is 11 if the repository is already locked.
@@ -134,6 +134,8 @@ type backupOptions struct {
 	APFSSnapshotRequire       bool
 	APFSSnapshotKeep          bool
 	SkipIfUnchanged           bool
+	SnapshotPerSource         bool
+	CoalesceSources           bool
 	ProfileNames              []string
 	Init                      bool
 	List                      bool
@@ -233,6 +235,8 @@ func (options *backupOptions) AddFlags(f *pflag.FlagSet) {
 		"acknowledge that data-plane-only mode ignores unavailable or corrupt metadata",
 	)
 	f.StringSliceVar(&options.ProfileNames, "name", nil, "run named [[backup.snapshots]] profile job (repeatable)")
+	f.BoolVar(&options.SnapshotPerSource, "snapshot-per-source", false, "create an independent snapshot for each source")
+	f.BoolVar(&options.CoalesceSources, "coalesce-sources", false, "combine all sources of each backup job in one snapshot (default)")
 	f.BoolVar(&options.Init, "init", false, "initialize the repository if it does not exist")
 	f.BoolVar(&options.List, "ls", false, "list the contents of the created snapshot")
 
@@ -550,6 +554,12 @@ func readFilenamesRaw(r io.Reader) (names []string, err error) {
 
 // Check returns an error when an invalid combination of options was set.
 func (options backupOptions) Check(globalOptions global.Options, args []string) error {
+	if options.SnapshotPerSource && options.CoalesceSources {
+		return errors.Fatal("--snapshot-per-source and --coalesce-sources are mutually exclusive")
+	}
+	if options.SnapshotPerSource && (options.Stdin || options.StdinCommand) {
+		return errors.Fatal("--snapshot-per-source cannot use --stdin or --stdin-from-command")
+	}
 	if err := options.validateDeferred(); err != nil {
 		return err
 	}
@@ -890,8 +900,45 @@ func findParentSnapshot(
 	return sn, err
 }
 
-func runBackup(ctx context.Context, options backupOptions, globalOptions global.Options, term ui.Terminal, args []string) error {
-	return runBackupPipeline(ctx, options, globalOptions, term, args)
+func runBackup(ctx context.Context, options backupOptions, globalOptions global.Options, term ui.Terminal, args []string) (resultErr error) {
+	if err := options.Check(globalOptions, args); err != nil {
+		return err
+	}
+	if !options.SnapshotPerSource {
+		return runBackupPipeline(ctx, options, globalOptions, term, args)
+	}
+	targets, sourceErr := collectTargets(options, args, func(format string, args ...any) {
+		term.Error(fmt.Sprintf(format, args...))
+	}, term.InputRaw())
+	if sourceErr != nil && !errors.Is(sourceErr, ErrInvalidSourceData) {
+		return sourceErr
+	}
+	options.FilesFrom = nil
+	options.FilesFromVerbatim = nil
+	options.FilesFromRaw = nil
+	var session *backupRepositorySession
+	if !options.AllowDeferredCommit && !options.MetadataOnDemand {
+		session = &backupRepositorySession{}
+		defer func() {
+			if session.closeRepo != nil {
+				session.closeRepo()
+			}
+			if session.repo != nil {
+				resultErr = errors.Join(resultErr, session.repo.Close())
+			}
+		}()
+	}
+	for _, target := range targets {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(sourceErr, err)
+		}
+		err := runBackupPipelineWithSession(ctx, options, globalOptions, term, []string{target}, session)
+		if err != nil && !errors.Is(err, ErrInvalidSourceData) {
+			return errors.Join(sourceErr, err)
+		}
+		sourceErr = errors.Join(sourceErr, err)
+	}
+	return sourceErr
 }
 
 func shouldUseDataPlaneFallback(openErr error, options backupOptions) bool {

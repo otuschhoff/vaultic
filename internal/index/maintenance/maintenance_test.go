@@ -1658,6 +1658,78 @@ func TestExportIsDeterministicCheckpointedAndResumable(t *testing.T) {
 	}
 }
 
+func TestExportPendingCountsCheckedBeforeMutation(t *testing.T) {
+	for _, expected := range [][2]uint64{{2, 1}, {1, 2}, {1, 1}} {
+		store, packID, _ := newMemoryStore(t, schema.PackExportPending)
+		destination := &memoryDestination{}
+		result, err := Export(t.Context(), store, destination, ExportOptions{
+			PendingOnly: true, ExpectedPacks: expected[0], ExpectedBlobs: expected[1], Verify: true,
+		})
+		matched := expected == [2]uint64{1, 1}
+		if (err == nil) != matched || (result.IndexesWritten != 0) != matched || (len(destination.indexes) != 0) != matched {
+			t.Fatalf("expected %v: result=%#v, indexes=%d, err=%v", expected, result, len(destination.indexes), err)
+		}
+		value, _, _ := store.Get(t.Context(), schema.PackKey(schema.ID(packID)))
+		record, err := schema.UnmarshalPackRecord(value)
+		want := schema.PackExportPending
+		if matched {
+			want = schema.PackPublished
+		}
+		if err != nil || record.Lifecycle != want {
+			t.Fatalf("expected %v: lifecycle=%v want=%v err=%v", expected, record.Lifecycle, want, err)
+		}
+	}
+	for _, options := range []ExportOptions{
+		{ExpectedPacks: 1, ExpectedBlobs: 1}, {PendingOnly: true, ExpectedPacks: 1},
+		{PendingOnly: true, ExpectedBlobs: 1},
+	} {
+		if _, err := Export(t.Context(), nil, nil, options); err == nil {
+			t.Fatal("incomplete expected scope accepted")
+		}
+	}
+}
+
+func TestExportPendingOnlyScopesRecovery(t *testing.T) {
+	for _, lifecycle := range []schema.PackLifecycle{schema.PackImported, schema.PackPublished, schema.PackExportPending, schema.PackDeleted} {
+		t.Run(fmt.Sprint(lifecycle), func(t *testing.T) {
+			store, packID, _ := newMemoryStore(t, lifecycle)
+			destination := &memoryDestination{}
+			result, err := Export(t.Context(), store, destination, ExportOptions{PendingOnly: true, DryRun: true})
+			want := uint64(0)
+			if lifecycle == schema.PackExportPending {
+				want = 1
+			}
+			if err != nil || result.PacksSelected != want || result.IndexesWritten != 0 || len(destination.indexes) != 0 {
+				t.Fatalf("dry-run recovery = %#v, %v", result, err)
+			}
+			result, err = Export(t.Context(), store, destination, ExportOptions{PendingOnly: true, Verify: true})
+			if err != nil || result.PacksSelected != want || result.IndexesWritten != want {
+				t.Fatalf("pending recovery = %#v, %v", result, err)
+			}
+			value, _, err := store.Get(t.Context(), schema.PackKey(schema.ID(packID)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			record, err := schema.UnmarshalPackRecord(value)
+			if want == 1 {
+				lifecycle = schema.PackPublished
+			}
+			if err != nil || record.Lifecycle != lifecycle {
+				t.Fatalf("recovery changed unrelated lifecycle: %#v, %v", record, err)
+			}
+			resumed, err := Export(t.Context(), store, &memoryDestination{}, ExportOptions{PendingOnly: true})
+			if err != nil || resumed.PacksSelected != 0 || resumed.IndexesWritten != 0 {
+				t.Fatalf("resumed pending recovery = %#v, %v", resumed, err)
+			}
+		})
+	}
+	for _, options := range []ExportOptions{{PendingOnly: true, Full: true}, {PendingOnly: true, Since: 1}} {
+		if _, err := Export(t.Context(), nil, nil, options); err == nil {
+			t.Fatal("conflicting export scope accepted")
+		}
+	}
+}
+
 type catalogRangeStore struct {
 	*memoryStore
 	ranges  int

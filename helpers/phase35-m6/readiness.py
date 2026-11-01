@@ -5,9 +5,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import queue
 import resource
 import shutil
 import signal
+import stat
 import subprocess
 import threading
 import time
@@ -36,6 +38,24 @@ def integer(value, name, minimum=0):
     return value
 
 
+def snapshot_jobs(config):
+    backup = config['backup']
+    count = 0
+    for job in backup['snapshots']:
+        modes = {name: job.get(name, backup.get(name, False))
+                 for name in ('snapshot-per-source', 'coalesce-sources')}
+        if any(type(value) is not bool for value in modes.values()):
+            raise ValueError('snapshot modes must be booleans')
+        if all(modes.values()):
+            raise ValueError('conflicting snapshot modes')
+        sources = job['sources']
+        if not isinstance(sources, list) or not sources or any(
+                not isinstance(source, str) or not source for source in sources):
+            raise ValueError('invalid snapshot sources')
+        count += len(sources) if modes['snapshot-per-source'] else 1
+    return integer(count, 'snapshot jobs', 1)
+
+
 def fingerprint(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'),
                                      allow_nan=False).encode()).hexdigest()
@@ -55,13 +75,23 @@ def private_tree(root):
 
 
 def tree_bytes(root):
+    if not stat.S_ISDIR(root.lstat().st_mode):
+        raise ValueError('working artifact root is not a directory')
+    def walk_error(error):
+        if not isinstance(error, FileNotFoundError):
+            raise error
     total = 0
-    for directory, _, files in os.walk(root, followlinks=False):
-        for name in files:
+    for directory, directories, files in os.walk(root, followlinks=False, onerror=walk_error):
+        for name in directories + files:
             path = Path(directory) / name
-            if path.is_symlink():
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(info.st_mode):
                 raise ValueError('redirected working artifact')
-            total += path.stat().st_size
+            if not stat.S_ISDIR(info.st_mode):
+                total += info.st_size
     return total
 
 
@@ -164,10 +194,11 @@ def load_contract(path, value=None):
         raise ValueError('frozen exclusions missing')
     if not {'CACHEDIR.TAG', '.nobackup'}.issubset(selection['exclude_if_present']):
         raise ValueError('frozen exclusion markers missing')
-    if plan['jobs'] != len(config['backup']['snapshots']) or not 1 <= plan['jobs'] <= MAX_JOBS:
+    if plan['jobs'] != snapshot_jobs(config) or not 1 <= plan['jobs'] <= MAX_JOBS:
         raise ValueError('invalid snapshot job coverage')
     forbidden = {'stdin', 'stdin-from-command', 'files-from', 'files-from-raw', 'files-from-verbatim',
-                 'dry-run', 'skip-if-unchanged', 'experimental', 'pathdiff', 'fsevents', 'hooks'}
+                 'dry-run', 'skip-if-unchanged', 'experimental', 'pathdiff', 'fsevents',
+                 'use-pathdiff', 'use-fsevents', 'hooks'}
     for section in [config, config['backup']] + config['backup']['snapshots']:
         if any(key in forbidden or key.startswith('experimental-') for key in section):
             raise ValueError('unqualified backup mode')
@@ -233,7 +264,7 @@ def seal(draft, output):
         pin.update({'path': str(path), 'sha256': actual})
     config = pilot.tomllib.loads(Path(plan['pins']['profile']['path']).read_text())
     plan['selection'] = pilot.source_selection(config)
-    plan['jobs'] = len(config['backup']['snapshots'])
+    plan['jobs'] = snapshot_jobs(config)
     plan['target_identity'] = {'device': root.stat().st_dev, 'inode': root.stat().st_ino,
                                'repo_device': (root / 'repo').stat().st_dev,
                                'repo_inode': (root / 'repo').stat().st_ino}
@@ -328,6 +359,8 @@ def json_events(path):
                 retained['import'] = value
             elif 'coverage' in value and 'consistency' in value:
                 retained['index_check'] = value
+            elif all(key in value for key in ('packs_selected', 'blobs_selected', 'indexes_written')):
+                retained['index_export'] = value
     return retained
 
 
@@ -340,16 +373,25 @@ def validate_stage(plan, stage, events, identity):
         if stage == 'snapshot-references':
             if result.get('snapshot_metadata_only') is not True:
                 raise ValueError('snapshot references were not explicitly imported')
-            for key in ('snapshots_total', 'snapshots_seen', 'snapshots_imported'):
+            for key in ('snapshots_total', 'snapshots_seen'):
                 if integer(result[key], key) != plan['expected']['snapshots']:
                     raise ValueError('snapshot reference coverage mismatch')
+            completed = integer(result['snapshots_imported'], 'snapshots_imported') + integer(
+                result.get('snapshots_resumed', 0), 'snapshots_resumed')
+            if completed != plan['expected']['snapshots']:
+                raise ValueError('snapshot reference completion mismatch')
         else:
             for key in ('indexes_total', 'indexes_seen'):
                 if integer(result[key], key) != plan['expected']['indexes']:
                     raise ValueError('catalog coverage mismatch')
             if stage == 'catalog':
+                resumed = integer(result.get('indexes_resumed', 0), 'indexes_resumed')
+                imported = integer(result['indexes_imported'], 'indexes_imported')
+                if imported + resumed != plan['expected']['indexes']:
+                    raise ValueError('catalog completion mismatch')
                 for key, expected in (('packs_imported', 'packs'), ('blobs_imported', 'blobs')):
-                    if integer(result[key], key) != plan['expected'][expected]:
+                    count = integer(result[key], key)
+                    if count > plan['expected'][expected] or not resumed and count != plan['expected'][expected]:
                         raise ValueError('catalog count mismatch: ' + key)
             if not isinstance(result.get('checkpoint'), str) or len(result['checkpoint']) != 64:
                 raise ValueError('missing durable import checkpoint')
@@ -413,6 +455,36 @@ def validate_stage(plan, stage, events, identity):
     return identity
 
 
+def validate_live_crawl(config, baseline, backup_events, final_check):
+    selection = pilot.source_selection(config)
+    forbidden = ('use-pathdiff', 'use-fsevents', 'dry-run', 'skip-if-unchanged',
+                 'stdin', 'stdin-from-command', 'files-from', 'files-from-raw', 'files-from-verbatim')
+    for section in [config['backup']] + config['backup']['snapshots']:
+        if any(section.get(key) for key in forbidden):
+            raise ValueError('live evidence is not a full crawl')
+    jobs = snapshot_jobs(config)
+    if jobs > MAX_JOBS or not selection['sources']:
+        raise ValueError('invalid live source coverage')
+    initial = baseline['index_check']
+    plan = {'repository_id': initial['consistency']['repository_id'],
+            'expected': {'snapshots': integer(initial['slatedb_snapshots'], 'baseline snapshots')},
+            'jobs': jobs}
+    identity = validate_stage(plan, 'metadata-check', baseline, None)
+    validate_stage(plan, 'backup', backup_events, identity)
+    final_identity = validate_stage(plan, 'post-metadata-check', final_check, identity)
+    if final_identity[2] < identity[2]:
+        raise ValueError('live metadata sequence regressed')
+    for key in ('legacy_indexes', 'legacy_locations', 'slatedb_locations', 'imported_packs'):
+        if integer(final_check['index_check'][key], key) < integer(initial[key], key):
+            raise ValueError('live catalog regressed: ' + key)
+    return {'repository_id': plan['repository_id'], 'identity': final_identity,
+            'sources': selection['sources'], 'snapshot_jobs': jobs,
+            'acknowledged_snapshot_ids': [item['snapshot_id'] for item in backup_events['summaries']],
+            'crawl_metadata_validated': True, 'readiness_accepted': False,
+            'remaining_gates': ['full repository data check', 'verified restores',
+                                'persistent daemon reopen', 'pathdiff qualification']}
+
+
 def stop_owned(process, sample=None):
     try:
         os.killpg(process.pid, signal.SIGINT)
@@ -439,8 +511,68 @@ def stop_owned(process, sample=None):
     return {'complete': False, 'forced': True, 'signal': 'SIGKILL'}
 
 
+def safety_process_sample(group, external, processes, hashes, pins):
+    rss, count = pilot.process_group_rss(group)
+    for pid, expected in external.items():
+        sample = observe.process_sample(pid, diagnostics=False)
+        if sample['start_ticks'] != expected['start_ticks'] or sample['state'] in ('Z', 'X', 'x'):
+            raise ValueError('external daemon identity changed')
+        rss += integer(sample['rss_bytes'], 'external daemon RSS')
+        count += 1
+    if count > MAX_PROCESSES:
+        raise ValueError('owned process cardinality exceeded')
+    current = []
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdecimal():
+            continue
+        pid = int(entry.name)
+        try:
+            if os.getpgid(pid) != group and pid not in external:
+                continue
+            sample = observe.process_sample(pid, diagnostics=False)
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        retain_process(processes, sample)
+        if sample['state'] not in ('Z', 'X', 'x'):
+            try:
+                stat = (entry / 'exe').stat()
+                status = (entry / 'status').read_text()
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            executable = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+            if executable not in hashes:
+                try:
+                    hashes[executable] = pilot.digest(entry / 'exe')
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+            sample['executable_sha256'] = hashes[executable]
+            allowed = {pin['sha256'] for name, pin in pins.items() if name in ('binary', 'daemon')}
+            if allowed and hashes[executable] not in allowed:
+                raise ValueError('unapproved owned executable')
+            swapped = next((int(line.split()[1]) for line in status.splitlines()
+                            if line.startswith('VmSwap:')), None)
+            if swapped is None or swapped:
+                raise ValueError('owned swap is present or unavailable')
+        current.append(sample)
+    return rss, current
+
+
+def process_diagnostics(processes):
+    current = []
+    for previous in list(processes.values()):
+        try:
+            sample = observe.process_sample(previous['pid'])
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        if sample['start_ticks'] != previous['start_ticks']:
+            raise ValueError('PID reused during diagnostic collection')
+        current.append(sample)
+    return current
+
+
 def run_observed(argv, directory, seconds, plan):
     limits = plan['limits']
+    external = {item['pid']: item for item in plan.get('external_processes', [])}
     started, started_utc = time.monotonic(), utc()
     failure = threading.Event()
     errors = []
@@ -479,6 +611,79 @@ def run_observed(argv, directory, seconds, plan):
     threads = []
     outputs = []
     cleanup = None
+    safety_stop = threading.Event()
+    safety_records = queue.Queue(maxsize=4096)
+    safety_peaks = {'rss_bytes': 0, 'cpu_ticks': 0}
+    filesystem = {'disk_free_bytes': None, 'scratch_peak_bytes': 0,
+                  'filesystem_observed_elapsed_seconds': 0}
+    diagnostics = {'diagnostic_processes': None, 'diagnostic_observed_elapsed_seconds': None}
+
+    def collect_diagnostics():
+        try:
+            while not safety_stop.is_set():
+                current = process_diagnostics(processes)
+                diagnostics.update({'diagnostic_processes': current,
+                                    'diagnostic_observed_elapsed_seconds': time.monotonic() - started})
+                safety_stop.wait(5)
+        except Exception as error:
+            errors.append('diagnostic collection failed: ' + str(error))
+            failure.set()
+
+    def sample_safety():
+        previous_sample = time.monotonic()
+        diagnostic_at, used = 0, 0
+        try:
+            while not safety_stop.is_set():
+                now = time.monotonic()
+                if now - previous_sample > 1:
+                    raise ValueError('mandatory safety sampling gap exceeded one second; phase=between_ticks gap_seconds='
+                                     + format(now - previous_sample, '.6f'))
+                previous_sample = now
+                rss, current = safety_process_sample(process.pid, external, processes, hashes, plan.get('pins', {}))
+                if time.monotonic() - now > 1:
+                    raise ValueError('mandatory safety sampling gap exceeded one second; phase=proc_sample duration_seconds='
+                                     + format(time.monotonic() - now, '.6f'))
+                if now - started - filesystem['filesystem_observed_elapsed_seconds'] > 10:
+                    raise ValueError('filesystem safety observation stale beyond ten seconds')
+                safety_peaks['rss_bytes'] = max(safety_peaks['rss_bytes'], rss)
+                safety_peaks['cpu_ticks'] = sum(item['cpu_ticks'] for item in processes.values())
+                if now < diagnostic_at:
+                    current = None
+                else:
+                    diagnostic_at = now + 5
+                record_data = {'elapsed_seconds': now - started, 'utc': utc(),
+                               'combined_rss_bytes': rss, 'processes': current, **filesystem}
+                if current is not None:
+                    record_data.update(diagnostics)
+                record = json.dumps(record_data) + '\n'
+                used += len(record.encode())
+                if used > limits['sample_bytes']:
+                    raise ValueError('safety sample capacity exceeded')
+                try:
+                    safety_records.put_nowait(record)
+                except queue.Full:
+                    raise ValueError('safety sample queue capacity exceeded')
+                if rss > limits['rss_bytes'] or now - started >= seconds:
+                    raise ValueError('RSS or runtime ceiling exceeded')
+                if failure.is_set():
+                    break
+                safety_stop.wait(max(0, limits['sample_seconds'] - (time.monotonic() - now)))
+        except Exception as error:
+            errors.append(type(error).__name__ + ': ' + str(error))
+            failure.set()
+            try:
+                os.killpg(process.pid, signal.SIGINT)
+            except ProcessLookupError:
+                pass
+
+    def drain_samples(stream):
+        while True:
+            try:
+                stream.write(safety_records.get_nowait())
+            except queue.Empty:
+                break
+        stream.flush()
+
     try:
         for name in ('stdout.log', 'stderr.log'):
             outputs.append(open(directory / name, 'xb'))
@@ -497,70 +702,27 @@ def run_observed(argv, directory, seconds, plan):
                 thread = threading.Thread(target=collect, args=(source, stream), daemon=True)
                 thread.start()
                 threads.append(thread)
-            used = 0
-            previous_sample = time.monotonic()
+            safety_thread = threading.Thread(target=sample_safety, daemon=True)
+            safety_thread.start()
+            threads.append(safety_thread)
+            diagnostic_thread = threading.Thread(target=collect_diagnostics, daemon=True)
+            diagnostic_thread.start()
+            threads.append(diagnostic_thread)
             diagnostic_at = 0
             scratch_peak = 0
             while True:
                 now = time.monotonic()
-                if now - previous_sample > 1:
-                    raise ValueError('mandatory safety sampling gap exceeded one second')
-                previous_sample = now
-                rss, count = pilot.process_group_rss(process.pid)
-                if count > MAX_PROCESSES:
-                    raise ValueError('owned process cardinality exceeded')
-                current = []
-                for entry in Path('/proc').iterdir():
-                    if not entry.name.isdecimal():
-                        continue
-                    pid = int(entry.name)
-                    try:
-                        if os.getpgid(pid) != process.pid:
-                            continue
-                        sample = observe.process_sample(pid)
-                    except (FileNotFoundError, ProcessLookupError):
-                        continue
-                    retain_process(processes, sample)
-                    if sample['state'] not in ('Z', 'X', 'x'):
-                        try:
-                            stat = (entry / 'exe').stat()
-                            status = (entry / 'status').read_text()
-                        except (FileNotFoundError, ProcessLookupError):
-                            continue
-                        executable = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
-                        if executable not in hashes:
-                            try:
-                                hashes[executable] = pilot.digest(entry / 'exe')
-                            except (FileNotFoundError, ProcessLookupError):
-                                continue
-                        sample['executable_sha256'] = hashes[executable]
-                        pins = plan.get('pins', {})
-                        allowed = {pin['sha256'] for name, pin in pins.items() if name in ('binary', 'daemon')}
-                        if allowed and hashes[executable] not in allowed:
-                            raise ValueError('unapproved owned executable')
-                        swapped = next((int(line.split()[1]) for line in status.splitlines()
-                                        if line.startswith('VmSwap:')), None)
-                        if swapped is None or swapped:
-                            raise ValueError('owned swap is present or unavailable')
-                    current.append(sample)
-                peaks['rss_bytes'] = max(peaks['rss_bytes'], rss)
-                peaks['cpu_ticks'] = sum(item['cpu_ticks'] for item in processes.values())
                 if now >= diagnostic_at:
                     scratch_peak = max(scratch_peak, tree_bytes(root / 'working') + tree_bytes(root / 'tmp'))
-                    if scratch_peak > 8 * 1024 ** 3:
+                    if scratch_peak > limits.get('scratch_bytes', 8 * 1024 ** 3):
                         raise ValueError('working scratch ceiling exceeded')
+                    filesystem['scratch_peak_bytes'] = scratch_peak
                     diagnostic_at = now + 5
-                else:
-                    current = None
-                record = json.dumps({'elapsed_seconds': now - started, 'utc': utc(),
-                                     'combined_rss_bytes': rss, 'processes': current,
-                                     'disk_free_bytes': shutil.disk_usage(root).free,
-                                     'scratch_peak_bytes': scratch_peak}) + '\n'
-                used += len(record.encode())
-                if used > limits['sample_bytes']:
-                    raise ValueError('safety sample capacity exceeded')
-                samples.write(record)
-                samples.flush()
+                filesystem['disk_free_bytes'] = shutil.disk_usage(root).free
+                filesystem['filesystem_observed_elapsed_seconds'] = time.monotonic() - started
+                if filesystem['disk_free_bytes'] < limits['disk_free_bytes']:
+                    raise ValueError('disk reserve reached')
+                drain_samples(samples)
                 if failure.is_set():
                     raise ValueError('output collector failed')
                 if resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024 > 1 << 30:
@@ -568,10 +730,6 @@ def run_observed(argv, directory, seconds, plan):
                 telemetry = directory / 'telemetry.jsonl'
                 if telemetry.exists() and telemetry.stat().st_size > limits.get('telemetry_bytes', limits['stream_bytes']):
                     raise ValueError('telemetry artifact capacity exceeded')
-                if rss > limits['rss_bytes'] or now - started >= seconds:
-                    raise ValueError('RSS or runtime ceiling exceeded')
-                if shutil.disk_usage(root).free < limits['disk_free_bytes']:
-                    raise ValueError('disk reserve reached')
                 try:
                     process.wait(timeout=limits['sample_seconds'])
                     break
@@ -605,6 +763,7 @@ def run_observed(argv, directory, seconds, plan):
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+        safety_stop.set()
         for thread in threads:
             thread.join(timeout=10)
             if thread.is_alive():
@@ -612,10 +771,15 @@ def run_observed(argv, directory, seconds, plan):
         for stream in outputs:
             if not stream.closed:
                 stream.close()
+        peaks['rss_bytes'] = max(peaks['rss_bytes'], safety_peaks['rss_bytes'])
+        peaks['cpu_ticks'] = safety_peaks['cpu_ticks']
+        if process is not None:
+            with open(directory / 'samples.jsonl', 'a') as stream:
+                drain_samples(stream)
     events = {}
     try:
         scratch_peak = max(locals().get('scratch_peak', 0), tree_bytes(root / 'working') + tree_bytes(root / 'tmp'))
-        if scratch_peak > 8 * 1024 ** 3:
+        if scratch_peak > limits.get('scratch_bytes', 8 * 1024 ** 3):
             errors.append('working scratch ceiling exceeded after cleanup')
     except (OSError, ValueError) as error:
         errors.append('final scratch measurement unavailable: ' + str(error))
@@ -742,9 +906,19 @@ def main():
     parser.add_argument('contract', type=Path)
     parser.add_argument('--execute', action='store_true')
     parser.add_argument('--seal', type=Path, help='validate and seal an approved draft without execution')
+    parser.add_argument('--audit-live', nargs=3, type=Path, metavar=('BASELINE', 'BACKUP', 'FINAL'),
+                        help='read-only live crawl audit; contract argument is the executed TOML profile')
     options = parser.parse_args()
     os.umask(0o077)
-    if options.seal:
+    if options.audit_live:
+        if options.execute or options.seal:
+            parser.error('--audit-live cannot execute or seal a private contract')
+        config = pilot.tomllib.loads(options.contract.read_text())
+        result = validate_live_crawl(config, *(json_events(path) for path in options.audit_live))
+        result['evidence_sha256'] = {str(path): pilot.digest(path)
+                                    for path in [options.contract] + options.audit_live}
+        print(json.dumps(result))
+    elif options.seal:
         if options.execute:
             parser.error('--seal and --execute are mutually exclusive')
         print(json.dumps({'contract_sha256': seal(options.seal, options.contract), 'execution_started': False}))
