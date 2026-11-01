@@ -849,7 +849,9 @@ func (reconciler *Reconciler) processBatch(
 			continue
 		}
 		if item.stat.Mode.IsDir() {
-			flush()
+			if !reconciler.options.AtomicPublicationGroups {
+				flush()
+			}
 			*directories = append(*directories, item)
 			continue
 		}

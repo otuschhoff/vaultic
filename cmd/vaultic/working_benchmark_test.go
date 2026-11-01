@@ -733,7 +733,8 @@ func TestPublicationBackupQualification(t *testing.T) {
 	const repositoryID = "c4d68689c785d02a28d6eec485c62132823dc9873ff7f627c2bac80258251528"
 	candidate := "/root/proj/vaultic/bin/phase35-throughput/linux-amd64/vaultic"
 	if selected := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_CANDIDATE"); selected != "" {
-		if selected != "/root/proj/vaultic/bin/phase35-critical-path/linux-amd64/vaultic" {
+		if selected != "/root/proj/vaultic/bin/phase35-critical-path/linux-amd64/vaultic" &&
+			selected != "/root/proj/vaultic/bin/phase35-critical-path-fill/linux-amd64/vaultic" {
 			t.Fatal("candidate is not the separate critical-path build")
 		}
 		encoded, err := os.ReadFile(selected)

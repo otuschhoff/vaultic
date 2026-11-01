@@ -1216,6 +1216,40 @@ func (store *failingAtomicGroupStore) PublishAllocatedReconciledRevisionGroup(
 	return store.SchemaStore.PublishAllocatedReconciledRevisionGroup(ctx, count, build)
 }
 
+func TestAtomicGroupsSpanQueuedDirectories(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	socketDirectory, err := os.MkdirTemp("", "vaultic-directory-group-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDirectory) })
+	client, err := daemon.Ensure(ctx, daemon.Options{
+		Socket: filepath.Join(socketDirectory, "daemon.sock"), RepositoryID: "queued-directory-group",
+		DaemonPath: reconciliationDaemonBinary(t), DataDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	reconciler := &Reconciler{ctx: ctx, filesystem: testFilesystem(), store: daemon.NewSchemaStore(client),
+		options: Options{AtomicPublicationGroups: true, PublicationGroupSize: 4}}
+	files := publicationTestBatch(0, 4)
+	directory := files[0]
+	directory.stat.Mode = os.ModeDir
+	directory.sourcePath, directory.snapshotPath = "/directory", "/directory"
+	batch := []preparedItem{files[0], directory, files[1], files[2], files[3]}
+	var directories []preparedItem
+	published := make(map[string]publishedItem)
+	reconciler.processBatch(batch, &directories, make(map[identity][]preparedItem), published)
+	metrics := reconciler.Metrics()
+	if len(reconciler.errors) != 0 || len(directories) != 1 || len(published) != 4 ||
+		metrics.AtomicGroupCalls != 1 || metrics.PublicationGroups[3] != 1 {
+		t.Fatalf("queued directory fragmented atomic publication: directories=%d published=%d metrics=%+v errors=%v",
+			len(directories), len(published), metrics, reconciler.errors)
+	}
+}
+
 func TestDaemonBackedAtomicGroupMixedReuseAndFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

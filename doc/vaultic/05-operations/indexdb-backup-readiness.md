@@ -1136,6 +1136,64 @@ This is an inventory and content-address check, not a full metadata consistency
 proof. Recovery and any production pilot remain gated; no full crawl or
 schedule has been resumed.
 
+**Accepted Bounded Main-Phase Pair:**
+
+`cap10k-e` completed both fresh encrypted historical-clone cells, with exact
+regular-file counts, all-entry restored digests, matching selected source trees
+and encrypted daemon reopen. Main-phase telemetry, not CLI wall time or the
+archiver summary timer, gives the comparison:
+
+| Main-Phase Measure | Group 4 | Group 64 |
+| --- | ---: | ---: |
+| Elapsed seconds | 346.068 | 225.651 |
+| Regular-inode writer seconds | 259.194 | 139.242 |
+| Collect/prepare writer seconds | 45.993 | 45.505 |
+| Directory writer seconds | 40.222 | 40.243 |
+| Commit requests | 10,210 | 1,675 |
+| Summed durable-wait seconds | 752.822 | 111.992 |
+
+Main elapsed time fell 34.8%; total CLI wall time was 373.682 versus 253.301
+seconds. Full input/prepared queues, 59 blocked callbacks and 128 blocked
+preparation workers coincide with publication phases. Summed callback and
+preparation blocking roughly halved. At directory publication, four active
+Commit/durable waiters remain. Admission, transaction locks and engine
+backpressure do not account for the observed delay. Worker-time sums remain
+nested/parallel diagnostics, not additional wall-time percentages.
+
+Both source trees are
+`2a303f1d9b720ac52eb83e8ef1ffdb2e078facb5bd7095404fd351d204dabe8b`.
+The verifier recovered through alternate locations when disposable copies
+lacked some historical alternate packs; exact restored content passed, but
+absence of restore retries is not claimed. One ordered pair, a 10,000-entry cap,
+historical rather than current production metadata and warmed caches limit
+generalization. This is not full-source or sustained-production acceptance.
+
+Only 26 group-64 publications reached 64 members; 685 atomic groups averaged
+about 13.5 entries. Queued directory entries unnecessarily flushed pending
+regular-inode groups. The narrowly scoped follow-up retains pending groups
+across these entries only in opt-in atomic mode; default grouping, conflicts,
+failures and hardlink barriers remain unchanged. Its native grouping regression
+and full reconciliation race suite pass. A separate digest-pinned candidate
+preserves the accepted binary.
+
+The `cap10k-f` follow-up passed the same regular-file count, exact all-entry
+restore and encrypted-reopen gates, with the identical selected source tree.
+Main time was 184.386 seconds: 18.3% below the original group-64 cell and
+46.7% below group 4. Regular-inode writer time fell to 97.731 seconds;
+collect/prepare and directory times remained 45.775 and 40.226 seconds.
+Atomic groups fell from 685 to 145, with 143 full 64-member groups. Commits
+fell to 1,135 and summed durable waiting to 84.558 seconds. This localized
+change supports the publication-backpressure diagnosis without changing
+durability. The single follow-up retains the ordered-run/cache/historical
+catalog caveats; it is not a production throughput guarantee.
+
+Remaining measured waits are regular-inode publication (about 98 seconds),
+upstream collection/preparation (about 46 seconds, not pure source I/O) and
+directory publication (about 40 seconds, with active durable waiters).
+Do not classify summed MultiGet time as exclusive wall time or infer NFS
+saturation from an empty prepared queue. Production recovery, full metadata
+consistency and a guarded partial pilot are still separate acceptance gates.
+
 **Pathdiff Qualification Order:**
 
 No pathdiff systemd unit or executable was found in the deployment locations
