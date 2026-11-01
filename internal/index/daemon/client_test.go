@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -170,6 +171,123 @@ func TestM4ExhaustionStillRollsBack(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestProductionPartialStateReadOnly(t *testing.T) {
+	root := os.Getenv("VAULTIC_CRITICAL_PATH_AUDIT_ROOT")
+	if root == "" {
+		t.Skip("read-only production partial audit not selected")
+	}
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil || resolved != root || filepath.Dir(root) != "/volume2/NASDA2/vaultic-test-m6" {
+		t.Fatal("audit evidence is not a canonical private qualification root")
+	}
+	marker, err := os.ReadFile(filepath.Join(root, ".nobackup"))
+	if err != nil || string(marker) != "Disposable Phase 35 throughput qualification.\n" {
+		t.Fatal("private audit ownership marker missing")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Minute)
+	defer cancel()
+	client, err := Connect(ctx, Options{Socket: "/run/vaulticdb-rustic/import.sock", RepositoryID: "c4d68689c785d02a28d6eec485c62132823dc9873ff7f627c2bac80258251528"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	before, err := client.WriterStatus(ctx)
+	if err != nil || before.ActiveTransactions != 0 || before.ActiveWriteIntents != 0 {
+		t.Fatalf("production writer is not quiescent: %v", err)
+	}
+	session, err := NewSchemaStore(client).BeginReadSession(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close(context.Background())
+	counts := make(map[string]uint64)
+	complete := make(map[string]bool)
+	var pendingBytes, missingPendingFiles, unknownPendingSizes uint64
+	for _, prefix := range []string{"s:", "q:", "p:"} {
+		complete[prefix] = false
+		counts[prefix] = 0
+		var after []byte
+		for counts[prefix] < 2_000_000 {
+			entries, done, err := session.ScanPrefix(ctx, []byte(prefix), after, 1000)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range entries {
+				counts[prefix]++
+				if prefix == "q:" {
+					debt, err := schema.UnmarshalCrawlDebtRecord(entry.Value)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if debt.Status == schema.DebtPending {
+						counts["pending_crawl_debt"]++
+					}
+				}
+				if prefix == "p:" {
+					record, err := schema.UnmarshalPackRecord(entry.Value)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if record.Lifecycle == schema.PackExportPending {
+						counts["pending_packs"]++
+						if record.PhysicalSizeKnown {
+							pendingBytes += record.PhysicalSize
+						} else {
+							unknownPendingSizes++
+						}
+						key, err := schema.ParseKey(entry.Key)
+						if err != nil {
+							t.Fatal(err)
+						}
+						id := fmt.Sprintf("%x", key.ID)
+						if _, err := os.Stat(filepath.Join("/volume2/NASDA2/rustic/repo/data", id[:2], id)); errors.Is(err, os.ErrNotExist) {
+							missingPendingFiles++
+						} else if err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+			}
+			if done {
+				complete[prefix] = true
+				break
+			}
+			if len(entries) == 0 {
+				t.Fatal("read-only audit scan made no progress")
+			}
+			after = append(after[:0], entries[len(entries)-1].Key...)
+		}
+	}
+	if err := session.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	after, err := client.WriterStatus(ctx)
+	if err != nil || after.ActiveTransactions != 0 || after.ActiveWriteIntents != 0 || before.LastDurableSequence != after.LastDurableSequence || client.CommitRPCStats().Attempts != 0 {
+		t.Fatalf("read-only audit changed durable production state or leaked a transaction: %v", err)
+	}
+	payload, err := json.MarshalIndent(map[string]any{
+		"counts": counts, "complete": complete, "pending_pack_bytes": pendingBytes,
+		"missing_pending_files": missingPendingFiles, "unknown_pending_sizes": unknownPendingSizes,
+		"last_durable_sequence": after.LastDurableSequence, "generation": session.Identity.Generation,
+		"decision_sequence": session.Identity.Sequence, "read_only": true, "full_consistency_check": false,
+	}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(filepath.Join(root, "production-partial-audit-2m.json"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Chmod(0600); err != nil {
+		t.Fatal(err)
+	}
+	_, writeErr := file.Write(append(payload, '\n'))
+	if err := errors.Join(writeErr, file.Close()); err != nil {
+		t.Fatal(err)
+	}
+	t.Log(string(payload))
 }
 
 func TestEncryptionSecurityEventsRouteToSyslog(t *testing.T) {

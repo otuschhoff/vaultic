@@ -361,6 +361,7 @@ func publicationQualificationCommand(t *testing.T, directory, name, binary strin
 	defer stderr.Close()
 	rtest.OK(t, stderr.Chmod(0600))
 	command := exec.CommandContext(ctx, binary, args...)
+	command.Env = append(os.Environ(), "VAULTIC_FEATURES=slatedb-authoritative=true")
 	command.Stdout, command.Stderr = stdout, stderr
 	command.WaitDelay = 5 * time.Second
 	started := time.Now()
@@ -541,6 +542,41 @@ func TestPublicationQualificationPendingInventory(t *testing.T) {
 	t.Logf("pending_pack_bytes=%d", size)
 }
 
+func boundedLiveSourcePaths(source string, limit uint64) ([]string, error) {
+	var paths []string
+	err := filepath.WalkDir(source, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path != source && entry.IsDir() && entry.Name() == ".snapshot" {
+			return filepath.SkipDir
+		}
+		if uint64(len(paths)) == limit {
+			return filepath.SkipAll
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		paths = append(paths, relative)
+		return nil
+	})
+	return paths, err
+}
+
+func TestBoundedLiveSourcePaths(t *testing.T) {
+	source := t.TempDir()
+	rtest.OK(t, os.Mkdir(filepath.Join(source, ".snapshot"), 0700))
+	rtest.OK(t, os.WriteFile(filepath.Join(source, ".snapshot", "snapshot-file"), nil, 0600))
+	rtest.OK(t, os.Mkdir(filepath.Join(source, "live"), 0700))
+	rtest.OK(t, os.WriteFile(filepath.Join(source, "live", "file"), nil, 0600))
+	paths, err := boundedLiveSourcePaths(source, 3)
+	rtest.OK(t, err)
+	if strings.Join(paths, ",") != ".,live,live/file" {
+		t.Fatalf("snapshot view consumed the live inode cap: %v", paths)
+	}
+}
+
 func TestPrepareFmeCAE1Qualification(t *testing.T) {
 	root := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT")
 	if root == "" {
@@ -556,20 +592,8 @@ func TestPrepareFmeCAE1Qualification(t *testing.T) {
 	rtest.OK(t, os.WriteFile(filepath.Join(root, ".nobackup"), []byte("Disposable Phase 35 throughput qualification.\n"), 0600))
 	rtest.OK(t, os.Chmod(filepath.Join(root, ".nobackup"), 0600))
 	manifest := backupcmd.BoundedInodeManifest{Version: 1, Source: "/ncl1-1-vs-50/fme_cae1", InodeLimit: 10_000}
-	rtest.OK(t, filepath.WalkDir(manifest.Source, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if uint64(len(manifest.Paths)) == manifest.InodeLimit {
-			return filepath.SkipAll
-		}
-		relative, err := filepath.Rel(manifest.Source, path)
-		if err != nil {
-			return err
-		}
-		manifest.Paths = append(manifest.Paths, relative)
-		return nil
-	}))
+	manifest.Paths, err = boundedLiveSourcePaths(manifest.Source, manifest.InodeLimit)
+	rtest.OK(t, err)
 	selected := make(map[string]bool, len(manifest.Paths))
 	for _, path := range manifest.Paths {
 		selected[path] = true
@@ -881,6 +905,34 @@ func TestPublicationBackupQualification(t *testing.T) {
 					backupArgs = append(backupArgs, "--bounded-inode-manifest="+filepath.Join(root, "inode-manifest.json"), "--metadata-reconciliation-queue-depth=256", "--force")
 				}
 				backupArgs = append(backupArgs, source)
+				if sourceManifest.Source != "" {
+					preflightArgs := append(append([]string(nil), backupArgs...), "--dry-run")
+					publicationQualificationCommand(t, cell, "preflight", candidate, preflightArgs...)
+					output, err := os.ReadFile(filepath.Join(cell, "preflight.stdout.log"))
+					rtest.OK(t, err)
+					matched := false
+					for _, line := range bytes.Split(output, []byte{'\n'}) {
+						var event struct {
+							MessageType string `json:"message_type"`
+							Files       uint64 `json:"total_files_processed"`
+						}
+						if json.Unmarshal(line, &event) == nil && event.MessageType == "summary" {
+							if event.Files != files {
+								t.Fatalf("preflight count differs: processed=%d sealed=%d", event.Files, files)
+							}
+							matched = true
+						}
+					}
+					if !matched {
+						t.Fatal("bounded preflight did not report a completed selection")
+					}
+					state, err := client.WriterStatus(t.Context())
+					rtest.OK(t, err)
+					if state.LastDurableSequence != before.LastDurableSequence || state.ActiveTransactions != 0 || state.ActiveWriteIntents != 0 {
+						t.Fatal("dry-run preflight changed private durable state")
+					}
+					t.Logf("bounded preflight accepted %d files; main-backup timing starts next", files)
+				}
 				wall, cliCPU = publicationQualificationCommand(t, cell, "backup", candidate, backupArgs...)
 				after, err = client.WriterStatus(t.Context())
 				rtest.OK(t, err)
@@ -924,10 +976,14 @@ func TestPublicationBackupQualification(t *testing.T) {
 			var snapshotID string
 			for _, line := range bytes.Split(output, []byte{'\n'}) {
 				var event struct {
-					MessageType string `json:"message_type"`
-					SnapshotID  string `json:"snapshot_id"`
+					MessageType    string `json:"message_type"`
+					SnapshotID     string `json:"snapshot_id"`
+					FilesProcessed uint64 `json:"total_files_processed"`
 				}
 				if json.Unmarshal(line, &event) == nil && event.MessageType == "summary" {
+					if sourceManifest.Source != "" && event.FilesProcessed != files {
+						t.Fatalf("bounded source count differs: processed=%d sealed=%d; no throughput acceptance", event.FilesProcessed, files)
+					}
 					snapshotID = event.SnapshotID
 				}
 			}
