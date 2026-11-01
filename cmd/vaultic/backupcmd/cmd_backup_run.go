@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -330,6 +331,162 @@ func (run *backupRun) reportReconciliationStats(stats reconcile.Metrics) {
 			"allocation %s, publication %s (summed call time), groups %s (wall time)\n",
 			stats.PublicationGroups, stats.InodeRevisionsAssigned, stats.RevisionsReserved,
 			time.Duration(stats.RevisionAllocationNS), time.Duration(stats.InodePublicationNS), time.Duration(stats.PublicationGroupNS))
+	}
+}
+
+type backupRPCWait struct {
+	Connection string `json:"connection"`
+	daemon.RPCWaitStats
+}
+
+type backupDBWait struct {
+	Stage           string `json:"stage"`
+	Completed       uint64 `json:"completed"`
+	ElapsedWorkerUS uint64 `json:"elapsed_worker_us"`
+	Active          uint64 `json:"active"`
+	OldestActiveUS  uint64 `json:"oldest_active_us"`
+}
+
+type backupCriticalPath struct {
+	MessageType          string            `json:"message_type"`
+	Phase                string            `json:"phase"`
+	SecondsElapsed       float64           `json:"seconds_elapsed"`
+	Reconciliation       reconcile.Metrics `json:"reconciliation"`
+	RPC                  []backupRPCWait   `json:"rpc"`
+	DB                   []backupDBWait    `json:"db"`
+	DBScope              string            `json:"db_scope"`
+	DBSnapshotAvailable  bool              `json:"db_snapshot_available"`
+	DBIntervalAvailable  bool              `json:"db_interval_available"`
+	DBCounterReset       bool              `json:"db_counter_reset"`
+	DBEngineBackpressure uint64            `json:"db_engine_backpressure"`
+}
+
+func backupDBStages(state daemon.WriterStatus) map[string]daemon.TimingSnapshot {
+	return map[string]daemon.TimingSnapshot{
+		"admission_wait":             state.Attribution.AdmissionWait,
+		"begin_request":              state.Attribution.BeginRequest,
+		"commit_request":             state.Attribution.CommitRequest,
+		"transaction_begin":          state.Attribution.TransactionBegin,
+		"transaction_map_lock_wait":  state.Attribution.TransactionMapLockWait,
+		"transaction_slot_lock_wait": state.Attribution.TransactionSlotLockWait,
+		"engine_submit":              state.Attribution.EngineSubmit,
+		"durable_wait":               state.Attribution.DurableWait,
+	}
+}
+
+func backupCounterDelta(current, baseline uint64) uint64 {
+	if current < baseline {
+		return 0
+	}
+	return current - baseline
+}
+
+func (run *backupRun) reportCriticalPath(sample backupCriticalPath) {
+	if run.globalOptions.JSON {
+		run.term.Print(ui.ToJSONString(sample))
+	} else if !run.globalOptions.Quiet {
+		run.printer.V("main backup waits: writer=%s for %s; queues=%d/%d, blocked callbacks=%d, blocked preparation=%d; RPC waits=%+v; DB waits=%+v\n",
+			sample.Reconciliation.WriterPhase, time.Duration(sample.Reconciliation.WriterPhaseElapsedNS),
+			sample.Reconciliation.InputQueueDepth, sample.Reconciliation.PreparedQueueDepth,
+			sample.Reconciliation.ObserveBlocked, sample.Reconciliation.PrepareBlocked, sample.RPC, sample.DB)
+	}
+}
+
+func (run *backupRun) startCriticalPathReporting() func() {
+	if run.reconciler == nil || run.authoritativeEngine == nil || (!run.globalOptions.JSON && run.globalOptions.Quiet) {
+		return func() {}
+	}
+	writer := run.authoritativeEngine.Client()
+	if writer == nil {
+		return func() {}
+	}
+	clients := map[*daemon.Client]string{writer: "writer"}
+	if run.repo != nil {
+		if provider, ok := run.repo.Engine().(interface{ Client() *daemon.Client }); ok {
+			if reader := provider.Client(); reader != nil && reader != writer {
+				clients[reader] = "lookup"
+			}
+		}
+	}
+	baselines := make(map[*daemon.Client]map[string]daemon.RPCWaitStats)
+	for client := range clients {
+		baselines[client] = make(map[string]daemon.RPCWaitStats)
+		for _, stats := range client.RPCWaitStats() {
+			baselines[client][stats.Method] = stats
+		}
+	}
+	status := func() (daemon.WriterStatus, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		return writer.WriterStatus(ctx)
+	}
+	dbBaseline, baselineErr := status()
+	stagesBaseline := backupDBStages(dbBaseline)
+	started := time.Now()
+	report := func() {
+		sample := backupCriticalPath{
+			MessageType: "backup_critical_path", Phase: "main_backup", SecondsElapsed: time.Since(started).Seconds(),
+			Reconciliation: run.reconciler.Metrics(), DBScope: "daemon_all_clients",
+		}
+		for client, connection := range clients {
+			for _, stats := range client.RPCWaitStats() {
+				if stats.Method == "WriterStatus" {
+					continue
+				}
+				baseline := baselines[client][stats.Method]
+				stats.Calls = backupCounterDelta(stats.Calls, baseline.Calls)
+				stats.Failures = backupCounterDelta(stats.Failures, baseline.Failures)
+				stats.ElapsedWorkerNS = backupCounterDelta(stats.ElapsedWorkerNS, baseline.ElapsedWorkerNS)
+				if stats.Calls > 0 || stats.Active > 0 {
+					sample.RPC = append(sample.RPC, backupRPCWait{Connection: connection, RPCWaitStats: stats})
+				}
+			}
+		}
+		sort.Slice(sample.RPC, func(first, second int) bool {
+			if sample.RPC[first].Connection != sample.RPC[second].Connection {
+				return sample.RPC[first].Connection < sample.RPC[second].Connection
+			}
+			return sample.RPC[first].Method < sample.RPC[second].Method
+		})
+		state, err := status()
+		sample.DBSnapshotAvailable = err == nil
+		if err == nil {
+			sample.DBCounterReset = baselineErr == nil && (state.InstanceID != dbBaseline.InstanceID || state.ProcessStartedUnixMS != dbBaseline.ProcessStartedUnixMS)
+			sample.DBIntervalAvailable = baselineErr == nil && !sample.DBCounterReset
+			for stage, timing := range backupDBStages(state) {
+				wait := backupDBWait{Stage: stage, Active: timing.Active, OldestActiveUS: timing.OldestActiveUS}
+				if sample.DBIntervalAvailable {
+					wait.Completed = backupCounterDelta(timing.Completed, stagesBaseline[stage].Completed)
+					wait.ElapsedWorkerUS = backupCounterDelta(timing.TotalUS, stagesBaseline[stage].TotalUS)
+				}
+				sample.DB = append(sample.DB, wait)
+			}
+			if sample.DBIntervalAvailable {
+				sample.DBEngineBackpressure = backupCounterDelta(state.Attribution.EngineBackpressureCount, dbBaseline.Attribution.EngineBackpressureCount)
+			}
+			sort.Slice(sample.DB, func(first, second int) bool { return sample.DB[first].Stage < sample.DB[second].Stage })
+		}
+		run.reportCriticalPath(sample)
+	}
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				report()
+			case <-stop:
+				report()
+				return
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() { close(stop) })
+		<-done
 	}
 }
 
@@ -686,7 +843,7 @@ func periodicFullCrawlReason(run *backupRun) string {
 		return ""
 	}
 	snapshot := run.parent
-	for snapshot != nil && snapshot.CrawlPlan != nil && snapshot.CrawlPlan.Mode == "selective" {
+	for snapshot != nil && snapshot.CrawlPlan != nil && (snapshot.CrawlPlan.Mode == "selective" || snapshot.CrawlPlan.Mode == "bounded") {
 		if snapshot.Parent == nil {
 			snapshot = nil
 			break
@@ -988,6 +1145,21 @@ func configureBackupSelection(run *backupRun) (archiver.SelectByNameFunc, archiv
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	selectByName := archiver.CombineRejectByNames(byName)
+	if run.options.BoundedInodeManifest != "" {
+		if run.options.MetadataQueueDepth < 0 || run.options.MetadataQueueDepth > 50_000 {
+			return nil, nil, nil, fmt.Errorf("metadata reconciliation queue depth must be between 0 and 50000")
+		}
+		if len(run.targets) != 1 || run.options.UsePathdiff || run.options.UseFSEvents {
+			return nil, nil, nil, fmt.Errorf("bounded inode backup requires one source and no change-event selection")
+		}
+		selected, err := loadBoundedInodeManifest(run.options.BoundedInodeManifest, run.targets[0])
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		previous := selectByName
+		selectByName = func(path string) bool { return selected[path] && previous(path) }
+	}
 	run.markerStore = archiver.NewMarkerCacheStoreContext(run.ctx, 4096)
 	rejects, prefetch, err := collectRejectFuncsWithPrefetch(run.options, run.targets, run.targetFS, run.printer.E, run.markerStore)
 	if err != nil {
@@ -1010,7 +1182,7 @@ func configureBackupSelection(run *backupRun) (archiver.SelectByNameFunc, archiv
 		}
 	}
 	selectItem := archiver.CombineRejects(rejects)
-	return archiver.CombineRejectByNames(byName), func(item string, info *fs.ExtendedFileInfo, filesystem fs.FS) bool {
+	return selectByName, func(item string, info *fs.ExtendedFileInfo, filesystem fs.FS) bool {
 		selected := selectItem(item, info, filesystem)
 		if run.markerStore.Error() != nil {
 			if run.cancel != nil {
@@ -1072,6 +1244,7 @@ func configureReconciliationHooks(ctx context.Context, run *backupRun) error {
 	if run.authoritativeEngine != nil {
 		reconciler, err := reconcile.New(ctx, run.targetFS, run.authoritativeEngine.SchemaStore(), reconcile.Options{
 			PathIndexPaths:          run.repo.Config().PathIndexPaths,
+			QueueDepth:              run.options.MetadataQueueDepth,
 			PublicationGroupSize:    run.options.MetadataPublicationGroupSize,
 			AtomicPublicationGroups: run.options.MetadataPublicationGroupSize > 4,
 		})
@@ -1116,6 +1289,9 @@ func configureSnapshotOptions(run *backupRun) error {
 	mode := "full"
 	if run.pathdiffPlan.Selective {
 		mode = "selective"
+	}
+	if run.options.BoundedInodeManifest != "" {
+		mode, crawlSource = "bounded", "inode-manifest"
 	}
 	rootPlans := make([]data.CrawlRootPlan, 0, len(run.fseventsRoots))
 	for _, root := range run.fseventsRoots {
@@ -1212,6 +1388,8 @@ func configureDeleteProtection(run *backupRun) error {
 }
 
 func executeBackup(run *backupRun) error {
+	stopReporting := run.startCriticalPathReporting()
+	defer stopReporting()
 	if !run.globalOptions.JSON {
 		run.printer.V("start backup on %v", run.targets)
 	}

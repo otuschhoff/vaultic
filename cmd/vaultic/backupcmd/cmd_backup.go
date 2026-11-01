@@ -122,6 +122,8 @@ type backupOptions struct {
 	MetadataOnDemand          bool
 	MetadataScratch           string
 	MetadataCacheMiB          int
+	BoundedInodeManifest      string
+	MetadataQueueDepth        int
 	UsePathdiff               bool
 	PathdiffEndpoint          string
 	PathdiffRequireCoverage   bool
@@ -163,6 +165,8 @@ func (options *backupOptions) AddFlags(f *pflag.FlagSet) {
 
 	options.ExcludePatternOptions.Add(f)
 
+	f.StringVar(&options.BoundedInodeManifest, "bounded-inode-manifest", "", "back up only a bounded source manifest (not a complete source baseline)")
+	f.IntVar(&options.MetadataQueueDepth, "metadata-reconciliation-queue-depth", 0, "metadata reconciliation queue capacity (0 uses 50000)")
 	f.BoolVarP(&options.ExcludeOtherFS, "one-file-system", "x", false, "exclude other file systems, don't cross filesystem boundaries and subvolumes")
 	f.StringArrayVar(
 		&options.ExcludeIfPresent,
@@ -557,6 +561,12 @@ func readFilenamesRaw(r io.Reader) (names []string, err error) {
 
 // Check returns an error when an invalid combination of options was set.
 func (options backupOptions) Check(globalOptions global.Options, args []string) error {
+	if options.BoundedInodeManifest != "" && !options.Force {
+		return errors.Fatal("--bounded-inode-manifest requires --force to prevent reuse outside the inode cap")
+	}
+	if options.MetadataQueueDepth < 0 || options.MetadataQueueDepth > 50_000 {
+		return errors.Fatal("--metadata-reconciliation-queue-depth must be between 0 and 50000")
+	}
 	if options.MetadataPublicationGroupSize < 0 || options.MetadataPublicationGroupSize > 64 {
 		return errors.Fatal("--metadata-publication-group-size must be between 0 and 64 (0 uses 4)")
 	}

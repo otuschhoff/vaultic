@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -53,6 +54,92 @@ func TestM4RPCAdmissionPreservesOutcome(t *testing.T) {
 	if !errors.Is(err, workingkv.ErrWorkingMemoryLimitExceeded) || status.Code(err) != codes.ResourceExhausted || policy.Budget().Used != 0 {
 		t.Fatal(err, policy.Budget())
 	}
+}
+
+func TestRPCWaitAttribution(t *testing.T) {
+	for _, method := range []string{"Get", "MultiGet", "Commit"} {
+		t.Run(method, func(t *testing.T) {
+			client := &Client{}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			entered := make(chan struct{})
+			done := make(chan error, 1)
+			go func() {
+				done <- client.rpcWait.intercept(ctx, "/vaulticdb.v1.VaulticDB/"+method, nil, nil, nil,
+					func(ctx context.Context, _ string, _, _ any, _ *grpc.ClientConn, _ ...grpc.CallOption) error {
+						close(entered)
+						<-ctx.Done()
+						return ctx.Err()
+					})
+			}()
+			<-entered
+			stats := client.RPCWaitStats()
+			if len(stats) != 1 || stats[0].Method != method || stats[0].Active != 1 || stats[0].OldestActiveNS == 0 || stats[0].Calls != 0 {
+				t.Fatalf("in-flight blocker not visible: %+v", stats)
+			}
+			cancel()
+			if err := <-done; !errors.Is(err, context.Canceled) {
+				t.Fatalf("RPC outcome changed: %v", err)
+			}
+			stats = client.RPCWaitStats()
+			if len(stats) != 1 || stats[0].Active != 0 || stats[0].OldestActiveNS != 0 || stats[0].Calls != 1 || stats[0].Failures != 1 || stats[0].ElapsedWorkerNS == 0 {
+				t.Fatalf("completed wait not recorded: %+v", stats)
+			}
+		})
+	}
+}
+
+func TestCriticalPathReadOnlyDaemonSnapshot(t *testing.T) {
+	socket := os.Getenv("VAULTIC_CRITICAL_PATH_SOCKET")
+	if socket == "" {
+		t.Skip("set VAULTIC_CRITICAL_PATH_SOCKET and VAULTIC_CRITICAL_PATH_REPOSITORY_ID for a read-only daemon timing snapshot")
+	}
+	repositoryID := os.Getenv("VAULTIC_CRITICAL_PATH_REPOSITORY_ID")
+	if repositoryID == "" {
+		t.Fatal("explicit repository identity required")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	client, err := Connect(ctx, Options{Socket: socket, RepositoryID: repositoryID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+	state, err := client.WriterStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type waitSummary struct {
+		Attempts uint64 `json:"attempts"`
+		TotalUS  uint64 `json:"total_us"`
+		MaxUS    uint64 `json:"max_us"`
+		Active   uint64 `json:"active"`
+	}
+	stages := make(map[string]waitSummary)
+	for name, timing := range map[string]TimingSnapshot{
+		"admission_wait":             state.Attribution.AdmissionWait,
+		"begin_request":              state.Attribution.BeginRequest,
+		"commit_request":             state.Attribution.CommitRequest,
+		"transaction_map_lock_wait":  state.Attribution.TransactionMapLockWait,
+		"transaction_slot_lock_wait": state.Attribution.TransactionSlotLockWait,
+		"engine_submit":              state.Attribution.EngineSubmit,
+		"durable_wait":               state.Attribution.DurableWait,
+		"finalization":               state.Attribution.Finalization,
+	} {
+		stages[name] = waitSummary{timing.Attempts, timing.TotalUS, timing.MaxUS, timing.Active}
+	}
+	payload, err := json.Marshal(struct {
+		ProcessStartedUnixMS int64                  `json:"process_started_unix_ms"`
+		CapturedUnixMS       int64                  `json:"captured_unix_ms"`
+		ActiveTransactions   uint64                 `json:"active_transactions"`
+		FlushIntervalMS      uint64                 `json:"flush_interval_ms"`
+		Attribution          map[string]waitSummary `json:"attribution"`
+		EngineBackpressure   uint64                 `json:"engine_backpressure"`
+	}{state.ProcessStartedUnixMS, state.CapturedUnixMS, state.ActiveTransactions, state.EngineFlushIntervalMS, stages, state.Attribution.EngineBackpressureCount})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Log(string(payload))
 }
 
 func TestM4ExhaustionStillRollsBack(t *testing.T) {

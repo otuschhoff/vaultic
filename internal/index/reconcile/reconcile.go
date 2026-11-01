@@ -81,6 +81,24 @@ func (options Options) withDefaults() (Options, error) {
 }
 
 type Metrics struct {
+	Observed                                  uint64                                          `json:"observed"`
+	InputQueueDepth                           int                                             `json:"input_queue_depth"`
+	PreparedQueueDepth                        int                                             `json:"prepared_queue_depth"`
+	QueueCapacity                             int                                             `json:"queue_capacity"`
+	ObserveBlocked                            int64                                           `json:"observe_blocked"`
+	ObserveBlockCalls                         uint64                                          `json:"observe_block_calls"`
+	ObserveBlockedWorkerNS                    uint64                                          `json:"observe_blocked_worker_ns"`
+	PrepareBlocked                            int64                                           `json:"prepare_blocked"`
+	PrepareBlockedWorkerNS                    uint64                                          `json:"prepare_blocked_worker_ns"`
+	StatActive                                int64                                           `json:"stat_active"`
+	StatWorkerNS                              uint64                                          `json:"stat_worker_ns"`
+	WriterPhase                               string                                          `json:"writer_phase"`
+	WriterPhaseElapsedNS                      uint64                                          `json:"writer_phase_elapsed_ns"`
+	WriterWaitPreparedNS                      uint64                                          `json:"writer_wait_prepared_ns"`
+	WriterBatchNS                             uint64                                          `json:"writer_batch_ns"`
+	WriterHardlinksNS                         uint64                                          `json:"writer_hardlinks_ns"`
+	WriterDirectoriesNS                       uint64                                          `json:"writer_directories_ns"`
+	WriterRootNS                              uint64                                          `json:"writer_root_ns"`
 	Scanned                                   uint64                                          `json:"scanned"`
 	Reused                                    uint64                                          `json:"reused"`
 	Changed                                   uint64                                          `json:"changed"`
@@ -179,6 +197,11 @@ type publishedItem struct {
 	snapshotPath string
 }
 
+type writerPhase struct {
+	name    string
+	started time.Time
+}
+
 type Reconciler struct {
 	ctx        context.Context
 	filesystem statFS
@@ -195,6 +218,21 @@ type Reconciler struct {
 	rootKey    []byte
 	debtByPath map[string][][]byte
 	crawlDebt  map[string][]byte
+
+	observed               atomic.Uint64
+	observeBlocked         atomic.Int64
+	observeBlockCalls      atomic.Uint64
+	observeBlockedWorkerNS atomic.Uint64
+	prepareBlocked         atomic.Int64
+	prepareBlockedWorkerNS atomic.Uint64
+	statActive             atomic.Int64
+	statWorkerNS           atomic.Uint64
+	writerPhase            atomic.Pointer[writerPhase]
+	writerWaitPreparedNS   atomic.Uint64
+	writerBatchNS          atomic.Uint64
+	writerHardlinksNS      atomic.Uint64
+	writerDirectoriesNS    atomic.Uint64
+	writerRootNS           atomic.Uint64
 
 	scanned                                   atomic.Uint64
 	reused                                    atomic.Uint64
@@ -282,6 +320,23 @@ func (reconciler *Reconciler) Observe(snapshotPath, sourcePath string, node *dat
 		subtree := *node.Subtree
 		item.node.Subtree = &subtree
 	}
+	reconciler.observed.Add(1)
+	select {
+	case reconciler.input <- item:
+		return
+	case <-reconciler.ctx.Done():
+		reconciler.release(item)
+		reconciler.recordError(reconciler.ctx.Err())
+		return
+	default:
+	}
+	started := time.Now()
+	reconciler.observeBlockCalls.Add(1)
+	reconciler.observeBlocked.Add(1)
+	defer func() {
+		reconciler.observeBlockedWorkerNS.Add(uint64(time.Since(started)))
+		reconciler.observeBlocked.Add(-1)
+	}()
 	select {
 	case reconciler.input <- item:
 	case <-reconciler.ctx.Done():
@@ -301,6 +356,14 @@ func (reconciler *Reconciler) Close() error {
 
 func (reconciler *Reconciler) Metrics() Metrics {
 	metrics := Metrics{
+		Observed: reconciler.observed.Load(), InputQueueDepth: len(reconciler.input),
+		PreparedQueueDepth: len(reconciler.prepared), QueueCapacity: cap(reconciler.input),
+		ObserveBlocked: reconciler.observeBlocked.Load(), ObserveBlockCalls: reconciler.observeBlockCalls.Load(),
+		ObserveBlockedWorkerNS: reconciler.observeBlockedWorkerNS.Load(), PrepareBlocked: reconciler.prepareBlocked.Load(),
+		PrepareBlockedWorkerNS: reconciler.prepareBlockedWorkerNS.Load(), StatActive: reconciler.statActive.Load(),
+		StatWorkerNS: reconciler.statWorkerNS.Load(), WriterWaitPreparedNS: reconciler.writerWaitPreparedNS.Load(),
+		WriterBatchNS: reconciler.writerBatchNS.Load(), WriterHardlinksNS: reconciler.writerHardlinksNS.Load(),
+		WriterDirectoriesNS: reconciler.writerDirectoriesNS.Load(), WriterRootNS: reconciler.writerRootNS.Load(),
 		Scanned: reconciler.scanned.Load(), Reused: reconciler.reused.Load(), Changed: reconciler.changed.Load(),
 		Deferred: reconciler.deferred.Load(), Failed: reconciler.failed.Load(),
 		FailedCanceled: reconciler.failedCanceled.Load(), Reconciled: reconciler.reconciled.Load(),
@@ -341,6 +404,12 @@ func (reconciler *Reconciler) Metrics() Metrics {
 	}
 	for index := range metrics.PublicationGroups {
 		metrics.PublicationGroups[index] = reconciler.publicationGroups[index].Load()
+	}
+	if phase := reconciler.writerPhase.Load(); phase != nil {
+		metrics.WriterPhase = phase.name
+		if phase.name != "done" {
+			metrics.WriterPhaseElapsedNS = uint64(time.Since(phase.started))
+		}
 	}
 	return metrics
 }
@@ -522,6 +591,8 @@ func (reconciler *Reconciler) loadPendingDebt() error {
 func (reconciler *Reconciler) statWorker() {
 	defer reconciler.workers.Done()
 	for item := range reconciler.input {
+		statStarted := time.Now()
+		reconciler.statActive.Add(1)
 		prepared := preparedItem{
 			workItem: *item,
 			debtKeys: reconciler.debtByPath[normalizeSnapshotPath(item.snapshotPath)],
@@ -553,11 +624,23 @@ func (reconciler *Reconciler) statWorker() {
 			err = fmt.Errorf("directory %q forms a parent cycle", item.sourcePath)
 		}
 		prepared.prepareErr = err
+		reconciler.statWorkerNS.Add(uint64(time.Since(statStarted)))
+		reconciler.statActive.Add(-1)
 		reconciler.scanned.Add(1)
 		select {
 		case reconciler.prepared <- prepared:
 		case <-reconciler.ctx.Done():
 			reconciler.recordError(reconciler.ctx.Err())
+		default:
+			started := time.Now()
+			reconciler.prepareBlocked.Add(1)
+			select {
+			case reconciler.prepared <- prepared:
+			case <-reconciler.ctx.Done():
+				reconciler.recordError(reconciler.ctx.Err())
+			}
+			reconciler.prepareBlockedWorkerNS.Add(uint64(time.Since(started)))
+			reconciler.prepareBlocked.Add(-1)
 		}
 		reconciler.release(item)
 	}
@@ -565,6 +648,7 @@ func (reconciler *Reconciler) statWorker() {
 
 func (reconciler *Reconciler) writer() {
 	defer close(reconciler.writerDone)
+	reconciler.writerPhase.Store(&writerPhase{name: "wait_prepared", started: time.Now()})
 	var directories []preparedItem
 	hardlinks := make(map[identity][]preparedItem)
 	published := make(map[string]publishedItem)
@@ -572,18 +656,33 @@ func (reconciler *Reconciler) writer() {
 	for item := range reconciler.prepared {
 		batch = append(batch, item)
 		if len(batch) == reconciler.options.BatchSize {
+			reconciler.setWriterPhase("publish_batch", &reconciler.writerWaitPreparedNS)
 			reconciler.processBatch(batch, &directories, hardlinks, published)
 			batch = batch[:0]
+			reconciler.setWriterPhase("wait_prepared", &reconciler.writerBatchNS)
 		}
 	}
+	reconciler.setWriterPhase("publish_batch", &reconciler.writerWaitPreparedNS)
 	if len(batch) > 0 {
 		reconciler.processBatch(batch, &directories, hardlinks, published)
 	}
+	reconciler.setWriterPhase("publish_hardlinks", &reconciler.writerBatchNS)
 	reconciler.publishHardlinks(hardlinks, published)
+	reconciler.setWriterPhase("publish_directories", &reconciler.writerHardlinksNS)
 	reconciler.publishDirectories(directories, published)
+	reconciler.setWriterPhase("publish_root", &reconciler.writerDirectoriesNS)
 	if err := reconciler.publishSnapshotRoot(published); err != nil {
 		reconciler.recordError(err)
 	}
+	reconciler.setWriterPhase("done", &reconciler.writerRootNS)
+}
+
+func (reconciler *Reconciler) setWriterPhase(name string, elapsed *atomic.Uint64) {
+	previous := reconciler.writerPhase.Load()
+	if previous != nil {
+		elapsed.Add(uint64(time.Since(previous.started)))
+	}
+	reconciler.writerPhase.Store(&writerPhase{name: name, started: time.Now()})
 }
 
 func (reconciler *Reconciler) publishSnapshotRoot(published map[string]publishedItem) error {

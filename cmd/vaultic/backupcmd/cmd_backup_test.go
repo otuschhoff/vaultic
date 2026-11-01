@@ -236,6 +236,37 @@ func TestBackupReportsCommitRPCStats(t *testing.T) {
 	}
 }
 
+func TestBackupReportsCriticalPath(t *testing.T) {
+	term := &ui.MockTerminal{}
+	run := &backupRun{term: term, globalOptions: global.Options{JSON: true}}
+	sample := backupCriticalPath{
+		MessageType: "backup_critical_path", Phase: "main_backup", SecondsElapsed: 31,
+		Reconciliation:      reconcile.Metrics{ObserveBlocked: 2, PrepareBlocked: 1, WriterPhase: "publish_batch"},
+		RPC:                 []backupRPCWait{{Connection: "writer", RPCWaitStats: daemon.RPCWaitStats{Method: "Commit", Active: 4, OldestActiveNS: 100}}},
+		DB:                  []backupDBWait{{Stage: "durable_wait", Active: 4, OldestActiveUS: 50}},
+		DBSnapshotAvailable: true, DBIntervalAvailable: true, DBScope: "daemon_all_clients",
+	}
+	run.reportCriticalPath(sample)
+	var actual backupCriticalPath
+	if len(term.Output) != 1 {
+		t.Fatalf("output=%v", term.Output)
+	}
+	if err := json.Unmarshal([]byte(term.Output[0]), &actual); err != nil {
+		t.Fatal(err)
+	}
+	if actual.Phase != "main_backup" || actual.Reconciliation != sample.Reconciliation || len(actual.RPC) != 1 || actual.RPC[0] != sample.RPC[0] || len(actual.DB) != 1 || actual.DB[0] != sample.DB[0] || !actual.DBIntervalAvailable {
+		t.Fatalf("blocking chain not preserved: %+v", actual)
+	}
+	run.globalOptions = global.Options{Quiet: true}
+	run.reportCriticalPath(sample)
+	if len(term.Output) != 1 {
+		t.Fatal("quiet mode emitted critical-path diagnostics")
+	}
+	if backupCounterDelta(120, 100) != 20 || backupCounterDelta(90, 100) != 0 {
+		t.Fatal("startup counters or reset leaked into main-phase deltas")
+	}
+}
+
 func TestBackupReportsPackPublicationStats(t *testing.T) {
 	term := &ui.MockTerminal{}
 	run := &backupRun{term: term, globalOptions: global.Options{JSON: true}}
@@ -260,6 +291,37 @@ func TestBackupReportsPackPublicationStats(t *testing.T) {
 	run.reportPackPublicationStats(stats)
 	if len(term.Output) != 1 {
 		t.Fatal("quiet mode emitted pack publication stats")
+	}
+}
+
+func TestBoundedInodeManifest(t *testing.T) {
+	root := t.TempDir()
+	filename := filepath.Join(t.TempDir(), "manifest.json")
+	manifest := BoundedInodeManifest{Version: 1, Source: root, InodeLimit: 3}
+	for _, paths := range [][]string{{".", "dir", "dir/file"}, {".", "../escape"}, {".", "dir/file"}, {".", "."}, {".", "a", "b", "c"}} {
+		manifest.Paths = paths
+		encoded, err := json.Marshal(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filename, encoded, 0600); err != nil {
+			t.Fatal(err)
+		}
+		selected, err := loadBoundedInodeManifest(filename, root)
+		if len(paths) == 3 && paths[1] == "dir" {
+			if err != nil || len(selected) != 3 || !selected[filepath.Join(root, "dir/file")] || selected[filepath.Join(root, "unselected")] {
+				t.Fatalf("valid bounded selection failed: %v %v", selected, err)
+			}
+		} else if err == nil {
+			t.Fatalf("invalid bounded selection accepted: %v", paths)
+		}
+	}
+	if err := configureSnapshotOptions(&backupRun{options: backupOptions{BoundedInodeManifest: filename}}); err != nil {
+		t.Fatal(err)
+	}
+	run := &backupRun{options: backupOptions{BoundedInodeManifest: filename}}
+	if err := configureSnapshotOptions(run); err != nil || run.snapshotOpts.CrawlPlan.Mode != "bounded" {
+		t.Fatalf("bounded source marked as a full baseline: %v", err)
 	}
 }
 

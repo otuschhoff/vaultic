@@ -164,6 +164,60 @@ type fakeFS struct {
 	gate    <-chan struct{}
 }
 
+func TestObserveBackpressureMetrics(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	reconciler := &Reconciler{ctx: ctx, input: make(chan *workItem, 1), prepared: make(chan preparedItem, 1)}
+	reconciler.pool.New = func() any { return new(workItem) }
+	node := &data.Node{Type: data.NodeTypeFile}
+	reconciler.Observe("/first", "/first", node)
+	done := make(chan struct{})
+	go func() {
+		reconciler.Observe("/second", "/second", node)
+		close(done)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for reconciler.Metrics().ObserveBlocked != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("observer did not block on full queue")
+		}
+		runtime.Gosched()
+	}
+	metrics := reconciler.Metrics()
+	if metrics.Observed != 2 || metrics.InputQueueDepth != 1 || metrics.QueueCapacity != 1 || metrics.ObserveBlockCalls != 1 {
+		t.Fatalf("missing live backpressure: %+v", metrics)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("cancellation did not release observer")
+	}
+	metrics = reconciler.Metrics()
+	if metrics.ObserveBlocked != 0 || metrics.ObserveBlockedWorkerNS == 0 {
+		t.Fatalf("missing completed queue wait: %+v", metrics)
+	}
+}
+
+func TestWriterPhaseMetrics(t *testing.T) {
+	reconciler := &Reconciler{}
+	reconciler.writerPhase.Store(&writerPhase{name: "publish_batch", started: time.Now().Add(-time.Second)})
+	metrics := reconciler.Metrics()
+	if metrics.WriterPhase != "publish_batch" || metrics.WriterPhaseElapsedNS < uint64(time.Second) || metrics.WriterBatchNS != 0 {
+		t.Fatalf("missing current phase or double-counted live duration: %+v", metrics)
+	}
+	reconciler.setWriterPhase("publish_directories", &reconciler.writerBatchNS)
+	metrics = reconciler.Metrics()
+	if metrics.WriterPhase != "publish_directories" || metrics.WriterBatchNS < uint64(time.Second) {
+		t.Fatalf("missing completed phase: %+v", metrics)
+	}
+	reconciler.setWriterPhase("done", &reconciler.writerDirectoriesNS)
+	metrics = reconciler.Metrics()
+	if metrics.WriterPhase != "done" || metrics.WriterPhaseElapsedNS != 0 || metrics.WriterDirectoriesNS == 0 {
+		t.Fatalf("finished writer has a growing wait: %+v", metrics)
+	}
+}
+
 func (filesystem *fakeFS) Lstat(path string) (*fs.ExtendedFileInfo, error) {
 	if filesystem.gate != nil {
 		<-filesystem.gate
@@ -1381,6 +1435,99 @@ func TestIndependentPublicationsOverlapWithinBound(t *testing.T) {
 	}
 	if store.peak.Load() != publicationConcurrency || len(published) != len(batch) || len(reconciler.errors) != 0 {
 		t.Fatalf("peak=%d published=%d errors=%v", store.peak.Load(), len(published), reconciler.errors)
+	}
+}
+
+type gatedReadStore struct {
+	*fakeStore
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (store *gatedReadStore) MultiGet(ctx context.Context, keys [][]byte) ([]daemon.KeyValue, []bool, error) {
+	select {
+	case store.entered <- struct{}{}:
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	case <-store.release:
+		return store.fakeStore.MultiGet(ctx, keys)
+	}
+}
+
+func TestCriticalPathDBBackpressure(t *testing.T) {
+	for _, stage := range []string{"read", "publication"} {
+		t.Run(stage, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			entered, release := make(chan struct{}, 32), make(chan struct{})
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(release) }) }
+			defer unblock()
+			var store Store = &gatedReadStore{fakeStore: newFakeStore(), entered: entered, release: release}
+			waiters := 1
+			if stage == "publication" {
+				store = &gatedPublicationStore{fakeStore: newFakeStore(), entered: entered, release: release}
+				waiters = publicationConcurrency
+			}
+			filesystem := testFilesystem()
+			for index := range 12 {
+				filesystem.entries[fmt.Sprintf("/root/file%d", index)] = fileInfo(1, uint64(100+index), 1, 1)
+			}
+			reconciler, err := New(ctx, filesystem, store, Options{Workers: 1, QueueDepth: 2, BatchSize: 4})
+			if err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan struct{})
+			defer func() {
+				cancel()
+				unblock()
+				<-done
+				_ = reconciler.Close()
+			}()
+			go func() {
+				defer close(done)
+				for index := range 12 {
+					name := fmt.Sprintf("file%d", index)
+					reconciler.Observe("/"+name, "/root/"+name, fileNode(name, 1))
+				}
+			}()
+			for range waiters {
+				select {
+				case <-entered:
+				case <-ctx.Done():
+					t.Fatal("writer did not reach gated DB work")
+				}
+			}
+			for {
+				metrics := reconciler.Metrics()
+				if metrics.ObserveBlocked > 0 && metrics.PrepareBlocked > 0 {
+					if metrics.WriterPhase != "publish_batch" || metrics.InputQueueDepth != 2 || metrics.PreparedQueueDepth != 2 || metrics.Reconciled != 0 || metrics.StatActive != 0 {
+						t.Fatalf("wrong blocking chain for %s: %+v", stage, metrics)
+					}
+					break
+				}
+				if ctx.Err() != nil {
+					t.Fatalf("DB %s wait did not propagate to callback", stage)
+				}
+				runtime.Gosched()
+			}
+			unblock()
+			select {
+			case <-done:
+			case <-ctx.Done():
+				t.Fatal("removing DB wait did not release producer")
+			}
+			if err := reconciler.Close(); err != nil {
+				t.Fatal(err)
+			}
+			metrics := reconciler.Metrics()
+			if metrics.Reconciled != 12 || metrics.WriterPhase != "done" || metrics.WriterBatchNS == 0 || metrics.ObserveBlockedWorkerNS == 0 || metrics.PrepareBlockedWorkerNS == 0 || metrics.ObserveBlocked != 0 || metrics.PrepareBlocked != 0 {
+				t.Fatalf("incomplete wait accounting after release: %+v", metrics)
+			}
+		})
 	}
 }
 

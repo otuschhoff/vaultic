@@ -939,6 +939,161 @@ location production database or NFS crawl. Fresh metadata assessment, sealed
 binary/configuration pins and representative end-to-end qualification are still
 required before a production restart or a new full-scope ETA.
 
+**Private Large-Catalog Qualification (2026-11-01):**
+
+Evidence: `/volume2/NASDA2/vaultic-test-m6/throughput-ab-20261101-indexfix-k3pA7b`.
+Both cells started from independent checksum-verified copies of the closed,
+encrypted October 1 seed (143 snapshots), using the pinned candidate CLI and
+production daemon binary, 100 ms flush, 128 MiB metadata cache and 512 MiB block
+cache. The frozen input contains 512 regular files and 168,688,466 logical bytes.
+This is a historical catalog and flattened private sample, not a production NFS
+crawl or a complete source-directory qualification.
+
+| Publication group | CLI wall time | Files/s | CLI CPU time | Daemon CPU time | Verified restore wall time |
+| --- | --- | --- | --- | --- | --- |
+| 4 | 257.817 s | 1.986 | 702.305 s | 909.880 s | 220.089 s |
+| 64 | 250.047 s | 2.048 | 691.502 s | 908.040 s | 215.502 s |
+
+Both variants passed exact restored-name/content digest checks and encrypted
+database reopen. The selected source tree is identical:
+`1348614c17bb3c4c82a5c5d2fcfb1587d0e2c19c60d660c8e6c7dfa7ad5a432d`.
+The full root tree IDs differ only because creating the second disposable cell
+changed an ancestor directory's timestamps; decoded node comparison verified
+that no selected-source metadata differed. Reopen checks compare each snapshot
+against its own original full tree ID.
+
+Verification helpers initially failed on index loading, scratch creation and
+owned-client shutdown. These failures remain retained; guarded verification-only
+resumes used the original backup measurements, not rerun backup timings. Restore
+logged missing alternate catalog pack locations in the deliberately partial
+private repo, then recovered using the copied locations; final verified bytes
+and digests matched. This is not evidence that all historical packs were checked.
+
+The roughly 3% wall-time reduction in this one ordered pair does not substantiate
+a drastic end-to-end throughput gain. Most backup and restore time occurred
+before file progress. The normal path loads the full catalog unless
+`--metadata-on-demand` selects bounded point lookups. A separate fresh-clone,
+reversed-order (64 then 4) comparison selects that existing option with a 64 MiB
+lookup cache; its corrected fixture results are recorded below. Production binaries, profile,
+daemon and stopped backup state remain unchanged. Representative metadata
+topology, current production partial-state assessment and an approved pilot are
+still required before restart, scheduling or a full-scope ETA.
+
+The initial on-demand attempts exposed private-fixture omissions, not accepted
+throughput results: managed RAM policy rejects an explicit `--metadata-scratch`,
+and authenticated pending-pack recovery requires bytes absent from the partial
+repo. The exact pinned CLI now passes a small encrypted backup/restore with
+managed RAM and on-demand lookup. A bounded read-only inventory found 18 seed
+pending-export packs (8,589,438,290 bytes), all available for private copying.
+The corrected comparison copies these before each backup, keeps recovery inside the
+timed backup, and shares the 16 GiB pack-copy ceiling with restore materialization.
+It does not mark packs published or skip recovery. The earlier pair did not
+exercise that historical pending-pack recovery and must not be treated as a
+fully matched startup comparison with the corrected fixture.
+
+The corrected on-demand pair passed in
+`/volume2/NASDA2/vaultic-test-m6/throughput-ab-20261101-pendingpackfix-N7b2Rk`:
+
+| Group (execution order) | CLI wall time | Files/s | CLI CPU time | Daemon CPU time | Verified restore wall time |
+| --- | --- | --- | --- | --- | --- |
+| 64 (first) | 38.305 s | 13.366 | 6.707 s | 52.720 s | 218.368 s |
+| 4 (second) | 44.731 s | 11.446 | 6.615 s | 58.390 s | 213.834 s |
+
+Both source trees match, exact 512-file/168,688,466-byte restores pass, and both
+encrypted database reopen checks pass. Group 64 reduced wall time by 14.4% in
+this pair. Its reported backup duration was 9.394 s, compared with 38.305 s total
+CLI wall time; CLI RSS at completion was 666,152,960 bytes. The lookup cache
+reported 662 hits, 2,410 misses and 583 size RPCs. Restore still used normal
+full-catalog loading and logged alternate-location retries before exact-content
+verification succeeded. Total copied pack bytes per cell were 16,962,797,076,
+within the shared 16 GiB ceiling.
+
+A final fresh group-64 full-catalog control uses the same pending-pack-complete
+fixture, durability, daemon caches and frozen input to isolate lookup mode.
+It passed in
+`/volume2/NASDA2/vaultic-test-m6/throughput-ab-20261101-fullcatalog-control-R6m8Qp`:
+
+| Group 64 lookup mode | CLI wall time | CLI CPU time | Daemon CPU time | CLI RSS at completion |
+| --- | --- | --- | --- | --- |
+| Full catalog | 243.886 s | 686.520 s | 898.110 s | 24,569,802,752 bytes |
+| On demand | 38.305 s | 6.707 s | 52.720 s | 666,152,960 bytes |
+
+Both passed exact restored-content and encrypted reopen checks. On-demand
+lookup was approximately 6.4 times faster in total CLI wall time in this
+single-run control comparison. This supports full-catalog startup loading as a
+substantial cost for the large historical catalog; it does not establish a
+6.4-times improvement in steady-state production inode throughput. The earlier
+partial-repo pair is not the matched control. Input paths/inodes differ between
+the control and on-demand evidence roots, while frozen content, seed and resource
+settings match. Order/cache effects and the small flattened workload remain
+limitations. Normal full-catalog restore still took about 217 s in both modes.
+
+This private benchmark sequence is finished; production binaries/configuration
+remain unchanged and the production crawl remains stopped. Current production
+partial-state audit, representative directory/hardlink/NFS qualification and an
+approved bounded pilot remain outstanding. There is no full-phase acceptance,
+scheduled backup authorization, or billion-inode ETA from these results.
+
+**Main-Backup Critical Path (2026-11-01):**
+
+The retained CPU profile was from the database daemon, not the CLI. CPU
+hotspots are supporting evidence only: prioritize the dependency blocking
+progress. After the first hour, the stopped production crawl sustained
+33-38 files/s across successive half-hour windows. The final file-progress
+plateau was only 44 seconds; it does not establish a long finalization stall.
+
+A read-only production daemon timing snapshot found 857,515 Commit requests,
+57,121.310 seconds of summed Commit request time, and 52,304.785 seconds of
+summed durable waiting (91.6% of Commit request time). Engine submission was
+98.947 seconds, transaction-map lock waiting 7.849 seconds, transaction-slot
+lock waiting 6.954 seconds, and engine backpressure count zero. These are
+cumulative since process start, not an isolated main-backup interval or wall
+time percentages. Nested timers and simultaneous requests must not be added.
+No backup, production restart, binary/configuration change, or metadata write
+was performed to obtain this snapshot.
+
+The controlling dependency is completed-file callback -> bounded input queue
+-> stat/preparation workers -> bounded prepared queue -> sequential publication
+writer -> DB planning/read RPCs -> Commit -> durable completion. Default
+publication groups contain four inodes and join before the next group starts.
+This couples scanner throughput to durable publication rounds; CPU resources
+elsewhere cannot break that dependency. The main optimization target is more
+useful publication work per durable round, preserving acknowledgement and
+recovery guarantees, rather than weakening durability or optimizing arbitrary
+CPU-hot code.
+
+With the instrumented CLI, `--json` emits `backup_critical_path` every 30 seconds
+and at main-phase completion. Sampling starts immediately before archiving,
+after index loading; RPC and daemon counter baselines exclude startup. Fields:
+
+- `reconciliation.writer_phase` and `writer_phase_elapsed_ns` show the writer's
+   current phase. `writer_wait_prepared_ns`, `writer_batch_ns`,
+   `writer_hardlinks_ns`, `writer_directories_ns`, and `writer_root_ns` are
+   completed, sequential phase durations. Collection includes batch assembly;
+   it is not a pure source-I/O timer. The current phase is reported separately.
+- Queue depths, capacity, `observe_blocked`, and `prepare_blocked` expose
+   backpressure. `stat_active` distinguishes active stat work from workers
+   blocked on publication. Worker time sums are not wall time; blocked-worker
+   totals update when waits finish, while active counts expose ongoing stalls.
+- `rpc` separates writer and borrowed lookup connections and reports method,
+   completed calls, failures, summed elapsed worker time, active calls and oldest
+   active age. `Get`/`MultiGet` versus `Commit` makes DB-read versus DB-write
+   waiting visible. Diagnostic WriterStatus polling is excluded.
+- `db` reports main-interval engine submission, durability, admission and
+   transaction-lock timing, with active/oldest waiters. `db_scope` is explicitly
+   `daemon_all_clients`: these server counters may include other clients.
+   Missing snapshots/baselines and daemon restarts are flagged; lifetime totals
+   are never silently substituted for interval totals.
+
+Full queues plus blocked callbacks/preparation and a publishing writer expose
+metadata backpressure. Match active CLI RPCs against DB durable/engine/lock
+waiters to locate its downstream cause. An empty prepared queue with a collecting
+writer instead points upstream; it does not alone distinguish NFS, hashing or
+upload. Compare interval progress and exclusive writer phases, not CPU share or
+summed parallel RPC durations. Gated read/publication tests verify that holding
+either DB dependency propagates to callbacks and releasing it resumes progress.
+The new instrumentation is not deployed; production remains unchanged/stopped.
+
 **Pathdiff Qualification Order:**
 
 No pathdiff systemd unit or executable was found in the deployment locations

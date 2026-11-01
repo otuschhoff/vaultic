@@ -169,6 +169,7 @@ type Client struct {
 	encryption EncryptionInfo
 	wal        WALInfo
 	commitRPC  commitRPCCounters
+	rpcWait    rpcWaitCounters
 }
 
 type CommitRPCStats struct {
@@ -1092,7 +1093,8 @@ func dial(ctx context.Context, options Options) (*Client, error) {
 			return netDialer.DialContext(ctx, "tcp", address)
 		}
 	}
-	interceptors := []grpc.UnaryClientInterceptor{workingUnaryInterceptor, classifyUnaryClientError}
+	client := &Client{options: options}
+	interceptors := []grpc.UnaryClientInterceptor{client.rpcWait.intercept, workingUnaryInterceptor, classifyUnaryClientError}
 	if options.ResponseDeliveryForTesting != nil {
 		interceptors = append(interceptors, responseDeliveryInterceptor(options.ResponseDeliveryForTesting))
 	}
@@ -1106,7 +1108,7 @@ func dial(ctx context.Context, options Options) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	client := &Client{conn: conn, rpc: vaulticdbv1.NewVaulticDBClient(conn), options: options}
+	client.conn, client.rpc = conn, vaulticdbv1.NewVaulticDBClient(conn)
 	client.initializeSubclients()
 	if options.AuthToken != "" {
 		client.rpc = &authenticatedClient{VaulticDBClient: client.rpc, token: options.AuthToken}
