@@ -1194,6 +1194,33 @@ Do not classify summed MultiGet time as exclusive wall time or infer NFS
 saturation from an empty prepared queue. Production recovery, full metadata
 consistency and a guarded partial pilot are still separate acceptance gates.
 
+**Production Recovery (2026-11-02):**
+
+The observed count-guarded recovery completed in 7h 8m. Preview selected exactly
+one pack and 10,329 blobs without writing an index. Recovery wrote and read-back
+verified index
+`1914045bd37561ca4c85b262c302717aae807ab8bc1e7eac6669d3883078dda1`,
+at export sequence 2. The subsequent full metadata check completed with
+10,176 legacy indexes, 145 snapshots in both catalogs, 380,264,003 locations
+in both representations, zero pending/failed exports, zero crawl debt,
+zero mismatches and zero warnings. AES-256-GCM remained enabled. All three
+observations completed with exit zero and no observer errors; production
+daemon identity and installed binary/profile pins were unchanged.
+
+Retained receipt:
+`/volume2/NASDA2/vaultic-test-m6/phase2-pending-critical-path-recovery-20261102/readiness/receipt.json`.
+Its `metadata_validated` is true; `readiness_accepted` and `backup_committed`
+remain false because this operation was recovery, not a backup or phase exit.
+
+The bounded production pilot uses `helpers/phase35-m6/bounded_pilot.py`, not
+the 52-source live-crawl execution mode. It requires the accepted recovery
+receipt, unchanged production pins, the separately pinned qualified candidate,
+one exact 10,000-entry source manifest and matching Go/Python content digests.
+Backup, verified restore and full post-metadata checking reuse the existing
+resource observer. Snapshot inspection must attest bounded provenance; exact
+restored path inventory and content must match the manifest. No daemon restart,
+installed-binary replacement, full-source acceptance or scheduling is implied.
+
 **Pathdiff Qualification Order:**
 
 No pathdiff systemd unit or executable was found in the deployment locations

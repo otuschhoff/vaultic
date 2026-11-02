@@ -15,9 +15,28 @@ from unittest.mock import patch
 
 import readiness
 import live_readiness
+import bounded_pilot
 
 
 class ReadinessTests(unittest.TestCase):
+    def test_bounded_pilot_digest_and_scope(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            (source / 'dir').mkdir()
+            (source / 'dir' / 'file').write_bytes(b'content')
+            (source / 'link').symlink_to('dir/file')
+            observed = bounded_pilot.content_observation(source, ['.', 'dir', 'dir/file', 'link'])
+            digest = hashlib.sha256(b'8:dir/file:7:contentsymlink:4:link:8:dir/file:').hexdigest()
+            self.assertEqual(observed, {'sha256': digest, 'files': 2, 'regular_files': 1, 'bytes': 7, 'entries': 4})
+            manifest = {'version': 1, 'source': str(bounded_pilot.SOURCE), 'inode_limit': 10000,
+                        'paths': ['.'] + ['file-' + str(index) for index in range(9999)]}
+            bounded_pilot.validate_manifest(manifest)
+            for unsafe in ('../escape', '/absolute', '.snapshot/file', 'missing/file'):
+                changed = dict(manifest, paths=manifest['paths'][:-1] + [unsafe])
+                with self.assertRaises(ValueError):
+                    bounded_pilot.validate_manifest(changed)
+
     def clean_live_check(self, snapshots):
         check = {'coverage': {'complete': True, 'mode': 'full'}, 'warnings': 0,
                  'slatedb_snapshots': snapshots, 'legacy_indexes': 2, 'legacy_locations': 5,
