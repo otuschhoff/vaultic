@@ -1,8 +1,59 @@
 from pathlib import Path
 import math
+import os
+import shutil
+import tempfile
 
 import bounded_pilot
 import live_readiness
+import readiness
+
+
+def atomic_install(candidate, candidate_sha256, installed, installed_sha256, rollback):
+    candidate, installed, rollback = Path(candidate), Path(installed), Path(rollback)
+    for path in (candidate, installed):
+        if path.is_symlink() or not path.is_file() or path.parent.resolve() != path.parent:
+            raise ValueError('executable path is not a canonical regular file')
+    if rollback.parent.resolve() != rollback.parent or rollback.parent.stat().st_mode & 0o777 != 0o700:
+        raise ValueError('rollback directory must be canonical and private')
+    if (readiness.pilot.digest(candidate) != candidate_sha256 or
+            readiness.pilot.digest(installed) != installed_sha256):
+        raise ValueError('candidate or installed executable pin changed')
+    mode = installed.stat().st_mode & 0o777
+    with installed.open('rb') as original, rollback.open('xb') as backup:
+        os.fchmod(backup.fileno(), mode)
+        shutil.copyfileobj(original, backup)
+        backup.flush()
+        os.fsync(backup.fileno())
+    if readiness.pilot.digest(rollback) != installed_sha256:
+        raise ValueError('rollback executable differs from installed pin')
+    descriptor = os.open(rollback.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=installed.parent, prefix='.vaultic-install-', delete=False) as output:
+            temporary = Path(output.name)
+            with candidate.open('rb') as source:
+                shutil.copyfileobj(source, output)
+            os.fchmod(output.fileno(), mode)
+            output.flush()
+            os.fsync(output.fileno())
+        if (readiness.pilot.digest(temporary) != candidate_sha256 or
+                readiness.pilot.digest(installed) != installed_sha256):
+            raise ValueError('executable pin changed while staging installation')
+        os.replace(temporary, installed)
+        temporary = None
+        descriptor = os.open(installed.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    finally:
+        if temporary is not None:
+            temporary.unlink()
 
 
 def validate_qualification(control, candidate, observation):

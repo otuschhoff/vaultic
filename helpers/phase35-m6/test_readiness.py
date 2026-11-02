@@ -20,6 +20,38 @@ import source_rollout
 
 
 class ReadinessTests(unittest.TestCase):
+    def test_rollout_atomic_install_and_rollback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            root.chmod(0o700)
+            installed, candidate = root / 'installed', root / 'candidate'
+            installed.write_bytes(b'old executable')
+            installed.chmod(0o700)
+            candidate.write_bytes(b'qualified executable')
+            original = readiness.pilot.digest(installed)
+            qualified = readiness.pilot.digest(candidate)
+            with self.assertRaises(ValueError):
+                source_rollout.atomic_install(candidate, 'changed', installed, original, root / 'bad')
+            self.assertEqual(installed.read_bytes(), b'old executable')
+            with self.assertRaises(ValueError):
+                source_rollout.atomic_install(candidate, qualified, installed, 'changed', root / 'bad-installed')
+            with patch.object(source_rollout.os, 'replace', side_effect=OSError('injected replacement failure')):
+                with self.assertRaises(OSError):
+                    source_rollout.atomic_install(candidate, qualified, installed, original, root / 'failed-rollback')
+            self.assertEqual(readiness.pilot.digest(installed), original)
+            self.assertEqual(readiness.pilot.digest(root / 'failed-rollback'), original)
+            self.assertEqual(list(root.glob('.vaultic-install-*')), [])
+            rollback = root / 'rollback'
+            source_rollout.atomic_install(candidate, qualified, installed, original, rollback)
+            self.assertEqual(readiness.pilot.digest(installed), qualified)
+            self.assertEqual(readiness.pilot.digest(rollback), original)
+            self.assertEqual(installed.stat().st_mode & 0o777, 0o700)
+            with self.assertRaises(FileExistsError):
+                source_rollout.atomic_install(candidate, qualified, installed, qualified, rollback)
+            source_rollout.atomic_install(rollback, original, installed, qualified, root / 'replaced')
+            self.assertEqual(readiness.pilot.digest(installed), original)
+            self.assertEqual(readiness.pilot.digest(root / 'replaced'), qualified)
+
     def test_rollout_requires_matched_verified_qualification(self):
         observation = {'files': 89326, 'bytes': 20949531016, 'sha256': 'a' * 64}
         result = {'restore_verified': True, 'reopen_verified': True, 'metadata_on_demand': True,

@@ -1332,10 +1332,50 @@ Its tested full-source command targets only `fme_cae1`, uses the empty profile,
 explicit per-source snapshots and no inode-cap flag, and preserves every sealed
 negative glob and exclusion marker, including `.snapshot`, trash, lost+found,
 `CACHEDIR.TAG` and `.nobackup`. Other sources, positive glob semantics and the
-52-source profile are rejected. These are command/acceptance building blocks,
-not an activated deployment or a completed full-source baseline. All 34
-readiness tests pass with two existing skips; the matched comparison must still
-finish before activation or production execution.
+52-source profile are rejected. Atomic installation checks both executable
+digests, durably preserves a create-only rollback executable in a private
+directory, stages on the destination filesystem, rechecks the pins and atomically
+replaces the destination. Temporary-executable tests cover install/rollback,
+changed pins, existing rollback files and injected replacement failure with
+unchanged installation and staging cleanup. All 35 readiness tests pass with
+two existing skips. These are tested rollout building blocks, not an activated
+deployment or a completed full-source baseline.
+
+**Matched Paired-Read Qualification Accepted (2026-11-02):**
+
+Both `group-64-baseline` and `group-64` passed in the 100,000-entry evidence
+root, with exact restored content, encrypted reopen, matching selected source
+tree `c7380e6f2f20fd57e096a3e9deb4f8a3c0c453bcd35f7da353eaeaa4b57debf4`
+and matching snapshot root tree
+`b27770837716fd23f9d970cf6981aa36c58c34adc143d746cf7e67333ddaeeb6`.
+Both finished with zero active transactions/write intents and reconciled all
+100,000 entries with zero failed or deferred entries. The retained final
+`result.json` files, not the pre-restore `backup-observation.json`, attest the
+completed restore/reopen gates. Historical missing-alternate-pack restore
+warnings were recovered; this is not a retry-free restore claim.
+
+The paired-read binary digest is
+`6f18a47e144d7159fe54df2887a0539a8fe161e608751c4fd693a85e786dda41`;
+the fixed group-fill control digest is
+`cbff53916df13e6d72a65451a7185c444e779279e1312f78d42489e996901fbf`.
+Backup-stage elapsed time fell from 2,146.602 to 2,023.857 seconds, 5.72% less
+time or 6.06% higher throughput. The main-backup telemetry interval, excluding
+index startup, fell from 2,118.731 to 1,996.310 seconds. Exclusive regular
+publication fell from 956.441 to 907.860 seconds; upstream waiting fell from
+620.815 to 546.946 seconds; directory finalization remained 540.717 versus
+540.751 seconds. This single ordered historical-catalog comparison has source
+and cache/order variability: the entire elapsed improvement cannot be assigned
+to the changed reads, nor promised for production.
+
+Main-interval writer Get calls fell from 293,510 to 93,505; MultiGet calls rose
+from 183,762 to 283,761, about 100,000 fewer publication read RPCs in total.
+Commit attempts stayed essentially unchanged at 14,763 versus 14,762, with one
+recovered failure each. Summed daemon durable waits were 1,112.696 versus
+1,116.398 worker-seconds, not exclusive wall shares. Neither cell showed engine
+backpressure or counter reset. Remaining directory/durable pacing is measurable,
+not evidence that admission locks or startup index loading became the bottleneck.
+Qualification did not replace the installed CLI, restart the production daemon,
+run an uncapped source, or activate scheduling. Those gates remain outstanding.
 
 **Pathdiff Qualification Order:**
 
