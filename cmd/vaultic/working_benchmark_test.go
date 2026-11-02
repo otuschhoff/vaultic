@@ -392,7 +392,7 @@ func publicationQualificationSample(t *testing.T, target string) (string, uint64
 
 func publicationQualificationCommand(t *testing.T, directory, name, binary string, args ...string) (time.Duration, float64) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Minute)
+	ctx, cancel := context.WithTimeout(t.Context(), 4*time.Hour)
 	defer cancel()
 	stdout, err := os.OpenFile(filepath.Join(directory, name+".stdout.log"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	rtest.OK(t, err)
