@@ -1221,6 +1221,46 @@ resource observer. Snapshot inspection must attest bounded provenance; exact
 restored path inventory and content must match the manifest. No daemon restart,
 installed-binary replacement, full-source acceptance or scheduling is implied.
 
+**Bounded Production Pilot Accepted (2026-11-02):**
+
+The pilot completed from 08:09:09 to 08:39:38 UTC. Its retained receipt is
+`/volume2/NASDA2/vaultic-test-m6/critical-path-fme_cae1-20261102-production-cap10k/production-pilot/receipt.json`:
+`accepted=true`, `partial=true`, no failure. Snapshot
+`c818426dd81e328d79a8837b1b742184de31503691e86e8b66c073965dd98b28`
+attests `crawl_plan.mode=bounded` and only `/ncl1-1-vs-50/fme_cae1`.
+All three resource observations completed with exit zero and no observer errors.
+The sealed selection contained 10,000 entries, 9,209 regular files, nine symlinks
+and 2,460,946,936 logical bytes. Verified restore passed, and the exact restored
+source-relative path inventory, content digest and unchanged selected source
+matched the manifest. The restore summary counts 10,001 objects including its
+ancestor structure; this is not the regular-file count or manifest cardinality.
+
+Main-backup elapsed time was 320.401 seconds, separate from 343.810 seconds of
+CLI wall time and the archiver's 188.819-second summary timer, which excludes
+the reconciliation tail. Exclusive writer phases accounted for 228.758 seconds
+in regular publication, 50.764 waiting for prepared work, 40.225 in directories
+and 0.403 in root publication. At 30 through 120 seconds both queues were full
+at 256 entries, with 59 blocked callbacks and 128 blocked preparation workers.
+At 150 seconds the writer waited upstream with empty queues; this alone does
+not identify NFS saturation. There were 145 atomic groups, 143 full groups,
+and 1,135 Commit attempts. One publication conflict recovered successfully;
+there were no terminal publication failures or failed/deferred reconciliations.
+Summed durable waiting was 77.464 worker-seconds, not exclusive wall time.
+The interval was available without counter reset or engine backpressure;
+database counters cover all daemon clients. The production catalog and cache
+state differ from the historical qualification, so this is not a controlled
+production speedup measurement or a sustained-throughput guarantee.
+
+The full post-metadata check took 1,218.139 seconds: 10,177 legacy indexes,
+146 snapshots in both catalogs and 380,264,740 locations in both representations.
+It found zero pending/failed exports, crawl debt, mismatches or warnings, with
+AES-256-GCM and generation 1 unchanged. This validates exactly one additional
+partial snapshot, not completion of the 52-source baseline. Installed CLI,
+daemon and profile hashes remained pinned; daemon PID 101997 stayed active
+and the full-crawl unit remained inactive. The bounded critical-path pilot
+gates are complete. Full-source baseline, deployment/restart qualification,
+pathdiff and scheduling remain separate gates; none were enabled by this run.
+
 **Pathdiff Qualification Order:**
 
 No pathdiff systemd unit or executable was found in the deployment locations
