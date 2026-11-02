@@ -1424,6 +1424,37 @@ must wait for that check. Activation is accepted; the full-source run is not
 yet accepted. No full-source snapshot, verified full-source restore or final
 metadata result is claimed by this checkpoint. Scheduling remains disabled.
 
+**Unchanged-Source Crawl Measurement:**
+
+Include an explicit second full traversal against an accepted complete parent
+when evaluating crawl speed. Do not use `--force`, selective subtree reuse,
+pathdiff, a dry run, or a bounded snapshot as the parent. Verify that every
+regular file is classified unmodified, none are new or changed, no new file-data
+blobs are written, the observed and scanned inode counts match the selected
+scope, reconciliation has no failed/deferred entries, and the snapshot records
+the expected parent and full traversal. Restore and verify the resulting snapshot
+outside the measured interval. A live source that changes during the run does
+not satisfy the all-unchanged benchmark; retain it as a different workload.
+
+Report main-backup elapsed time and observed inodes per second separately from
+startup/index loading, archiver summary duration and total command time. Retain
+queue, callback, preparation, publication and durable-wait observations to
+identify who is waiting for what. Main-backup time includes reconciliation and
+finalization; it is not a standalone filesystem `walk` timer. File-data blob
+count is not a source-read counter, and metadata/tree objects may still be
+written. The separately instrumented `TestArchiverParent` asserts zero file
+bytes read on unchanged parent cases. A native encrypted-daemon fixture also
+passed a 75-regular-file/83-entry full unchanged crawl with zero new data blobs,
+an exact verified restore, and a 1.089-second main interval. This tiny local
+fixture is a correctness check, not an NFS performance estimate.
+
+The sustained 100,000-entry unchanged-source benchmark remains outstanding.
+The prior 100,000-entry comparison measured a forced bounded workload, not this
+case. A bounded parent is intentionally ineligible as a full-coverage parent.
+Wait for the current production full-source supervisor before running a separate
+representative measurement, and require stable input plus the unchanged gates
+above; do not present the small fixture or prior forced timing as its result.
+
 **Pathdiff Qualification Order:**
 
 No pathdiff systemd unit or executable was found in the deployment locations

@@ -299,7 +299,78 @@ func TestPublicationQualificationOnDemandBackup(t *testing.T) {
 			"--working-memory-mode=ram", "--working-memory-ram-limit=160GiB", "--working-memory-scratch="+scratch,
 			"--working-memory-disk-budget=2GiB", environment.testdata)
 		ids := testListSnapshots(t, options, 1)
-		return testRunRestoreAssumeFailure(t, ids[0].String(), restoreOptions{Target: t.TempDir(), Verify: true}, options)
+		if err := testRunRestoreAssumeFailure(t, ids[0].String(), restoreOptions{Target: t.TempDir(), Verify: true}, options); err != nil {
+			return err
+		}
+		unchanged := t.TempDir()
+		publicationQualificationCommand(t, unchanged, "unchanged", "/root/proj/vaultic/bin/phase35-critical-path-paired-reads/linux-amd64/vaultic",
+			"--repo="+options.Repo, "--password-file="+password, "--metadata-daemon-socket="+daemonOptions.Socket,
+			"--metadata-encryption-mode=required", "--metadata-passphrase-file="+passphrase, "--no-cache", "--json",
+			"backup", "--no-scan", "--one-file-system", "--metadata-publication-group-size=64", "--metadata-on-demand", "--metadata-cache-mib=64",
+			"--working-memory-mode=ram", "--working-memory-ram-limit=160GiB", "--working-memory-scratch="+scratch,
+			"--working-memory-disk-budget=2GiB", environment.testdata)
+		output, err = os.ReadFile(filepath.Join(unchanged, "unchanged.stdout.log"))
+		if err != nil {
+			return err
+		}
+		var summary m5BackupSummary
+		var main struct {
+			MessageType    string  `json:"message_type"`
+			Phase          string  `json:"phase"`
+			SecondsElapsed float64 `json:"seconds_elapsed"`
+			Reconciliation struct {
+				Observed uint64 `json:"observed"`
+				Scanned  uint64 `json:"scanned"`
+				Failed   uint64 `json:"failed"`
+				Deferred uint64 `json:"deferred"`
+			} `json:"reconciliation"`
+		}
+		for _, line := range bytes.Split(output, []byte{'\n'}) {
+			var kind struct {
+				MessageType string `json:"message_type"`
+			}
+			if json.Unmarshal(line, &kind) != nil {
+				continue
+			}
+			switch kind.MessageType {
+			case "summary":
+				rtest.OK(t, json.Unmarshal(line, &summary))
+			case "backup_critical_path":
+				rtest.OK(t, json.Unmarshal(line, &main))
+			}
+		}
+		if summary.Unmodified != regularFiles || summary.TotalFilesProcessed != regularFiles || summary.New != 0 || summary.Changed != 0 || summary.DataBlobs != 0 {
+			return fmt.Errorf("unchanged native crawl changed or transferred file data: %+v", summary)
+		}
+		if main.Phase != "main_backup" || main.SecondsElapsed <= 0 || main.Reconciliation.Observed != uint64(len(paths)) ||
+			main.Reconciliation.Scanned != uint64(len(paths)) || main.Reconciliation.Failed != 0 || main.Reconciliation.Deferred != 0 {
+			return fmt.Errorf("unchanged native crawl lacks complete main interval: %+v", main)
+		}
+		all := testListSnapshots(t, options, 2)
+		for _, id := range all {
+			if id != ids[0] {
+				snapshot := testLoadSnapshot(t, options, id)
+				if snapshot.Parent == nil || *snapshot.Parent != ids[0] || snapshot.CrawlPlan == nil || snapshot.CrawlPlan.Mode != "full" || snapshot.CrawlPlan.ReusedSubtrees != 0 {
+					return fmt.Errorf("unchanged native backup did not use a full crawl and the prior parent")
+				}
+				restored := t.TempDir()
+				if err := testRunRestoreAssumeFailure(t, id.String(), restoreOptions{Target: restored, Verify: true}, options); err != nil {
+					return err
+				}
+				selected := make(map[string]bool, len(paths))
+				for _, path := range paths {
+					selected[path] = true
+				}
+				expectedHash, expectedFiles, expectedBytes := m5FilesSelected(t, environment.testdata, false, selected)
+				actualHash, actualFiles, actualBytes := m5FilesSelected(t, filepath.Join(restored, strings.TrimPrefix(environment.testdata, "/")), false, selected)
+				if expectedHash != actualHash || expectedFiles != actualFiles || expectedBytes != actualBytes {
+					return fmt.Errorf("unchanged snapshot restore differs from source")
+				}
+			}
+		}
+		t.Logf("unchanged_native_full_crawl files=%d observed=%d data_blobs=%d metadata_and_pack_bytes=%d main_seconds=%.6f files_per_second=%.3f archive_seconds=%.6f",
+			regularFiles, main.Reconciliation.Observed, summary.DataBlobs, summary.DataAdded, main.SecondsElapsed, float64(regularFiles)/main.SecondsElapsed, summary.TotalDuration)
+		return nil
 	}))
 }
 
@@ -1035,7 +1106,7 @@ func TestPublicationBackupQualification(t *testing.T) {
 					t.Fatal("backup left transactions or write intents")
 				}
 				observation, err := json.MarshalIndent(map[string]any{
-					"candidate": candidate,
+					"candidate":          candidate,
 					"metadata_on_demand": onDemand == "1",
 					"group_size":         groupSize, "startup_seconds": startupSeconds, "backup_seconds": wall.Seconds(),
 					"cli_cpu_seconds": cliCPU, "writer_before": before, "writer_after": after,
@@ -1340,10 +1411,14 @@ func m5Command(t *testing.T, options global.Options, args ...string) []workingkv
 }
 
 type m5BackupSummary struct {
-	MessageType string `json:"message_type"`
-	New         uint64 `json:"files_new"`
-	Changed     uint64 `json:"files_changed"`
-	Unmodified  uint64 `json:"files_unmodified"`
+	MessageType         string  `json:"message_type"`
+	New                 uint64  `json:"files_new"`
+	Changed             uint64  `json:"files_changed"`
+	Unmodified          uint64  `json:"files_unmodified"`
+	DataBlobs           uint64  `json:"data_blobs"`
+	DataAdded           uint64  `json:"data_added"`
+	TotalFilesProcessed uint64  `json:"total_files_processed"`
+	TotalDuration       float64 `json:"total_duration"`
 }
 
 func m5Execute(t *testing.T, options global.Options, args ...string) ([]workingkv.PolicyEvent, m5BackupSummary, error) {
@@ -1373,6 +1448,48 @@ func m5Execute(t *testing.T, options global.Options, args ...string) ([]workingk
 
 func m5BackupArgs(source string) []string {
 	return []string{"backup", "--host=m5-fixture", "--exclude-if-present=.m5-skip", "--exclude-if-present=.m5-skip2", source}
+}
+
+func TestUnchangedFullCrawlNoFileDataTransfer(t *testing.T) {
+	t.Setenv("VAULTIC_PASSWORD", rtest.TestPassword)
+	environment, cleanup := withTestEnvironment(t)
+	defer cleanup()
+	testSetupBackupData(t, environment)
+	source := filepath.Join(t.TempDir(), "source")
+	rtest.OK(t, os.Mkdir(source, 0700))
+	const files = 128
+	for ordinal := range files {
+		rtest.OK(t, os.WriteFile(filepath.Join(source, fmt.Sprintf("file-%04d", ordinal)),
+			fmt.Appendf(nil, "unchanged-content-%04d", ordinal), 0600))
+	}
+	args := []string{"backup", "--host=unchanged-crawl-fixture", "--no-scan", source}
+	_, first, err := m5Execute(t, environment.globalOptions, args...)
+	rtest.OK(t, err)
+	if first.New != files || first.DataBlobs == 0 {
+		t.Fatalf("initial backup did not write the fixture: %+v", first)
+	}
+	parent := testListSnapshots(t, environment.globalOptions, 1)[0]
+	started := time.Now()
+	_, second, err := m5Execute(t, environment.globalOptions, args...)
+	wall := time.Since(started)
+	rtest.OK(t, err)
+	if second.New != 0 || second.Changed != 0 || second.Unmodified != files ||
+		second.TotalFilesProcessed != files || second.DataBlobs != 0 {
+		t.Fatalf("unchanged full crawl wrote file data or missed files: %+v", second)
+	}
+	ids := testListSnapshots(t, environment.globalOptions, 2)
+	var latest *data.Snapshot
+	for _, id := range ids {
+		if id != parent {
+			latest = testLoadSnapshot(t, environment.globalOptions, id)
+		}
+	}
+	if latest == nil || latest.Parent == nil || *latest.Parent != parent || latest.CrawlPlan == nil ||
+		latest.CrawlPlan.Mode != "full" || latest.CrawlPlan.ReusedSubtrees != 0 {
+		t.Fatal("unchanged backup did not perform a full crawl against the prior snapshot")
+	}
+	t.Logf("unchanged_full_crawl files=%d data_blobs=%d metadata_and_pack_bytes=%d archive_seconds=%.6f command_seconds=%.6f",
+		files, second.DataBlobs, second.DataAdded, second.TotalDuration, wall.Seconds())
 }
 
 func TestM5BuildSeed(t *testing.T) {
@@ -1586,7 +1703,8 @@ func TestM5Workflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if scenario == "unchanged" && timedErr == nil && (backupSummary.New != 0 || backupSummary.Changed != 0 || backupSummary.Unmodified != files) {
+	if scenario == "unchanged" && timedErr == nil && (backupSummary.New != 0 || backupSummary.Changed != 0 ||
+		backupSummary.Unmodified != files || backupSummary.TotalFilesProcessed != files || backupSummary.DataBlobs != 0) {
 		t.Fatalf("unchanged workflow was not actually unchanged: %+v files=%d", backupSummary, files)
 	}
 	var traversalDigest string
