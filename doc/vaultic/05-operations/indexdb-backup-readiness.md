@@ -1261,6 +1261,21 @@ and the full-crawl unit remained inactive. The bounded critical-path pilot
 gates are complete. Full-source baseline, deployment/restart qualification,
 pathdiff and scheduling remain separate gates; none were enabled by this run.
 
+The next qualification raises the exact cap tenfold to 100,000 live entries.
+Source preparation sealed 89,300 regular files, 26 symlinks and 20,949,531,016
+logical bytes, excluding `.snapshot` subtrees before selection. The all-entry
+content digest is
+`9f85dfbe8114ebfd17481f3c1453d2fb1333c73580a8aa56415dbbd9cd010862`.
+The 64 GiB logical-byte ceiling remains unchanged. Evidence uses the fresh root
+`/volume2/NASDA2/vaultic-test-m6/critical-path-fme_cae1-20261102-production-cap100k`.
+The pilot accepts the preceding successful pilot receipt as its pinned baseline,
+requiring the same original production contract, repository and generation, full
+clean metadata coverage and complete observations. This advances expected catalog
+growth from 146 to 147 snapshots rather than reusing the recovery-only count.
+Backup and restore each have a four-hour bound; full metadata checking retains
+its two-hour bound. Larger-run acceptance, further optimization and deployment
+remain contingent on the retained results; no completion is claimed here.
+
 **Pathdiff Qualification Order:**
 
 No pathdiff systemd unit or executable was found in the deployment locations

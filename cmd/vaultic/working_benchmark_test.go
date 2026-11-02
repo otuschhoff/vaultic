@@ -646,9 +646,12 @@ func TestPrepareFmeCAE1Qualification(t *testing.T) {
 	rtest.OK(t, os.Chmod(root, 0700))
 	rtest.OK(t, os.WriteFile(filepath.Join(root, ".nobackup"), []byte("Disposable Phase 35 throughput qualification.\n"), 0600))
 	rtest.OK(t, os.Chmod(filepath.Join(root, ".nobackup"), 0600))
-	manifest := backupcmd.BoundedInodeManifest{Version: 1, Source: "/ncl1-1-vs-50/fme_cae1", InodeLimit: 10_000}
+	manifest := backupcmd.BoundedInodeManifest{Version: 1, Source: "/ncl1-1-vs-50/fme_cae1", InodeLimit: 100_000}
 	manifest.Paths, err = boundedLiveSourcePaths(manifest.Source, manifest.InodeLimit)
 	rtest.OK(t, err)
+	if uint64(len(manifest.Paths)) != manifest.InodeLimit {
+		t.Fatal("source does not contain the requested number of live inodes")
+	}
 	selected := make(map[string]bool, len(manifest.Paths))
 	for _, path := range manifest.Paths {
 		selected[path] = true

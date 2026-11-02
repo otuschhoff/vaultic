@@ -29,13 +29,34 @@ class ReadinessTests(unittest.TestCase):
             observed = bounded_pilot.content_observation(source, ['.', 'dir', 'dir/file', 'link'])
             digest = hashlib.sha256(b'8:dir/file:7:contentsymlink:4:link:8:dir/file:').hexdigest()
             self.assertEqual(observed, {'sha256': digest, 'files': 2, 'regular_files': 1, 'bytes': 7, 'entries': 4})
-            manifest = {'version': 1, 'source': str(bounded_pilot.SOURCE), 'inode_limit': 10000,
-                        'paths': ['.'] + ['file-' + str(index) for index in range(9999)]}
+            manifest = {'version': 1, 'source': str(bounded_pilot.SOURCE), 'inode_limit': 100000,
+                        'paths': ['.'] + ['file-' + str(index) for index in range(99999)]}
             bounded_pilot.validate_manifest(manifest)
+            with self.assertRaises(ValueError):
+                bounded_pilot.validate_manifest(dict(manifest, inode_limit=10000))
+            with self.assertRaises(ValueError):
+                bounded_pilot.validate_manifest(dict(manifest, paths=manifest['paths'][:-1]))
             for unsafe in ('../escape', '/absolute', '.snapshot/file', 'missing/file'):
                 changed = dict(manifest, paths=manifest['paths'][:-1] + [unsafe])
                 with self.assertRaises(ValueError):
                     bounded_pilot.validate_manifest(changed)
+
+    def test_bounded_pilot_accepted_baseline(self):
+        plan = {'repository_id': 'repo'}
+        result = {'observation_complete': True, 'exit_code': 0, 'errors': [], 'events': {}}
+        receipt = {'accepted': True, 'partial': True, 'contract_sha256': readiness.fingerprint(plan),
+                   'outcomes': [{'stage': 'post-metadata-check', 'result': result}]}
+        self.assertEqual(bounded_pilot.accepted_baseline(plan, receipt), result)
+        for field, value in (('accepted', False), ('partial', False), ('contract_sha256', 'changed'),
+                             ('failure', 'failed')):
+            with self.assertRaises(ValueError):
+                bounded_pilot.accepted_baseline(plan, dict(receipt, **{field: value}))
+        for field, value in (('observation_complete', False), ('exit_code', 1), ('errors', ['failed'])):
+            changed = dict(receipt, outcomes=[{'stage': 'post-metadata-check', 'result': dict(result, **{field: value})}])
+            with self.assertRaises(ValueError):
+                bounded_pilot.accepted_baseline(plan, changed)
+        with self.assertRaises(ValueError):
+            bounded_pilot.accepted_baseline(plan, dict(receipt, outcomes=[{'stage': 'backup', 'result': result}]))
 
     def clean_live_check(self, snapshots):
         check = {'coverage': {'complete': True, 'mode': 'full'}, 'warnings': 0,

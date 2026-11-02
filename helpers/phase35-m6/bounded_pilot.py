@@ -14,6 +14,7 @@ import readiness
 CANDIDATE = Path('/root/proj/vaultic/bin/phase35-critical-path-fill/linux-amd64/vaultic')
 CANDIDATE_SHA256 = 'cbff53916df13e6d72a65451a7185c444e779279e1312f78d42489e996901fbf'
 SOURCE = Path('/ncl1-1-vs-50/fme_cae1')
+INODE_LIMIT = 100000
 
 
 def content_observation(source, paths):
@@ -44,9 +45,9 @@ def content_observation(source, paths):
 
 def validate_manifest(manifest):
     paths = manifest['paths']
-    if manifest['version'] != 1 or manifest['source'] != str(SOURCE) or manifest['inode_limit'] != 10000:
+    if manifest['version'] != 1 or manifest['source'] != str(SOURCE) or manifest['inode_limit'] != INODE_LIMIT:
         raise ValueError('unexpected bounded pilot scope')
-    if len(paths) != 10000 or len(set(paths)) != len(paths) or paths[0] != '.':
+    if len(paths) != INODE_LIMIT or len(set(paths)) != len(paths) or paths[0] != '.':
         raise ValueError('unexpected bounded pilot cardinality')
     selected = set(paths)
     for relative in paths:
@@ -57,15 +58,30 @@ def validate_manifest(manifest):
             raise ValueError('bounded pilot omitted ancestor')
 
 
-def execute(contract, root):
-    plan = live_readiness.load_plan(contract)
-    recovery = json.loads((Path(plan['root']) / 'readiness' / 'receipt.json').read_text())
-    if recovery.get('failure') or recovery.get('metadata_validated') is not True or recovery.get('preview_only') is not False:
-        raise ValueError('production recovery is not accepted')
-    post = recovery['outcomes'][-1]['result']
+def accepted_baseline(plan, receipt):
+    recovered = receipt.get('metadata_validated') is True and receipt.get('preview_only') is False
+    piloted = (receipt.get('accepted') is True and receipt.get('partial') is True and
+               receipt.get('contract_sha256') == readiness.fingerprint(plan))
+    if receipt.get('failure') or not (recovered or piloted):
+        raise ValueError('production baseline is not accepted')
+    if receipt['outcomes'][-1]['stage'] != 'post-metadata-check':
+        raise ValueError('production baseline lacks final metadata check')
+    post = receipt['outcomes'][-1]['result']
     if not post['observation_complete'] or post['exit_code'] or post['errors']:
         raise ValueError('production metadata check is not accepted')
-    identity = readiness.validate_stage(plan, 'metadata-check', post['events'], None)
+    return post
+
+
+def execute(contract, root, baseline=None):
+    plan = live_readiness.load_plan(contract)
+    baseline = baseline or Path(plan['root']) / 'readiness' / 'receipt.json'
+    baseline_sha256 = readiness.pilot.digest(baseline)
+    post = accepted_baseline(plan, json.loads(baseline.read_text()))
+    original_identity = readiness.validate_stage(
+        plan, 'metadata-check', readiness.json_events(Path(plan['pins']['baseline']['path'])), None)
+    baseline_plan = copy.deepcopy(plan)
+    baseline_plan['expected']['snapshots'] = post['events']['index_check']['slatedb_snapshots']
+    identity = readiness.validate_stage(baseline_plan, 'metadata-check', post['events'], original_identity)
     if readiness.pilot.digest(CANDIDATE) != CANDIDATE_SHA256:
         raise ValueError('qualified candidate changed')
     if root.parent != readiness.pilot.AUTH_ROOT or root.resolve() != root or root.stat().st_mode & 0o777 != 0o700:
@@ -89,15 +105,17 @@ def execute(contract, root):
     directory = root / 'production-pilot'
     readiness.pilot.private_directory(directory)
     receipt = {'partial': True, 'accepted': False, 'snapshot': None, 'outcomes': [],
+               'baseline': {'path': str(baseline), 'sha256': baseline_sha256},
                'contract_sha256': readiness.fingerprint(plan), 'candidate_sha256': CANDIDATE_SHA256,
                'manifest_sha256': readiness.pilot.digest(manifest_path), 'observation': observation,
                'started_utc': readiness.utc()}
     readiness.pilot.write_json(directory / 'plan.json', runtime)
     helper_sha256 = readiness.pilot.digest(Path(__file__))
 
-    def run(stage, argv, seconds=3600):
+    def run(stage, argv, seconds=14400):
         if (readiness.pilot.digest(CANDIDATE) != CANDIDATE_SHA256 or
                 readiness.pilot.digest(Path(__file__)) != helper_sha256 or
+                readiness.pilot.digest(baseline) != baseline_sha256 or
                 readiness.pilot.digest(manifest_path) != receipt['manifest_sha256'] or
                 readiness.fingerprint(live_readiness.load_plan(contract)) != receipt['contract_sha256']):
             raise ValueError('pilot inputs changed')
@@ -161,6 +179,6 @@ def execute(contract, root):
 
 if __name__ == '__main__':
     os.umask(0o077)
-    if len(sys.argv) != 3:
-        raise SystemExit('expected recovery contract and prepared bounded root')
-    raise SystemExit(execute(Path(sys.argv[1]), Path(sys.argv[2])))
+    if len(sys.argv) not in (3, 4):
+        raise SystemExit('expected recovery contract, prepared bounded root and optional accepted baseline receipt')
+    raise SystemExit(execute(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]) if len(sys.argv) == 4 else None))
