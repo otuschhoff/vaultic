@@ -1404,6 +1404,26 @@ readiness tests pass with two existing skips, including activation success,
 injected sealing rollback and supervisor restore-failure rejection. The helper
 does not expand to other sources or enable scheduling after this first source.
 
+**CLI Activated; Full-Source Verification Pending (2026-11-02):**
+
+Activation completed at 14:17:36 UTC with `accepted=true`, no failure, the
+qualified paired-read CLI digest and a verified retained rollback digest
+`3babac6d9038f02275ecaa7811306c09eb2d5473dd77215c1c10024edd9d246c`.
+Evidence is create-only under
+`/volume2/NASDA2/vaultic-test-m6/phase35-fme_cae1-full-source-20261102`.
+The new contract fingerprint is
+`139211c75be3bf28cfc2ec33a05b7b5cd1853e003f3e3e2e38984653dffabb3a`;
+its original contract is retained unchanged. Installed/new-contract pins,
+rollback content and the 147-snapshot baseline were checked after activation.
+Production daemon PID 101997/start-ticks 7576213 remained unchanged, and the
+52-source full-crawl unit remained inactive.
+
+The supervised unit `vaultic-phase35-fme-cae1-full-source-20261102.service`
+entered its fresh full metadata precheck at 14:17:38 UTC. The uncapped backup
+must wait for that check. Activation is accepted; the full-source run is not
+yet accepted. No full-source snapshot, verified full-source restore or final
+metadata result is claimed by this checkpoint. Scheduling remains disabled.
+
 **Pathdiff Qualification Order:**
 
 No pathdiff systemd unit or executable was found in the deployment locations
