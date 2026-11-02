@@ -20,6 +20,131 @@ import source_rollout
 
 
 class ReadinessTests(unittest.TestCase):
+    def test_rollout_supervisor_requires_complete_restore(self):
+        for fail_restore in (False, True):
+            with self.subTest(fail_restore=fail_restore), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                runtime = root / 'runtime'
+                runtime.mkdir()
+                contract = root / 'contract.json'
+                contract.write_text('{}')
+                plan = {'root': str(runtime), 'jobs': 52, 'pins': {'baseline': {'path': str(contract)}},
+                        'limits': {'backup_seconds': 30, 'check_seconds': 30}}
+                activation = {'accepted': True, 'contract_sha256': readiness.fingerprint(plan), 'pins': []}
+                (root / 'activation.json').write_text(json.dumps(activation))
+                stages = []
+
+                def observed(argv, directory, seconds, value):
+                    self.assertEqual(value['jobs'], 1)
+                    stage = directory.name
+                    stages.append(stage)
+                    events = {}
+                    complete = not (stage == 'restore' and fail_restore)
+                    if stage == 'backup':
+                        events = {'summary': {'snapshot_id': 'c' * 64}}
+                    if stage == 'restore':
+                        (runtime / 'readiness' / 'restored' / str(bounded_pilot.SOURCE).lstrip('/')).mkdir(parents=True)
+                        events = {'summary': {'total_bytes': 20, 'bytes_restored': 20}}
+                    return {'observation_complete': complete, 'exit_code': 0,
+                            'errors': [] if complete else ['injected restore failure'], 'events': events}
+
+                def inspect(argv, **kwargs):
+                    self.assertEqual(argv[-3:-1], ['cat', 'snapshot'])
+                    kwargs['stdout'].write(json.dumps({'paths': [str(bounded_pilot.SOURCE)],
+                                                       'crawl_plan': {'mode': 'full'}}).encode())
+
+                with patch.object(live_readiness, 'load_plan', return_value=plan), \
+                        patch.object(live_readiness, 'command', side_effect=lambda value, stage, *extra: ['vaultic', stage]), \
+                        patch.object(source_rollout, 'backup_command', return_value=['vaultic', 'backup']), \
+                        patch.object(readiness, 'run_observed', side_effect=observed), \
+                        patch.object(readiness, 'json_events', return_value={}), \
+                        patch.object(readiness, 'validate_stage', return_value=('repository', 1, 0, 'options')), \
+                        patch.object(source_rollout.subprocess, 'run', side_effect=inspect):
+                    self.assertEqual(source_rollout.execute(contract), 1 if fail_restore else 0)
+                receipt = json.loads((runtime / 'readiness' / 'receipt.json').read_text())
+                self.assertEqual(receipt['accepted'], not fail_restore)
+                self.assertFalse(receipt['partial'])
+                self.assertFalse(receipt['scheduling_enabled'])
+                self.assertEqual(stages, ['metadata-check', 'backup', 'restore'] +
+                                 ([] if fail_restore else ['post-metadata-check']))
+                self.assertEqual(receipt['snapshot'], 'c' * 64)
+
+    def test_rollout_full_snapshot_requires_nonselective_source(self):
+        source = str(bounded_pilot.SOURCE)
+        snapshot = {'paths': [source], 'crawl_plan': {'mode': 'full'}}
+        source_rollout.validate_full_snapshot(snapshot)
+        for crawl in ({'mode': 'bounded'}, {'mode': 'selective'}, {},
+                      {'mode': 'full', 'source': 'inode-manifest'},
+                      {'mode': 'full', 'reused_subtrees': 1},
+                      {'mode': 'full', 'changed_paths': ['changed']},
+                      {'mode': 'full', 'roots': [{'root': source, 'mode': 'selective'}]},
+                      {'mode': 'full', 'roots': [{'root': '/other', 'mode': 'full'}]}):
+            with self.assertRaises(ValueError):
+                source_rollout.validate_full_snapshot(dict(snapshot, crawl_plan=crawl))
+        with self.assertRaises(ValueError):
+            source_rollout.validate_full_snapshot(dict(snapshot, paths=[source, '/other']))
+
+    def test_rollout_activation_rolls_back_on_contract_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            installed, candidate, control = (root / name for name in ('installed', 'candidate', 'control'))
+            installed.write_bytes(b'old executable')
+            installed.chmod(0o700)
+            candidate.write_text('#!/bin/sh\nexit 0\n')
+            control.write_bytes(b'qualified control')
+            observation = {'files': 10, 'bytes': 20, 'sha256': 'a' * 64}
+            result = {'restore_verified': True, 'reopen_verified': True, 'metadata_on_demand': True,
+                      'group_size': 64, 'files': 10, 'bytes': 20, 'input_sha256': 'a' * 64,
+                      'source_tree': 'b' * 64, 'snapshot': 'c' * 64, 'tree': 'd' * 64, 'backup_seconds': 30}
+            qualification = root / 'qualification'
+            qualification.mkdir()
+            (qualification / 'source-observation.json').write_text(json.dumps(observation))
+            for name, binary in (('group-64-baseline', control), ('group-64', candidate)):
+                cell = qualification / name
+                cell.mkdir()
+                (cell / 'result.json').write_text(json.dumps(result))
+                (cell / 'backup-observation.json').write_text(json.dumps({'candidate': str(binary)}))
+            contract, baseline = root / 'old-contract.json', root / 'baseline.json'
+            contract.write_text('{}')
+            baseline.write_text('{}')
+            plan = {'pins': {'binary': {'path': str(installed), 'sha256': readiness.pilot.digest(installed)},
+                             'baseline': {'path': str(baseline)}}, 'expected': {'snapshots': 145},
+                    'external_processes': [{'pid': os.getpid()}]}
+            with contextlib.ExitStack() as stack:
+                for name, value in (('CANDIDATE', candidate), ('CANDIDATE_SHA256', readiness.pilot.digest(candidate)),
+                                    ('CONTROL', control), ('CONTROL_SHA256', readiness.pilot.digest(control))):
+                    stack.enter_context(patch.object(source_rollout, name, value))
+                stack.enter_context(patch.object(readiness.pilot, 'AUTH_ROOT', root))
+                loader = stack.enter_context(patch.object(live_readiness, 'load_plan', return_value=plan))
+                stack.enter_context(patch.object(readiness, 'json_events', return_value={}))
+                stack.enter_context(patch.object(readiness, 'validate_stage', return_value=('repository', 1, 0, 'options')))
+                stack.enter_context(patch.object(bounded_pilot, 'accepted_baseline', return_value={
+                    'events': {'index_check': {'slatedb_snapshots': 147}}}))
+                sealer = stack.enter_context(patch.object(live_readiness, 'seal', side_effect=ValueError('injected seal failure')))
+                with self.assertRaisesRegex(ValueError, 'injected seal failure'):
+                    source_rollout.activate(contract, qualification, baseline, root / 'rollout')
+                self.assertEqual(installed.read_bytes(), b'old executable')
+
+                def seal(draft, output):
+                    sealed = json.loads(draft.read_text())
+                    sealed['expected']['snapshots'] = 147
+                    readiness.pilot.write_json(output, sealed)
+
+                sealer.side_effect = seal
+                loader.side_effect = lambda path: plan if path == contract else json.loads(path.read_text())
+                fresh = source_rollout.activate(contract, qualification, baseline, root / 'success')
+                success = json.loads((root / 'success' / 'activation.json').read_text())
+                self.assertTrue(success['accepted'])
+                self.assertEqual(success['installed_sha256'], readiness.pilot.digest(candidate))
+                self.assertEqual(json.loads(fresh.read_text())['expected']['snapshots'], 147)
+                self.assertEqual((root / 'success' / 'rollback-vaultic').read_bytes(), b'old executable')
+                self.assertEqual(installed.read_bytes(), candidate.read_bytes())
+                self.assertEqual(contract.read_text(), '{}')
+            activation = json.loads((root / 'rollout' / 'activation.json').read_text())
+            self.assertFalse(activation['accepted'])
+            self.assertTrue(activation['rolled_back'])
+            self.assertIn('injected seal failure', activation['failure'])
+
     def test_rollout_atomic_install_and_rollback(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

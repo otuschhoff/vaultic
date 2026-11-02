@@ -1377,6 +1377,33 @@ not evidence that admission locks or startup index loading became the bottleneck
 Qualification did not replace the installed CLI, restart the production daemon,
 run an uncapped source, or activate scheduling. Those gates remain outstanding.
 
+The rollout supervisor now connects these gates without editing old contracts.
+It accepts the original contract, accepted comparison root, accepted production
+pilot receipt and a fresh private rollout root. Before replacement it validates
+the original pins, accepted full metadata baseline and both qualified binary
+identities. It retains a durable rollback executable, installs atomically,
+checks executable startup and seals a new contract using the current accepted
+147-snapshot baseline. Activation failure restores the original CLI and writes
+a rejected activation receipt. No production daemon restart is required for
+this CLI-only change; the isolated crash/restart/encryption tests remain its
+recovery qualification, not evidence of a production restart.
+
+A private exclusive runtime lock and inactive full-crawl unit gate launch.
+The one-source run revalidates the new contract, executable and qualification
+pins across observed stages: fresh full metadata check, uncapped `fme_cae1`
+backup, full verified restore, and full post-metadata check requiring exactly
+one additional snapshot. Snapshot inspection requires explicit full traversal,
+the single expected source, no selective roots and no reused subtrees. Source
+contents are live: restore verification is against snapshot content, not a
+prehashed inventory that can age during a long backup. Existing resource,
+artifact and free-space limits remain enforced, including the 1 TiB evidence
+budget; exceeding a limit rejects acceptance rather than weakening verification.
+Backup is bounded to 30 days, restore/check stages to 14 days each. Receipts
+retain acknowledged snapshots even if later verification fails. All 38
+readiness tests pass with two existing skips, including activation success,
+injected sealing rollback and supervisor restore-failure rejection. The helper
+does not expand to other sources or enable scheduling after this first source.
+
 **Pathdiff Qualification Order:**
 
 No pathdiff systemd unit or executable was found in the deployment locations
