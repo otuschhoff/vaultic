@@ -16,9 +16,54 @@ from unittest.mock import patch
 import readiness
 import live_readiness
 import bounded_pilot
+import source_rollout
 
 
 class ReadinessTests(unittest.TestCase):
+    def test_rollout_requires_matched_verified_qualification(self):
+        observation = {'files': 89326, 'bytes': 20949531016, 'sha256': 'a' * 64}
+        result = {'restore_verified': True, 'reopen_verified': True, 'metadata_on_demand': True,
+                  'group_size': 64, 'files': observation['files'], 'bytes': observation['bytes'],
+                  'input_sha256': observation['sha256'], 'source_tree': 'b' * 64,
+                  'snapshot': 'c' * 64, 'tree': 'd' * 64, 'backup_seconds': 3000}
+        source_rollout.validate_qualification(result, dict(result), observation)
+        for field, value in (('restore_verified', False), ('reopen_verified', False),
+                             ('metadata_on_demand', False), ('group_size', 4), ('files', 1),
+                             ('bytes', 1), ('input_sha256', 'changed'), ('source_tree', 'e' * 64),
+                             ('snapshot', 'bad'), ('tree', ''), ('backup_seconds', 0),
+                             ('backup_seconds', float('nan'))):
+            with self.assertRaises(ValueError):
+                source_rollout.validate_qualification(result, dict(result, **{field: value}), observation)
+
+    def test_full_source_command_preserves_scope_and_exclusions(self):
+        source = str(bounded_pilot.SOURCE)
+        patterns = ['!**/.snapshot', '!**/.snapshot/**', '!**/.Trash-*/**', '!**/lost+found/**']
+        plan = {'root': '/private/evidence',
+                'pins': {'profile': {'path': '/private/full.toml'}, 'empty_profile': {'path': '/private/empty.toml'}},
+                'selection': {'sources': [source, '/other/source'], 'globs': patterns,
+                              'exclude_if_present': ['CACHEDIR.TAG', '.nobackup']}}
+        with patch.object(live_readiness, 'command', return_value=['vaultic', '--use-profile=/private/empty.toml', 'ls']):
+            arguments = source_rollout.backup_command(plan, source)
+            self.assertEqual(arguments[-1], source)
+            self.assertEqual(arguments.count(source), 1)
+            self.assertNotIn('/other/source', arguments)
+            self.assertIn('--snapshot-per-source', arguments)
+            self.assertIn('--read-concurrency=16', arguments)
+            self.assertFalse(any('bounded-inode' in argument for argument in arguments))
+            for pattern in patterns:
+                self.assertIn('--exclude=' + pattern[1:], arguments)
+            for marker in plan['selection']['exclude_if_present']:
+                self.assertIn('--exclude-if-present=' + marker, arguments)
+            with self.assertRaises(ValueError):
+                source_rollout.backup_command(plan, '/other/source')
+            plan['selection']['globs'] = patterns + ['positive']
+            with self.assertRaises(ValueError):
+                source_rollout.backup_command(plan, source)
+        plan['selection']['globs'] = patterns
+        with patch.object(live_readiness, 'command', return_value=['vaultic', '--use-profile=/private/full.toml', 'ls']):
+            with self.assertRaises(ValueError):
+                source_rollout.backup_command(plan, source)
+
     def test_bounded_pilot_digest_and_scope(self):
         import hashlib
         with tempfile.TemporaryDirectory() as temporary:

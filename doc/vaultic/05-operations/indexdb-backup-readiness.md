@@ -1324,6 +1324,19 @@ equality, exact restore and encrypted-reopen gates to both. This ordered pair
 still has cache/order and historical-catalog limitations; its acceptance is
 required before considering the paired-read candidate for rollout.
 
+Rollout preparation in `helpers/phase35-m6/source_rollout.py` separately validates
+both accepted qualification results: verified restore/reopen, group size 64,
+on-demand metadata, the sealed file count/bytes/content digest, matching selected
+source trees, valid snapshot/tree identifiers and finite completed timings.
+Its tested full-source command targets only `fme_cae1`, uses the empty profile,
+explicit per-source snapshots and no inode-cap flag, and preserves every sealed
+negative glob and exclusion marker, including `.snapshot`, trash, lost+found,
+`CACHEDIR.TAG` and `.nobackup`. Other sources, positive glob semantics and the
+52-source profile are rejected. These are command/acceptance building blocks,
+not an activated deployment or a completed full-source baseline. All 34
+readiness tests pass with two existing skips; the matched comparison must still
+finish before activation or production execution.
+
 **Pathdiff Qualification Order:**
 
 No pathdiff systemd unit or executable was found in the deployment locations
