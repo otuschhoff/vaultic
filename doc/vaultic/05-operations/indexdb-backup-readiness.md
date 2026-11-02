@@ -1276,6 +1276,20 @@ Backup and restore each have a four-hour bound; full metadata checking retains
 its two-hour bound. Larger-run acceptance, further optimization and deployment
 remain contingent on the retained results; no completion is claimed here.
 
+A separate paired-read candidate batches publication's immutable-revision and
+current-pointer reads into one transactional MultiGet instead of two sequential
+Get calls. It does not merge per-inode writes or alter shared-reference ordering,
+transaction conflict handling or durable commit acknowledgement. A native RPC
+count regression proves one two-key read, or two single-key batches when the
+daemon limit requires them. Focused native race tests pass for shared counters,
+wide groups, partial-publication rejection, cancellation, all six allocated
+publication crash boundaries and encrypted reopen. Existing on-demand backup
+and exact bounded restore fixtures also pass. The disposable A/B qualifier now
+requires the same exact 100,000-entry selection and accepts the separately
+named, digest-checked paired-read candidate. The active larger pilot continues
+using the original qualified group-fill binary; no paired-read speedup or
+production rollout is established by these correctness tests.
+
 **Pathdiff Qualification Order:**
 
 No pathdiff systemd unit or executable was found in the deployment locations

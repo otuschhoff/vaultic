@@ -737,7 +737,8 @@ func TestPublicationBackupQualification(t *testing.T) {
 	candidate := "/root/proj/vaultic/bin/phase35-throughput/linux-amd64/vaultic"
 	if selected := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_CANDIDATE"); selected != "" {
 		if selected != "/root/proj/vaultic/bin/phase35-critical-path/linux-amd64/vaultic" &&
-			selected != "/root/proj/vaultic/bin/phase35-critical-path-fill/linux-amd64/vaultic" {
+			selected != "/root/proj/vaultic/bin/phase35-critical-path-fill/linux-amd64/vaultic" &&
+			selected != "/root/proj/vaultic/bin/phase35-critical-path-paired-reads/linux-amd64/vaultic" {
 			t.Fatal("candidate is not the separate critical-path build")
 		}
 		encoded, err := os.ReadFile(selected)
@@ -778,7 +779,7 @@ func TestPublicationBackupQualification(t *testing.T) {
 		encoded, err := os.ReadFile(filepath.Join(root, "inode-manifest.json"))
 		rtest.OK(t, err)
 		rtest.OK(t, json.Unmarshal(encoded, &sourceManifest))
-		if sourceManifest.Source != os.Getenv("VAULTIC_PHASE35_THROUGHPUT_SOURCE") || sourceManifest.InodeLimit != 10_000 || len(sourceManifest.Paths) > 10_000 {
+		if sourceManifest.Source != os.Getenv("VAULTIC_PHASE35_THROUGHPUT_SOURCE") || sourceManifest.InodeLimit != 100_000 || len(sourceManifest.Paths) != 100_000 {
 			t.Fatal("bounded source manifest scope differs")
 		}
 		source = sourceManifest.Source

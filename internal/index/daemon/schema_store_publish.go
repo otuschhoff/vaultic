@@ -676,18 +676,19 @@ func validateReconciledRevisionExtras(reconciled ReconciledRevision) error {
 
 func loadReconciledRevisionState(ctx context.Context, transaction *Transaction, input reconciledRevisionInput) (reconciledRevisionState, error) {
 	reconciled := input.reconciled
-	existing, revisionFound, err := transaction.Get(ctx, reconciled.RevisionKey)
+	values, found, err := publicationMultiGet(ctx, transaction, [][]byte{reconciled.RevisionKey, reconciled.CurrentKey})
 	if err != nil {
 		return reconciledRevisionState{}, err
 	}
+	existing, revisionFound := values[0].Value, found[0]
 	if revisionFound && !bytes.Equal(existing, reconciled.RevisionValue) {
 		return reconciledRevisionState{}, fmt.Errorf("immutable revision already exists with different data")
 	}
 	state := reconciledRevisionState{revisionFound: revisionFound}
-	oldCurrent, currentFound, err := transaction.Get(ctx, reconciled.CurrentKey)
-	state.currentFound = currentFound
-	if err != nil || !state.currentFound {
-		return state, err
+	oldCurrent := values[1].Value
+	state.currentFound = found[1]
+	if !state.currentFound {
+		return state, nil
 	}
 	pointer, err := schema.UnmarshalCurrentPointer(oldCurrent)
 	if err != nil {

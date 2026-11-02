@@ -960,6 +960,57 @@ func TestAllocatedPublicationGroupInputBounds(t *testing.T) {
 	}
 }
 
+func TestReconciledStateBatchesRevisionAndPointerReads(t *testing.T) {
+	for _, limit := range []uint32{1, 2} {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			var callsMu sync.Mutex
+			gets, multiGets := 0, 0
+			client, err := Ensure(ctx, Options{
+				Socket: testSocket(t), RepositoryID: "publication-state-reads", DaemonPath: daemonBinary(t), DataDir: t.TempDir(),
+				ResponseDeliveryForTesting: func(_ context.Context, method string) error {
+					callsMu.Lock()
+					defer callsMu.Unlock()
+					switch method {
+					case "/vaulticdb.v1.VaulticDB/Get":
+						gets++
+					case "/vaulticdb.v1.VaulticDB/MultiGet":
+						multiGets++
+					}
+					return nil
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close(context.Background())
+			client.limits.MaxBatchItems = limit
+			transaction, err := client.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rollbackTransaction(ctx, transaction)
+			input, err := prepareReconciledRevision(ReconciledRevision{
+				CurrentKey: schema.CurrentInodeKey(3, 9), RevisionKey: schema.InodeRevisionKey(3, 9, 7), Revision: 7,
+				RevisionValue: encodeSchemaRecord(t, schema.InodeRevision{Freshness: schema.FreshnessVerified}),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			state, err := loadReconciledRevisionState(ctx, transaction, input)
+			if err != nil || state.revisionFound || state.currentFound || state.noop {
+				t.Fatalf("empty state=%+v err=%v", state, err)
+			}
+			callsMu.Lock()
+			defer callsMu.Unlock()
+			if gets != 0 || multiGets != 2/int(limit) {
+				t.Fatalf("Get=%d MultiGet=%d batch limit=%d", gets, multiGets, limit)
+			}
+		})
+	}
+}
+
 func TestSchemaStoreAllocatedGroupReadYourWrites(t *testing.T) {
 	testSchemaStoreAllocatedGroupReadYourWrites(t, 4, 256)
 }
