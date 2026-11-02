@@ -1290,6 +1290,40 @@ named, digest-checked paired-read candidate. The active larger pilot continues
 using the original qualified group-fill binary; no paired-read speedup or
 production rollout is established by these correctness tests.
 
+**100,000-Entry Pilot Accepted (2026-11-02):**
+
+The larger pilot receipt reports `accepted=true`, `partial=true`, no failure,
+and complete zero-exit/error-free backup, verified restore and full metadata
+observations. Its snapshot is
+`b6d93d2adde458036788900a0c0d4328cd2fa45090093446b53f2aa7fc41647e`.
+Exact restored inventory/content and unchanged selected source passed for the
+sealed 100,000 entries and 20,949,531,016 logical bytes. Backup CLI wall time
+was 3,046.838 seconds; main-backup elapsed time was 3,023.035 seconds, not the
+archiver's 2,522.266-second summary timer. The full check took 1,243.189 seconds
+and validated 10,178 indexes, 147 snapshots and 380,273,963 locations in both
+representations, with zero pending/failed exports, crawl debt or warnings.
+Repository identity and generation 1 remained unchanged.
+
+Exclusive writer phases were 1,990.352 seconds in regular publication,
+529.704 waiting upstream, 502.223 in directories and 0.505 in root publication.
+The ten-minute sample had both queues full, 63 blocked callbacks and 128 blocked
+preparers during publication, without engine backpressure. Final daemon interval
+counters recorded 13,652 Commit attempts and 927.772 summed durable-wait
+worker-seconds; these are not exclusive wall time. The previously published
+10,000-entry subset permits record reuse, so a subsequent production pass would
+not provide a matched performance baseline.
+
+The disposable qualifier's opt-in `VAULTIC_PHASE35_THROUGHPUT_PAIRED_READS=1`
+mode instead compares group-fill and paired-read binaries, both at group size
+64, against independent checksum-verified copies of the same closed encrypted
+historical catalog and the same sealed 100,000-entry manifest. It requires a
+fresh run, explicit `VAULTIC_PHASE35_THROUGHPUT_ORDER=64`, the digest-checked
+paired-read candidate and the fixed qualified group-fill control digest.
+It retains separate create-only cells and applies the existing selected-tree
+equality, exact restore and encrypted-reopen gates to both. This ordered pair
+still has cache/order and historical-catalog limitations; its acceptance is
+required before considering the paired-read candidate for rollout.
+
 **Pathdiff Qualification Order:**
 
 No pathdiff systemd unit or executable was found in the deployment locations

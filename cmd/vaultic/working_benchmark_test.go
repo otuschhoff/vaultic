@@ -827,9 +827,29 @@ func TestPublicationBackupQualification(t *testing.T) {
 	} else if order != "" && order != "4,64" {
 		t.Fatal("unsupported publication qualification order")
 	}
-	for _, groupSize := range groups {
-		t.Run(fmt.Sprintf("group=%d", groupSize), func(t *testing.T) {
-			cell := filepath.Join(root, fmt.Sprintf("group-%d", groupSize))
+	pairedReads := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_PAIRED_READS")
+	if pairedReads != "" {
+		if pairedReads != "1" || order != "64" || resumeVerification != "" ||
+			candidate != "/root/proj/vaultic/bin/phase35-critical-path-paired-reads/linux-amd64/vaultic" {
+			t.Fatal("paired-read comparison requires a fresh group-64 run and the pinned paired-read candidate")
+		}
+		groups = []int{64, 64}
+	}
+	for cellIndex, groupSize := range groups {
+		cellName := fmt.Sprintf("group-%d", groupSize)
+		cellCandidate := candidate
+		if pairedReads != "" && cellIndex == 0 {
+			cellName += "-baseline"
+			cellCandidate = "/root/proj/vaultic/bin/phase35-critical-path-fill/linux-amd64/vaultic"
+			encoded, err := os.ReadFile(cellCandidate)
+			rtest.OK(t, err)
+			if fmt.Sprintf("%x", sha256.Sum256(encoded)) != "cbff53916df13e6d72a65451a7185c444e779279e1312f78d42489e996901fbf" {
+				t.Fatal("paired-read baseline digest mismatch")
+			}
+		}
+		t.Run(cellName, func(t *testing.T) {
+			candidate := cellCandidate
+			cell := filepath.Join(root, cellName)
 			acceptedBaseline := resumeVerification == "group-64" && groupSize == 4
 			resumeCell := acceptedBaseline || resumeVerification == fmt.Sprintf("group-%d", groupSize)
 			if !resumeCell {
@@ -1015,6 +1035,7 @@ func TestPublicationBackupQualification(t *testing.T) {
 					t.Fatal("backup left transactions or write intents")
 				}
 				observation, err := json.MarshalIndent(map[string]any{
+					"candidate": candidate,
 					"metadata_on_demand": onDemand == "1",
 					"group_size":         groupSize, "startup_seconds": startupSeconds, "backup_seconds": wall.Seconds(),
 					"cli_cpu_seconds": cliCPU, "writer_before": before, "writer_after": after,
