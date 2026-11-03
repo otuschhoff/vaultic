@@ -1,23 +1,36 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	vaulticdbv1 "github.com/otuschhoff/vaultic/internal/index/proto/vaulticdb/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 )
 
 type RPCWaitStats struct {
-	Method          string `json:"method"`
-	Calls           uint64 `json:"calls"`
-	Failures        uint64 `json:"failures"`
-	ElapsedWorkerNS uint64 `json:"elapsed_worker_ns"`
-	Active          uint64 `json:"active"`
-	OldestActiveNS  uint64 `json:"oldest_active_ns"`
+	Method               string `json:"method"`
+	Calls                uint64 `json:"calls"`
+	Failures             uint64 `json:"failures"`
+	ElapsedWorkerNS      uint64 `json:"elapsed_worker_ns"`
+	Active               uint64 `json:"active"`
+	OldestActiveNS       uint64 `json:"oldest_active_ns"`
+	ServerTimingCalls    uint64 `json:"server_timing_calls"`
+	ServerTimingClientNS uint64 `json:"server_timing_client_ns"`
+	ServerHandlerNS      uint64 `json:"server_handler_ns"`
+	ServerStorageNS      uint64 `json:"server_storage_ns"`
+	OutsideHandlerNS     uint64 `json:"outside_handler_ns"`
+	InvalidServerTimings uint64 `json:"invalid_server_timings"`
+	BlobReadTimingCalls  uint64 `json:"blob_read_timing_calls"`
+	BlobReadClientNS     uint64 `json:"blob_read_client_ns"`
+	BlobReadHandlerNS    uint64 `json:"blob_read_handler_ns"`
+	BlobReadStorageNS    uint64 `json:"blob_read_storage_ns"`
 }
 
 type rpcWaitCall struct {
@@ -81,6 +94,10 @@ func (counters *rpcWaitCounters) intercept(ctx context.Context, method string, r
 	id := counters.next
 	counters.inflight[id] = rpcWaitCall{method: name, started: started}
 	counters.mu.Unlock()
+	var headers metadata.MD
+	if name == "Get" || name == "MultiGet" {
+		options = append(options, grpc.Header(&headers))
+	}
 	err := invoke(ctx, method, request, response, connection, options...)
 	elapsed := uint64(time.Since(started))
 	counters.mu.Lock()
@@ -91,6 +108,48 @@ func (counters *rpcWaitCounters) intercept(ctx context.Context, method string, r
 	value.ElapsedWorkerNS += elapsed
 	if err != nil {
 		value.Failures++
+	} else {
+		handlerValues := headers.Get("x-vaulticdb-read-handler-ns")
+		storageValues := headers.Get("x-vaulticdb-read-storage-ns")
+		if len(handlerValues) != 0 || len(storageValues) != 0 {
+			valid := len(handlerValues) == 1 && len(storageValues) == 1
+			var handler, storage uint64
+			if valid {
+				var handlerError, storageError error
+				handler, handlerError = strconv.ParseUint(handlerValues[0], 10, 64)
+				storage, storageError = strconv.ParseUint(storageValues[0], 10, 64)
+				valid = handlerError == nil && storageError == nil && storage <= handler && handler <= elapsed
+			}
+			if valid {
+				value.ServerTimingCalls++
+				value.ServerTimingClientNS += elapsed
+				value.ServerHandlerNS += handler
+				value.ServerStorageNS += storage
+				value.OutsideHandlerNS += elapsed - handler
+				var keys [][]byte
+				switch read := request.(type) {
+				case *vaulticdbv1.GetRequest:
+					keys = [][]byte{read.GetKey()}
+				case *vaulticdbv1.MultiGetRequest:
+					keys = read.GetKeys()
+				}
+				blobs := len(keys) != 0
+				for _, key := range keys {
+					if !bytes.HasPrefix(key, []byte("b:")) {
+						blobs = false
+						break
+					}
+				}
+				if blobs {
+					value.BlobReadTimingCalls++
+					value.BlobReadClientNS += elapsed
+					value.BlobReadHandlerNS += handler
+					value.BlobReadStorageNS += storage
+				}
+			} else {
+				value.InvalidServerTimings++
+			}
+		}
 	}
 	counters.methods[name] = value
 	counters.mu.Unlock()

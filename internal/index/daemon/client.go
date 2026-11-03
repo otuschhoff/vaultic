@@ -1281,6 +1281,14 @@ func (c *authenticatedClient) Rollback(
 	return c.VaulticDBClient.Rollback(withAuth(ctx, c.token), in, callOptions...)
 }
 
+func (c *authenticatedClient) GenerationStatus(
+	ctx context.Context,
+	in *vaulticdbv1.GenerationStatusRequest,
+	callOptions ...grpc.CallOption,
+) (*vaulticdbv1.GenerationStatusResponse, error) {
+	return c.VaulticDBClient.GenerationStatus(withAuth(ctx, c.token), in, callOptions...)
+}
+
 func withAuth(ctx context.Context, token string) context.Context {
 	return metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token)
 }

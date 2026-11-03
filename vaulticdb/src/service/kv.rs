@@ -1,6 +1,7 @@
 //! Request validation and key-value read handlers.
 
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use tonic::{Request, Response, Status};
 
@@ -14,6 +15,19 @@ use crate::{
 };
 
 use super::{DaemonState, Service};
+
+fn timed_read_response<T>(payload: T, started: Instant, storage_elapsed: Duration) -> Response<T> {
+    let mut response = Response::new(payload);
+    response.metadata_mut().insert(
+        "x-vaulticdb-read-storage-ns",
+        storage_elapsed.as_nanos().to_string().parse().unwrap(),
+    );
+    response.metadata_mut().insert(
+        "x-vaulticdb-read-handler-ns",
+        started.elapsed().as_nanos().to_string().parse().unwrap(),
+    );
+    response
+}
 
 pub(crate) fn validate_scan(request: &ScanRequest) -> Result<(), Status> {
     if request.page_size == 0 || request.page_size > MAX_PAGE_ITEMS {
@@ -106,11 +120,16 @@ impl Service {
         &self,
         request: Request<GetRequest>,
     ) -> Result<Response<GetResponse>, Status> {
+        let started = Instant::now();
         check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
         let request = request.into_inner();
         let storage = self.storage().await?;
-        Ok(Response::new(
-            storage.get(&request.key, &request.transaction_id).await?,
+        let storage_started = Instant::now();
+        let result = storage.get(&request.key, &request.transaction_id).await?;
+        Ok(timed_read_response(
+            result,
+            started,
+            storage_started.elapsed(),
         ))
     }
 
@@ -118,6 +137,7 @@ impl Service {
         &self,
         request: Request<MultiGetRequest>,
     ) -> Result<Response<MultiGetResponse>, Status> {
+        let started = Instant::now();
         check_storage_request(&self.state, &request, request.get_ref().context.as_ref())?;
         if request.get_ref().keys.len() > MAX_BATCH_ITEMS as usize {
             return Err(VaulticDbError::ResourceExhausted {
@@ -128,6 +148,7 @@ impl Service {
         }
         let request = request.into_inner();
         let storage = self.storage().await?;
+        let storage_started = Instant::now();
         let results = storage
             .multi_get(
                 &request.keys,
@@ -135,7 +156,11 @@ impl Service {
                 MAX_MESSAGE_BYTES as usize,
             )
             .await?;
-        Ok(Response::new(MultiGetResponse { results }))
+        Ok(timed_read_response(
+            MultiGetResponse { results },
+            started,
+            storage_started.elapsed(),
+        ))
     }
 
     pub(super) async fn handle_scan(
@@ -156,5 +181,38 @@ impl Service {
                 )
                 .await?,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_timing_metadata_preserves_payload() {
+        let response = timed_read_response(
+            42,
+            Instant::now() - Duration::from_millis(1),
+            Duration::from_nanos(250),
+        );
+        assert_eq!(*response.get_ref(), 42);
+        let handler: u64 = response
+            .metadata()
+            .get("x-vaulticdb-read-handler-ns")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let storage: u64 = response
+            .metadata()
+            .get("x-vaulticdb-read-storage-ns")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(handler >= 1_000_000);
+        assert_eq!(storage, 250);
     }
 }

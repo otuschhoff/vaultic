@@ -2,7 +2,8 @@
 
 [Documentation index](../README.md) |
 [Metadata resilience](metadata-resilience.md) |
-[M6 preparation](../04-roadmap/phase-35-m6-preparation.md)
+[M6 preparation](../04-roadmap/phase-35-m6-preparation.md) |
+[Metadata read amplification execution design](metadata-read-amplification-design.md)
 
 ## Decision Summary
 
@@ -1448,12 +1449,159 @@ passed a 75-regular-file/83-entry full unchanged crawl with zero new data blobs,
 an exact verified restore, and a 1.089-second main interval. This tiny local
 fixture is a correctness check, not an NFS performance estimate.
 
-The sustained 100,000-entry unchanged-source benchmark remains outstanding.
-The prior 100,000-entry comparison measured a forced bounded workload, not this
-case. A bounded parent is intentionally ineligible as a full-coverage parent.
-Wait for the current production full-source supervisor before running a separate
-representative measurement, and require stable input plus the unchanged gates
-above; do not present the small fixture or prior forced timing as its result.
+The subsequent production full-source supervisor was interrupted without an
+accepted snapshot. A separate live unchanged-source diagnostic is retained at
+`/volume2/NASDA2/vaultic-test-m6/unchanged-crawl-fme-cae1-20261102-ten-minute`.
+It copied the previously verified representative restore into a fresh NFS source,
+checked its 100,000 entries and 20,949,531,016 content bytes, cloned the closed
+encrypted historical catalog, and created a complete nonselective parent before
+measuring the second full traversal without `--force`. This uses restored paths
+and inodes, not the original NetApp source or current production catalog.
+
+The unchanged main interval lasted 2,266.464 seconds (37.8 minutes), or 44.12
+observed entries/s. All 89,300 regular files were unmodified, all 100,000 entries
+were scanned and reused, and there were no failed/deferred entries, new file-data
+blobs, tree blobs, or added payload bytes. Exact restored content and the final
+source digest matched, and encrypted reopen preserved the snapshot. Source
+payload reads were not separately counted. Command time was 2,289.550 seconds;
+fixture preparation, parent creation, restore, and reopen are outside the main
+measurement. The original supervisor receipt remains failed: after these checks
+the harness attempted to close a stale daemon connection. The ownership handoff
+was repaired afterward and exercised by the focused native reopen test; this
+does not retroactively turn the original outer test into a pass.
+
+Unlike the forced workload, unchanged reconciliation spent 2,194.333 seconds
+(96.8% of its main interval) waiting for prepared work and only 65.217 seconds
+publishing regular-file batches. Every entry was reused, with no atomic inode
+publication groups. A contiguous ten-minute window had 575.472 seconds waiting
+upstream and 24.528 seconds publishing, accounting for the currently active phase
+at both window boundaries. Blob-size validation issued 78,718 calls for 85,078
+handles, with 2,056.167 summed worker-seconds; its cache had zero evictions.
+Summed RPC times overlap and must not be presented as exclusive wall-time shares.
+
+The next critical-path target is synchronous unchanged-file content-presence
+validation: `saveRegularFile` waits for `allBlobsPresent` before reporting a node
+to reconciliation. Existing batching covers chunks within a file, but averaged
+only 1.08 handles per size call here. Evaluate bounded cross-file/directory
+prefetch or coalescing, with cancellation, memory admission, missing-content
+fallback and exact snapshot semantics preserved. More reconciliation preparers
+or a larger size cache is not supported by this run's waiting/eviction evidence.
+No throughput optimization was deployed by this diagnostic.
+
+Follow-up request attribution on 2026-11-03 used the existing guarded cloned
+blob-lookup probe, an optimized telemetry-only daemon, authenticated gRPC, and
+a new checksum-verified private copy of the frozen seed. Its evidence is in
+`/volume2/NASDA2/vaultic-test-m6/read-wait-fme-cae1-20261103`. The private WAL
+binding was relocated only after copy verification; the seed binding was
+verified unchanged. All six cases passed exact expected-result and no-engine-
+write/no-Commit gates, with paired server timing for every lookup. A missing
+`GenerationStatus` authorization forwarding method was repaired to permit the
+authenticated read session; authentication was not disabled.
+
+Each case issued the same 640 singleton lookups (512 present, 128 absent), in
+the same seeded order. Each worker count started a fresh daemon, then repeated
+the sample with warm engine caches:
+
+| Callers | Fresh-Engine Seconds | Lookups/Second | Median Request ms | Warm Seconds |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 10.846 | 59.0 | 18.499 | 10.575 |
+| 8 | 1.154 | 554.5 | 14.361 | 1.072 |
+| 32 | 0.461 | 1387.1 | 21.388 | 0.430 |
+
+For one caller, paired means were 16.907 ms end-to-end, 16.477 ms inside the
+database storage read, 0.012 ms elsewhere in the server handler, and 0.417 ms
+outside that handler. The outside interval includes transport, serialization
+and scheduling; it is not pure network RTT. The storage interval includes
+engine/cache work, fetching, decryption and waiting inside that call. Fetching
+versus decryption and physical NFS traffic are not separately measured here.
+
+The original unchanged run's metadata object-store `get` counters accumulated
+2,033.370 worker-seconds and returned 952,145,533,531 logical plaintext bytes
+through the wrapper to SlateDB. The wrapper surrounds cache access and
+decryption, so neither figure is a measurement of physical network I/O. This
+supports investigating metadata read amplification, not merely RPC overhead.
+The zero-eviction result concerns the CLI blob-size cache, not all daemon caches.
+The original cold size-lookup mean was 26.121 ms; the 6.260 ms ten-minute-window
+mean covered all `MultiGet` traffic and is a different population.
+
+Independent concurrent reads can therefore overlap this storage wait; batching
+is not the only candidate. The unchanged branch runs synchronously inside the
+directory-entry loop, before submitting its node. `ReadConcurrency` controls
+the file-content reader pool, bypassed by this branch, so increasing that flag
+alone does not create parallel unchanged-file validation. Any implementation
+must introduce bounded overlap at the validation caller while preserving
+ordering, cancellation, memory accounting and missing-content fallback.
+
+This was a short mechanism screen, sequentially scheduled with host/NFS caches
+potentially warm, not a paired sustained full-crawl qualification. Its lookup
+rates are not backup entries/second and do not establish the 100 entries/second
+target. New bounded telemetry records CLI slot/result waits, actual in-flight
+size RPCs and latency buckets, plus per-read paired CLI/handler/storage totals.
+Production and the sealed 37.8-minute evidence were not changed.
+
+**10k Unforced/Forced Control Accepted (2026-11-03):**
+
+The requested diagnostic completed on a frozen restored `fme_cae1` subset with
+exactly 10,000 entries, 9,209 regular files and 2,460,946,936 content bytes.
+Input digest: `2f76a6f4397effad64c9922cc6337a836b3c4ac21b870114942e02b63b996f80`.
+Each measured leg used an independently copied/checksum-verified closed DB and
+repository from common verified parent
+`11ca7f44235008a98434d9cfe8dc43fa50fcdb9c4aa6333fee33246118af0183`.
+Unforced selected that parent explicitly; forced used `--force` with no parent.
+The source path/inodes and content stayed constant across both legs.
+
+| Metric | Unforced | Forced |
+| --- | --- | --- |
+| Main seconds | 207.267 | 47.484 |
+| Command seconds | 224.284 | 66.944 |
+| Entries/second, main interval | 48.247 | 210.597 |
+| Writer waiting for prepared work | 199.777 s (96.4%) | 38.118 s (80.3%) |
+| Regular publication | 5.790 s | 7.558 s |
+| Size RPCs / handles | 8,180 / 9,210 | 9,210 / 9,210 |
+| Exact size-RPC peak / configured limit | 2 / 4 | 4 / 4 |
+| Sampled overall read-RPC peak, lower bound | 1 | 4 |
+| Paired blob-read mean: client / storage | 20.522 / 20.075 ms | 17.758 / 17.182 ms |
+| Metadata wrapper gets / worker time | 76,171 / 160.401 s | 66,797 / 148.383 s |
+| Logical plaintext metadata delivered to engine | 112.860 GB | 98.296 GB |
+| CLI / native CPU seconds | 28.354 / 363.120 | 41.125 / 295.560 |
+
+Both observed/scanned all 10,000 entries with zero failed/deferred entries;
+unforced counted all regular files unchanged, while forced counted them new
+because it reread without a parent. Both stored zero new data blobs, restored
+exact content/type/size, passed encrypted reopen and left the writer idle.
+Both added four ancestor-directory tree blobs totaling 1,449 aggregate bytes;
+`data_added` includes tree metadata and must not be treated as new content.
+Parent setup separately added two data blobs plus tree metadata to the older
+historical catalog; all source content was already cataloged before measurement.
+
+This pair was 4.365 times faster under force in main time despite only about
+13% less logical metadata work. The synchronous unchanged validation path still
+waited on mostly serial storage reads; forced content workers overlapped size
+reads up to the shared four-RPC limiter. Source-reader concurrency was 16,
+publication group 64, reconciliation queue 256, CLI on-demand cache 64 MiB,
+native metadata/block caches 128/512 MiB and WAL flush 100 ms in both legs.
+Engine multi-get counters remained zero. Neither leg was publication-dominated;
+do not reuse the older forced-production publication diagnosis for this fixture.
+This is not a recommendation to force ordinary backups instead of fixing reuse.
+
+The first attempt failed on the overly strict aggregate-byte guard after a
+completed unforced backup. Its receipt/logs remain intact. The accepted fresh
+retry used the qualified parent and input kernel read-only. Evidence lives under
+`/volume2/NASDA2/vaultic-test-m6/force-compare-fme-cae1-20261103-10k/retry`;
+all 49 `FORCE-COMPARISON-SHA256SUMS` entries independently verified, including
+original failed receipts and focused tests. Outer runtime was 2,132.931 seconds
+including clone/checksum/verification; peak owned RSS was 40,616,824,832 bytes.
+
+Limits: one sequential short pair, not a sustained throughput acceptance or
+balanced statistical comparison; restored-source inodes/historical catalog,
+not original source inodes/current production. Logical bytes are not physical
+NFS/HDD traffic; raw fetch/crypto split and location-slot waits are unavailable.
+Captured paired header totals were cumulative on the CLI connection, including
+four/three startup reads, whereas RPC calls were main-interval deltas. The
+counter-subtraction defect was subsequently fixed and race-tested; the analyzer
+labels cumulative populations rather than inventing missing startup durations.
+See the [amplification execution design](metadata-read-amplification-design.md)
+for bounded work-reduction options and sustained qualification gates.
 
 **Pathdiff Qualification Order:**
 

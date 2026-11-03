@@ -381,6 +381,23 @@ func backupCounterDelta(current, baseline uint64) uint64 {
 	return current - baseline
 }
 
+func backupRPCWaitDelta(current, baseline daemon.RPCWaitStats) daemon.RPCWaitStats {
+	current.Calls = backupCounterDelta(current.Calls, baseline.Calls)
+	current.Failures = backupCounterDelta(current.Failures, baseline.Failures)
+	current.ElapsedWorkerNS = backupCounterDelta(current.ElapsedWorkerNS, baseline.ElapsedWorkerNS)
+	current.ServerTimingCalls = backupCounterDelta(current.ServerTimingCalls, baseline.ServerTimingCalls)
+	current.ServerTimingClientNS = backupCounterDelta(current.ServerTimingClientNS, baseline.ServerTimingClientNS)
+	current.ServerHandlerNS = backupCounterDelta(current.ServerHandlerNS, baseline.ServerHandlerNS)
+	current.ServerStorageNS = backupCounterDelta(current.ServerStorageNS, baseline.ServerStorageNS)
+	current.OutsideHandlerNS = backupCounterDelta(current.OutsideHandlerNS, baseline.OutsideHandlerNS)
+	current.InvalidServerTimings = backupCounterDelta(current.InvalidServerTimings, baseline.InvalidServerTimings)
+	current.BlobReadTimingCalls = backupCounterDelta(current.BlobReadTimingCalls, baseline.BlobReadTimingCalls)
+	current.BlobReadClientNS = backupCounterDelta(current.BlobReadClientNS, baseline.BlobReadClientNS)
+	current.BlobReadHandlerNS = backupCounterDelta(current.BlobReadHandlerNS, baseline.BlobReadHandlerNS)
+	current.BlobReadStorageNS = backupCounterDelta(current.BlobReadStorageNS, baseline.BlobReadStorageNS)
+	return current
+}
+
 func (run *backupRun) reportCriticalPath(sample backupCriticalPath) {
 	if run.globalOptions.JSON {
 		run.term.Print(ui.ToJSONString(sample))
@@ -434,9 +451,7 @@ func (run *backupRun) startCriticalPathReporting() func() {
 					continue
 				}
 				baseline := baselines[client][stats.Method]
-				stats.Calls = backupCounterDelta(stats.Calls, baseline.Calls)
-				stats.Failures = backupCounterDelta(stats.Failures, baseline.Failures)
-				stats.ElapsedWorkerNS = backupCounterDelta(stats.ElapsedWorkerNS, baseline.ElapsedWorkerNS)
+				stats = backupRPCWaitDelta(stats, baseline)
 				if stats.Calls > 0 || stats.Active > 0 {
 					sample.RPC = append(sample.RPC, backupRPCWait{Connection: connection, RPCWaitStats: stats})
 				}

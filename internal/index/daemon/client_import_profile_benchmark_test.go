@@ -230,14 +230,35 @@ func TestProcessClonedBlobLookup(t *testing.T) {
 		t.Skip("set VAULTICDB_TEST_CLONE_ROOT to the validated disposable clone")
 	}
 	const cloneRoot = "/ncl1-1-vs-50/fme_dump/amakura/db.admission-20260930"
+	const readWaitCloneRoot = "/volume2/NASDA2/vaultic-test-m6/read-wait-fme-cae1-20261103/db"
 	resolved, err := filepath.EvalSymlinks(root)
-	if err != nil || resolved != cloneRoot {
+	if err != nil || (resolved != cloneRoot && resolved != readWaitCloneRoot) {
 		t.Fatalf("refuse non-clone data directory: %q error=%v", resolved, err)
 	}
-	var marker struct{ Clone string }
-	encoded, err := os.ReadFile("/volume2/NASDA2/rustic/db.test/admission-clone-20260930/clone.validated.json")
+	markerPath := "/volume2/NASDA2/rustic/db.test/admission-clone-20260930/clone.validated.json"
+	if resolved == readWaitCloneRoot {
+		markerPath = filepath.Join(filepath.Dir(resolved), ".lookup-clone.validated.json")
+		for _, path := range []string{resolved, filepath.Dir(resolved)} {
+			info, err := os.Lstat(path)
+			if err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+				t.Fatalf("refuse non-private lookup clone: %s error=%v", path, err)
+			}
+		}
+		info, err := os.Lstat(markerPath)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+			t.Fatal("private lookup clone validation receipt required")
+		}
+	}
+	var marker struct {
+		Clone, Seed      string
+		ChecksumVerified bool `json:"checksum_verified"`
+	}
+	encoded, err := os.ReadFile(markerPath)
 	if err != nil || json.Unmarshal(encoded, &marker) != nil || marker.Clone != resolved {
 		t.Fatal("clone checksum-validation marker is missing or does not match")
+	}
+	if resolved == readWaitCloneRoot && (!marker.ChecksumVerified || marker.Seed != "/ncl1-1-vs-50/fme_dump/amakura/db.begin-readiness-20261001-fuU56R") {
+		t.Fatal("lookup clone does not identify the accepted historical seed")
 	}
 	ctx := t.Context()
 	if _, deadline := ctx.Deadline(); deadline {
@@ -257,8 +278,18 @@ func TestProcessClonedBlobLookup(t *testing.T) {
 		MetaCacheBytes: metaCacheMiB << 20, BlockCacheBytes: 512 << 20,
 		EncryptionMode: "required", PassphraseFile: "/volume2/NASDA2/rustic/etc/metadata-recovery",
 	}
+	if resolved == readWaitCloneRoot {
+		options.AuthToken = "vaultic-read-wait-private-fixture"
+	}
 	open := func(t *testing.T) (*Client, *ReadSession) {
 		t.Helper()
+		if resolved == readWaitCloneRoot {
+			repositoryHash := fmt.Sprintf("%x", sha256.Sum256([]byte(options.RepositoryID)))
+			binding, err := os.ReadFile(filepath.Join(root, repositoryHash, "_vaultic", "wal-target-v1"))
+			if err != nil || string(binding) != "vaulticdb-local-wal-after-bulk-import-v1:"+root+"/wal" {
+				t.Fatal("lookup clone WAL is not bound to its private directory")
+			}
+		}
 		current := options
 		current.Socket = testSocket(t)
 		client, err := Ensure(ctx, current)
@@ -336,6 +367,7 @@ func TestProcessClonedBlobLookup(t *testing.T) {
 				if before.EngineMetaCacheBytes != options.MetaCacheBytes || before.EngineBlockCacheBytes != options.BlockCacheBytes || before.EngineFlushIntervalMS != 100 {
 					t.Fatalf("clone configuration mismatch: metadata=%d block=%d flush=%d", before.EngineMetaCacheBytes, before.EngineBlockCacheBytes, before.EngineFlushIntervalMS)
 				}
+				beforeRPC := client.RPCWaitStats()
 				type result struct {
 					queue, elapsed time.Duration
 					err            error
@@ -367,6 +399,7 @@ func TestProcessClonedBlobLookup(t *testing.T) {
 				}
 				workers.Wait()
 				wall := time.Since(started)
+				afterRPC := client.RPCWaitStats()
 				after, err := client.WriterStatus(ctx)
 				if err != nil {
 					t.Fatal(err)
@@ -402,6 +435,26 @@ func TestProcessClonedBlobLookup(t *testing.T) {
 				}
 				beforeJSON, _ := json.Marshal(before.Attribution)
 				afterJSON, _ := json.Marshal(after.Attribution)
+				beforeRPCJSON, _ := json.Marshal(beforeRPC)
+				afterRPCJSON, _ := json.Marshal(afterRPC)
+				t.Logf("clone_rpc_before=%s", beforeRPCJSON)
+				t.Logf("clone_rpc_after=%s", afterRPCJSON)
+				if os.Getenv("VAULTICDB_TEST_READ_TIMING") == "1" {
+					var prior, current RPCWaitStats
+					for _, stats := range beforeRPC {
+						if stats.Method == "MultiGet" {
+							prior = stats
+						}
+					}
+					for _, stats := range afterRPC {
+						if stats.Method == "MultiGet" {
+							current = stats
+						}
+					}
+					if current.BlobReadTimingCalls-prior.BlobReadTimingCalls != uint64(len(order)) || current.InvalidServerTimings != prior.InvalidServerTimings {
+						t.Fatalf("paired blob-read timings missing or invalid: before=%+v after=%+v", prior, current)
+					}
+				}
 				t.Logf("clone_attribution_before=%s", beforeJSON)
 				t.Logf("clone_attribution_after=%s", afterJSON)
 				if failures != 0 || after.Attribution.EngineWriteOps != before.Attribution.EngineWriteOps ||

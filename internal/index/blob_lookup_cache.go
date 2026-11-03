@@ -67,24 +67,42 @@ type blobLookupCounters struct {
 	sizeRPCs               atomic.Uint64
 	sizeHandles            atomic.Uint64
 	sizeRPCNanoseconds     atomic.Uint64
+	sizeRPCActive          atomic.Uint64
+	sizeRPCPeakActive      atomic.Uint64
+	sizeRPCMaxNanoseconds  atomic.Uint64
+	sizeRPCDurationBuckets [8]atomic.Uint64
+	lookupCalls            atomic.Uint64
+	lookupNanoseconds      atomic.Uint64
+	slotWaitNanoseconds    atomic.Uint64
+	resultWaitNanoseconds  atomic.Uint64
 	locationRPCs           atomic.Uint64
 	locationRPCNanoseconds atomic.Uint64
 }
 
 type BlobLookupStats struct {
-	WorkingState           *telemetry.WorkingStateSnapshot `json:"working_state,omitempty"`
-	CacheHits              uint64                          `json:"cache_hits"`
-	NegativeHits           uint64                          `json:"negative_hits"`
-	CacheMisses            uint64                          `json:"cache_misses"`
-	Evictions              uint64                          `json:"evictions"`
-	PeakEntries            uint64                          `json:"peak_entries"`
-	Capacity               int                             `json:"capacity"`
-	AccountedCapacityBytes int                             `json:"accounted_capacity_bytes"`
-	SizeRPCs               uint64                          `json:"size_rpcs"`
-	SizeHandles            uint64                          `json:"size_handles"`
-	SizeRPCNanoseconds     uint64                          `json:"size_rpc_nanoseconds"`
-	LocationRPCs           uint64                          `json:"location_rpcs"`
-	LocationRPCNanoseconds uint64                          `json:"location_rpc_nanoseconds"`
+	WorkingState                          *telemetry.WorkingStateSnapshot `json:"working_state,omitempty"`
+	CacheHits                             uint64                          `json:"cache_hits"`
+	NegativeHits                          uint64                          `json:"negative_hits"`
+	CacheMisses                           uint64                          `json:"cache_misses"`
+	Evictions                             uint64                          `json:"evictions"`
+	PeakEntries                           uint64                          `json:"peak_entries"`
+	Capacity                              int                             `json:"capacity"`
+	AccountedCapacityBytes                int                             `json:"accounted_capacity_bytes"`
+	SizeRPCs                              uint64                          `json:"size_rpcs"`
+	SizeHandles                           uint64                          `json:"size_handles"`
+	SizeRPCNanoseconds                    uint64                          `json:"size_rpc_nanoseconds"`
+	SizeRPCActive                         uint64                          `json:"size_rpc_active"`
+	SizeRPCPeakActive                     uint64                          `json:"size_rpc_peak_active"`
+	SizeRPCMaxNanoseconds                 uint64                          `json:"size_rpc_max_nanoseconds"`
+	SizeRPCDurationBuckets                [8]uint64                       `json:"size_rpc_duration_buckets"`
+	SizeRPCDurationBucketUpperNanoseconds [8]uint64                       `json:"size_rpc_duration_bucket_upper_nanoseconds"`
+	LookupCalls                           uint64                          `json:"lookup_calls"`
+	LookupNanoseconds                     uint64                          `json:"lookup_nanoseconds"`
+	SlotWaitNanoseconds                   uint64                          `json:"slot_wait_nanoseconds"`
+	ResultWaitNanoseconds                 uint64                          `json:"result_wait_nanoseconds"`
+	RPCConcurrencyLimit                   int                             `json:"rpc_concurrency_limit"`
+	LocationRPCs                          uint64                          `json:"location_rpcs"`
+	LocationRPCNanoseconds                uint64                          `json:"location_rpc_nanoseconds"`
 }
 
 func (lookup *CachedBlobLookup) Stats() BlobLookupStats {
@@ -95,6 +113,15 @@ func (lookup *CachedBlobLookup) Stats() BlobLookupStats {
 		SizeRPCs:               lookup.stats.sizeRPCs.Load(), SizeHandles: lookup.stats.sizeHandles.Load(),
 		SizeRPCNanoseconds: lookup.stats.sizeRPCNanoseconds.Load(), LocationRPCs: lookup.stats.locationRPCs.Load(),
 		LocationRPCNanoseconds: lookup.stats.locationRPCNanoseconds.Load(),
+		SizeRPCActive:          lookup.stats.sizeRPCActive.Load(), SizeRPCPeakActive: lookup.stats.sizeRPCPeakActive.Load(),
+		SizeRPCMaxNanoseconds: lookup.stats.sizeRPCMaxNanoseconds.Load(),
+		LookupCalls:           lookup.stats.lookupCalls.Load(), LookupNanoseconds: lookup.stats.lookupNanoseconds.Load(),
+		SlotWaitNanoseconds: lookup.stats.slotWaitNanoseconds.Load(), ResultWaitNanoseconds: lookup.stats.resultWaitNanoseconds.Load(),
+		RPCConcurrencyLimit:                   cap(lookup.slots),
+		SizeRPCDurationBucketUpperNanoseconds: [8]uint64{1000000, 5000000, 10000000, 25000000, 50000000, 100000000, 500000000, ^uint64(0)},
+	}
+	for ordinal := range stats.SizeRPCDurationBuckets {
+		stats.SizeRPCDurationBuckets[ordinal] = lookup.stats.sizeRPCDurationBuckets[ordinal].Load()
 	}
 	if lookup.written != nil {
 		state := lookup.written.WorkingState()
@@ -382,6 +409,9 @@ func (lookup *CachedBlobLookup) LookupSizesContext(ctx context.Context, handles 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	started := time.Now()
+	lookup.stats.lookupCalls.Add(1)
+	defer func() { lookup.stats.lookupNanoseconds.Add(uint64(time.Since(started))) }()
 	release, err := workingstate.Reserve(lookup.ctx, uint64(len(handles))*512+1024)
 	if err != nil {
 		return nil, err
@@ -419,13 +449,17 @@ func (lookup *CachedBlobLookup) LookupSizesContext(ctx context.Context, handles 
 		}
 		return results, nil
 	}
+	slotStarted := time.Now()
 	select {
 	case lookup.slots <- struct{}{}:
 	case <-ctx.Done():
+		lookup.stats.slotWaitNanoseconds.Add(uint64(time.Since(slotStarted)))
 		return nil, ctx.Err()
 	case <-lookup.ctx.Done():
+		lookup.stats.slotWaitNanoseconds.Add(uint64(time.Since(slotStarted)))
 		return nil, context.Cause(lookup.ctx)
 	}
+	lookup.stats.slotWaitNanoseconds.Add(uint64(time.Since(slotStarted)))
 	results, err = lookup.localSizes(ctx, handles)
 	if err != nil {
 		<-lookup.slots
@@ -473,6 +507,13 @@ func (lookup *CachedBlobLookup) LookupSizesContext(ctx context.Context, handles 
 		<-lookup.slots
 	}
 	lookup.mutex.Unlock()
+	waitStarted := time.Now()
+	waitFinished := false
+	defer func() {
+		if !waitFinished {
+			lookup.stats.resultWaitNanoseconds.Add(uint64(time.Since(waitStarted)))
+		}
+	}()
 	for ordinal, result := range waiting {
 		if result.batch == nil {
 			continue
@@ -489,6 +530,8 @@ func (lookup *CachedBlobLookup) LookupSizesContext(ctx context.Context, handles 
 			return nil, context.Cause(lookup.ctx)
 		}
 	}
+	lookup.stats.resultWaitNanoseconds.Add(uint64(time.Since(waitStarted)))
+	waitFinished = true
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -516,9 +559,30 @@ func (lookup *CachedBlobLookup) fetch(handles []vaultic.BlobHandle, batch *blobL
 	started := time.Now()
 	lookup.stats.sizeRPCs.Add(1)
 	lookup.stats.sizeHandles.Add(uint64(len(handles)))
+	active := lookup.stats.sizeRPCActive.Add(1)
+	for peak := lookup.stats.sizeRPCPeakActive.Load(); active > peak; peak = lookup.stats.sizeRPCPeakActive.Load() {
+		if lookup.stats.sizeRPCPeakActive.CompareAndSwap(peak, active) {
+			break
+		}
+	}
 	sizes, err := lookup.session.LookupBlobSizesContext(lookup.ctx, handles)
 	elapsed := time.Since(started)
+	lookup.stats.sizeRPCActive.Add(^uint64(0))
 	lookup.stats.sizeRPCNanoseconds.Add(uint64(elapsed))
+	for maximum := lookup.stats.sizeRPCMaxNanoseconds.Load(); uint64(elapsed) > maximum; maximum = lookup.stats.sizeRPCMaxNanoseconds.Load() {
+		if lookup.stats.sizeRPCMaxNanoseconds.CompareAndSwap(maximum, uint64(elapsed)) {
+			break
+		}
+	}
+	bounds := [...]time.Duration{time.Millisecond, 5 * time.Millisecond, 10 * time.Millisecond, 25 * time.Millisecond, 50 * time.Millisecond, 100 * time.Millisecond, 500 * time.Millisecond}
+	bucket := len(bounds)
+	for ordinal, bound := range bounds {
+		if elapsed <= bound {
+			bucket = ordinal
+			break
+		}
+	}
+	lookup.stats.sizeRPCDurationBuckets[bucket].Add(1)
 	if err != nil {
 		err = fmt.Errorf("blob size lookup RPC for %d handles after %s: %w", len(handles), elapsed, err)
 	}

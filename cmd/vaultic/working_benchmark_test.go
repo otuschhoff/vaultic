@@ -203,7 +203,11 @@ func TestPublicationQualificationNativeLookup(t *testing.T) {
 	}
 	client, err := daemon.Ensure(t.Context(), options)
 	rtest.OK(t, err)
-	defer client.Close(context.Background())
+	defer func() {
+		if client != nil {
+			rtest.OK(t, client.Close(context.Background()))
+		}
+	}()
 	lookup, err := publicationQualificationLookup(t.Context(), options, filepath.Join(t.TempDir(), "lookup"))
 	rtest.OK(t, err)
 	defer lookup.Close()
@@ -215,6 +219,23 @@ func TestPublicationQualificationNativeLookup(t *testing.T) {
 	rtest.OK(t, lookup.Close())
 	_, err = client.WriterStatus(t.Context())
 	rtest.OK(t, err)
+	previous := client
+	rtest.OK(t, publicationQualificationReopen(t.Context(), &client, options))
+	if client == nil || client == previous {
+		t.Fatal("encrypted reopen did not transfer ownership to the new client")
+	}
+	_, err = client.WriterStatus(t.Context())
+	rtest.OK(t, err)
+}
+
+func publicationQualificationReopen(ctx context.Context, client **daemon.Client, options daemon.Options) error {
+	if err := (*client).Close(context.Background()); err != nil {
+		return err
+	}
+	*client = nil
+	reopened, err := daemon.Ensure(ctx, options)
+	*client = reopened
+	return err
 }
 
 func TestPublicationQualificationOnDemandBackup(t *testing.T) {
@@ -785,6 +806,115 @@ func TestBoundedSourceRoundTrip(t *testing.T) {
 	}
 }
 
+type unchangedCrawlMeasurement struct {
+	SecondsElapsed float64 `json:"seconds_elapsed"`
+	Reconciliation struct {
+		Observed    uint64 `json:"observed"`
+		Scanned     uint64 `json:"scanned"`
+		Failed      uint64 `json:"failed"`
+		Deferred    uint64 `json:"deferred"`
+		WriterPhase string `json:"writer_phase"`
+	} `json:"reconciliation"`
+}
+
+func validateUnchangedCrawlMeasurement(summary m5BackupSummary, measurement unchangedCrawlMeasurement, files, entries uint64) error {
+	if measurement.SecondsElapsed < 600 || measurement.Reconciliation.WriterPhase != "done" {
+		return fmt.Errorf("unchanged crawl needs at least 600 main-phase seconds and completed reconciliation")
+	}
+	if summary.MessageType != "summary" || summary.Unmodified != files || summary.TotalFilesProcessed != files ||
+		summary.New != 0 || summary.Changed != 0 || summary.DataBlobs != 0 {
+		return fmt.Errorf("crawl was not a complete unchanged-file workload: %+v", summary)
+	}
+	if measurement.Reconciliation.Observed != entries || measurement.Reconciliation.Scanned != entries ||
+		measurement.Reconciliation.Failed != 0 || measurement.Reconciliation.Deferred != 0 {
+		return fmt.Errorf("crawl reconciliation differs from sealed source")
+	}
+	return nil
+}
+
+func validateForceComparisonMeasurement(summary m5BackupSummary, measurement unchangedCrawlMeasurement, files, entries uint64, forced bool) error {
+	if measurement.SecondsElapsed <= 0 || measurement.Reconciliation.WriterPhase != "done" ||
+		measurement.Reconciliation.Observed != entries || measurement.Reconciliation.Scanned != entries ||
+		measurement.Reconciliation.Failed != 0 || measurement.Reconciliation.Deferred != 0 {
+		return fmt.Errorf("force comparison requires a completed exact-scope crawl")
+	}
+	if summary.MessageType != "summary" || summary.TotalFilesProcessed != files || summary.DataBlobs != 0 || summary.Changed != 0 {
+		return fmt.Errorf("force comparison changed content or stored new data: %+v", summary)
+	}
+	if (!forced && (summary.Unmodified != files || summary.New != 0)) ||
+		(forced && (summary.Unmodified != 0 || summary.New != files)) {
+		return fmt.Errorf("force comparison did not exercise the requested reuse mode")
+	}
+	return nil
+}
+
+func TestForceComparisonMeasurement(t *testing.T) {
+	measurement := unchangedCrawlMeasurement{SecondsElapsed: 1}
+	measurement.Reconciliation.Observed, measurement.Reconciliation.Scanned = 10000, 10000
+	measurement.Reconciliation.WriterPhase = "done"
+	for _, forced := range []bool{false, true} {
+		t.Run(fmt.Sprint(forced), func(t *testing.T) {
+			summary := m5BackupSummary{MessageType: "summary", TotalFilesProcessed: 9000}
+			if forced {
+				summary.New = 9000
+			} else {
+				summary.Unmodified = 9000
+			}
+			rtest.OK(t, validateForceComparisonMeasurement(summary, measurement, 9000, 10000, forced))
+			summary.DataAdded = 1449
+			rtest.OK(t, validateForceComparisonMeasurement(summary, measurement, 9000, 10000, forced))
+			for _, failure := range []string{"new-data", "scope", "mode", "unfinished"} {
+				candidate, observed := summary, measurement
+				switch failure {
+				case "new-data":
+					candidate.DataBlobs = 1
+				case "scope":
+					observed.Reconciliation.Scanned--
+				case "mode":
+					candidate.New, candidate.Unmodified = candidate.Unmodified, candidate.New
+				case "unfinished":
+					observed.Reconciliation.WriterPhase = "wait_prepared"
+				}
+				if validateForceComparisonMeasurement(candidate, observed, 9000, 10000, forced) == nil {
+					t.Fatalf("accepted %s", failure)
+				}
+			}
+		})
+	}
+}
+
+func TestUnchangedCrawlMeasurement(t *testing.T) {
+	summary := m5BackupSummary{MessageType: "summary", Unmodified: 100, TotalFilesProcessed: 100}
+	measurement := unchangedCrawlMeasurement{SecondsElapsed: 600}
+	measurement.Reconciliation.Observed, measurement.Reconciliation.Scanned = 110, 110
+	measurement.Reconciliation.WriterPhase = "done"
+	rtest.OK(t, validateUnchangedCrawlMeasurement(summary, measurement, 100, 110))
+	for _, name := range []string{"short", "unfinished", "changed", "data", "missing", "failed", "deferred"} {
+		t.Run(name, func(t *testing.T) {
+			candidateSummary, candidateMeasurement := summary, measurement
+			switch name {
+			case "short":
+				candidateMeasurement.SecondsElapsed = 599.999
+			case "unfinished":
+				candidateMeasurement.Reconciliation.WriterPhase = "publish_batch"
+			case "changed":
+				candidateSummary.Changed = 1
+			case "data":
+				candidateSummary.DataBlobs = 1
+			case "missing":
+				candidateMeasurement.Reconciliation.Scanned--
+			case "failed":
+				candidateMeasurement.Reconciliation.Failed = 1
+			case "deferred":
+				candidateMeasurement.Reconciliation.Deferred = 1
+			}
+			if validateUnchangedCrawlMeasurement(candidateSummary, candidateMeasurement, 100, 110) == nil {
+				t.Fatal("invalid unchanged-crawl observation accepted")
+			}
+		})
+	}
+}
+
 func TestPublicationBackupQualification(t *testing.T) {
 	root := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT")
 	if root == "" {
@@ -799,6 +929,16 @@ func TestPublicationBackupQualification(t *testing.T) {
 	if onDemand != "" && onDemand != "1" {
 		t.Fatal("invalid on-demand qualification selector")
 	}
+	unchanged := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_UNCHANGED")
+	forceCompare := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_FORCE_COMPARE")
+	if forceCompare != "" && (forceCompare != "1" || unchanged != "1") {
+		t.Fatal("force comparison requires the fresh unchanged qualification mode")
+	}
+	if unchanged != "" && (unchanged != "1" || onDemand != "1" || resumeVerification != "" ||
+		os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ORDER") != "64" || os.Getenv("VAULTIC_PHASE35_THROUGHPUT_SOURCE") != "" ||
+		os.Getenv("VAULTIC_PHASE35_THROUGHPUT_INPUT") != "" || os.Getenv("VAULTIC_PHASE35_THROUGHPUT_PAIRED_READS") != "") {
+		t.Fatal("unchanged qualification requires one fresh on-demand group-64 cell without bounded selection")
+	}
 	if resumeVerification != "" && onDemand != "" {
 		t.Fatal("verification resume cannot change backup lookup mode")
 	}
@@ -809,7 +949,8 @@ func TestPublicationBackupQualification(t *testing.T) {
 	if selected := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_CANDIDATE"); selected != "" {
 		if selected != "/root/proj/vaultic/bin/phase35-critical-path/linux-amd64/vaultic" &&
 			selected != "/root/proj/vaultic/bin/phase35-critical-path-fill/linux-amd64/vaultic" &&
-			selected != "/root/proj/vaultic/bin/phase35-critical-path-paired-reads/linux-amd64/vaultic" {
+			selected != "/root/proj/vaultic/bin/phase35-critical-path-paired-reads/linux-amd64/vaultic" &&
+			!(forceCompare == "1" && selected == "/root/proj/vaultic/bin/phase35-force-10k/linux-amd64/vaultic") {
 			t.Fatal("candidate is not the separate critical-path build")
 		}
 		encoded, err := os.ReadFile(selected)
@@ -819,7 +960,18 @@ func TestPublicationBackupQualification(t *testing.T) {
 		}
 		candidate = selected
 	}
-	const binary = "/root/proj/vaultic/bin/profile/linux-amd64/vaulticdb"
+	binary := "/root/proj/vaultic/bin/profile/linux-amd64/vaulticdb"
+	if selected := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_NATIVE"); selected != "" {
+		if forceCompare != "1" || selected != "/root/proj/vaultic/bin/phase35-force-10k/linux-amd64/vaulticdb" {
+			t.Fatal("native override requires the private force-comparison build")
+		}
+		encoded, err := os.ReadFile(selected)
+		rtest.OK(t, err)
+		if fmt.Sprintf("%x", sha256.Sum256(encoded)) != os.Getenv("VAULTIC_PHASE35_THROUGHPUT_NATIVE_SHA256") {
+			t.Fatal("native comparison digest mismatch")
+		}
+		binary = selected
+	}
 	var marker struct {
 		Clone                                                  string
 		ChecksumVerified, WALRelocated, ProductionWALUnchanged bool
@@ -843,7 +995,66 @@ func TestPublicationBackupQualification(t *testing.T) {
 	var digest string
 	var files, regularFiles, size uint64
 	var sourceManifest backupcmd.BoundedInodeManifest
-	if os.Getenv("VAULTIC_PHASE35_THROUGHPUT_SOURCE") != "" {
+	var frozenPaths map[string]bool
+	if unchanged != "" {
+		const accepted = "/volume2/NASDA2/vaultic-test-m6/critical-path-fme_cae1-20261102-production-cap100k/group-64"
+		var result struct {
+			RestoreVerified bool   `json:"restore_verified"`
+			ReopenVerified  bool   `json:"reopen_verified"`
+			InputSHA256     string `json:"input_sha256"`
+			Files           uint64 `json:"files"`
+			Bytes           uint64 `json:"bytes"`
+		}
+		encoded, err := os.ReadFile(filepath.Join(accepted, "result.json"))
+		rtest.OK(t, err)
+		rtest.OK(t, json.Unmarshal(encoded, &result))
+		if !result.RestoreVerified || !result.ReopenVerified || result.Files != 89326 || result.Bytes != 20949531016 ||
+			result.InputSHA256 != "9f85dfbe8114ebfd17481f3c1453d2fb1333c73580a8aa56415dbbd9cd010862" {
+			t.Fatal("unchanged source lacks accepted representative restore evidence")
+		}
+		rtest.OK(t, os.Mkdir(source, 0700))
+		rtest.OK(t, os.Chmod(source, 0700))
+		t.Log("copying accepted restored source into a fresh stable NFS fixture")
+		acceptedSource := filepath.Join(accepted, "restore/ncl1-1-vs-50/fme_cae1")
+		if forceCompare == "1" {
+			selected, err := boundedLiveSourcePaths(acceptedSource, 10000)
+			rtest.OK(t, err)
+			if len(selected) != 10000 {
+				t.Fatal("accepted source lacks 10000 entries")
+			}
+			manifest := filepath.Join(root, "selected-paths.nul")
+			rtest.OK(t, os.WriteFile(manifest, []byte(strings.Join(selected[1:], "\x00")+"\x00"), 0600))
+			rtest.OK(t, os.Chmod(manifest, 0600))
+			publicationQualificationCommand(t, root, "freeze", "rsync", "-a", "--no-recursive", "--dirs", "--from0", "--files-from="+manifest, acceptedSource+"/", source+"/")
+		} else {
+			publicationQualificationCommand(t, root, "freeze", "rsync", "-a", acceptedSource+"/", source+"/")
+		}
+		rtest.OK(t, os.Chmod(source, 0700))
+		paths, err := boundedLiveSourcePaths(source, 100001)
+		rtest.OK(t, err)
+		entryCount := 100000
+		if forceCompare == "1" {
+			entryCount = 10000
+		}
+		if len(paths) != entryCount {
+			t.Fatalf("frozen restore has %d entries, expected %d", len(paths), entryCount)
+		}
+		frozenPaths = make(map[string]bool, len(paths))
+		for _, path := range paths {
+			frozenPaths[path] = true
+		}
+		digest, files, size = m5FilesSelected(t, source, false, frozenPaths)
+		regularFiles = publicationQualificationRegularFiles(t, source, paths)
+		if forceCompare == "1" {
+			expected, expectedFiles, expectedBytes := m5FilesSelected(t, acceptedSource, false, frozenPaths)
+			if digest != expected || files != expectedFiles || size != expectedBytes {
+				t.Fatal("10k fixture differs from accepted source subset")
+			}
+		} else if digest != result.InputSHA256 || files != result.Files || size != result.Bytes || regularFiles != 89300 {
+			t.Fatal("frozen source differs from the accepted restore")
+		}
+		t.Logf("unchanged_fixture entries=%d regular_files=%d bytes=%d sha256=%s", len(paths), regularFiles, size, digest)
+	} else if os.Getenv("VAULTIC_PHASE35_THROUGHPUT_SOURCE") != "" {
 		if os.Getenv("VAULTIC_PHASE35_THROUGHPUT_SOURCE") != "/ncl1-1-vs-50/fme_cae1" || onDemand != "1" || resumeVerification != "" {
 			t.Fatal("bounded source requires the selected fme_cae1 root, on-demand lookup, and a fresh run")
 		}
@@ -1004,7 +1215,18 @@ func TestPublicationBackupQualification(t *testing.T) {
 					t.Fatal("verification resume WAL is not private")
 				}
 			}
-			control, err := os.MkdirTemp("/run", "v-ab-")
+			controlRoot := "/run"
+			if unchanged != "" {
+				controlRoot = os.Getenv("VAULTIC_PHASE35_THROUGHPUT_CONTROL_ROOT")
+				resolved, err := filepath.EvalSymlinks(controlRoot)
+				rtest.OK(t, err)
+				info, err := os.Stat(controlRoot)
+				rtest.OK(t, err)
+				if resolved != controlRoot || !strings.HasPrefix(controlRoot, "/run/vaultic-unchanged-") || !info.IsDir() || info.Mode().Perm() != 0700 {
+					t.Fatal("unchanged qualification requires a canonical private runtime directory")
+				}
+			}
+			control, err := os.MkdirTemp(controlRoot, "v-ab-")
 			rtest.OK(t, err)
 			t.Cleanup(func() { _ = os.RemoveAll(control) })
 			daemonOptions := daemon.Options{Socket: filepath.Join(control, "db.sock"), RepositoryID: repositoryID, DaemonPath: binary,
@@ -1015,7 +1237,11 @@ func TestPublicationBackupQualification(t *testing.T) {
 			client, err := daemon.Ensure(t.Context(), daemonOptions)
 			rtest.OK(t, err)
 			startupSeconds := time.Since(started).Seconds()
-			defer func() { rtest.OK(t, client.Close(context.Background())) }()
+			defer func() {
+				if client != nil {
+					rtest.OK(t, client.Close(context.Background()))
+				}
+			}()
 			options := publicationQualificationOptions(repoPath, daemonOptions.Socket, daemonOptions.PassphraseFile)
 			rtest.OK(t, publicationQualificationLoadPassword(&options))
 			var copiedBytes uint64
@@ -1060,6 +1286,10 @@ func TestPublicationBackupQualification(t *testing.T) {
 					"--working-memory-disk-budget=2GiB"}
 				if onDemand == "1" {
 					backupArgs = append(backupArgs, "--metadata-on-demand", "--metadata-cache-mib=64")
+				}
+				if unchanged != "" {
+					backupArgs = append(backupArgs, "--read-concurrency=16", "--metadata-reconciliation-queue-depth=256")
+					t.Log("creating complete nonselective parent; this backup is outside the unchanged measurement")
 				}
 				if sourceManifest.Source != "" {
 					backupArgs = append(backupArgs, "--bounded-inode-manifest="+filepath.Join(root, "inode-manifest.json"), "--metadata-reconciliation-queue-depth=256", "--force")
@@ -1180,7 +1410,7 @@ func TestPublicationBackupQualification(t *testing.T) {
 					rtest.OK(t, err)
 					copiedBytes += uint64(info.Size())
 					copyLimit := uint64(16 << 30)
-					if sourceManifest.Source != "" {
+					if sourceManifest.Source != "" || unchanged != "" {
 						copyLimit = 128 << 30
 					}
 					if copiedBytes > copyLimit {
@@ -1255,7 +1485,7 @@ func TestPublicationBackupQualification(t *testing.T) {
 			rtest.OK(t, testRunRestoreAssumeFailure(t, id.String(), restoreOptions{Target: restored, Verify: true}, options))
 			restoreSeconds := time.Since(started).Seconds()
 			restoredSource := filepath.Join(restored, strings.TrimPrefix(source, "/"))
-			var selected map[string]bool
+			selected := frozenPaths
 			if sourceManifest.Source != "" {
 				if snapshot.CrawlPlan == nil || snapshot.CrawlPlan.Mode != "bounded" {
 					t.Fatal("bounded snapshot falsely claims full source coverage")
@@ -1269,10 +1499,8 @@ func TestPublicationBackupQualification(t *testing.T) {
 			if actual != digest || actualFiles != files || actualBytes != size {
 				t.Fatal("verified restore differs from frozen input")
 			}
-			rtest.OK(t, client.Close(context.Background()))
 			started = time.Now()
-			client, err = daemon.Ensure(t.Context(), daemonOptions)
-			rtest.OK(t, err)
+			rtest.OK(t, publicationQualificationReopen(t.Context(), &client, daemonOptions))
 			reopenSeconds := time.Since(started).Seconds()
 			reopened := testLoadSnapshot(t, options, id)
 			if reopened.Tree == nil || *reopened.Tree != *snapshot.Tree {
@@ -1294,10 +1522,336 @@ func TestPublicationBackupQualification(t *testing.T) {
 			_, err = resultFile.Write(append(encoded, '\n'))
 			rtest.OK(t, errors.Join(err, resultFile.Close()))
 			t.Logf("qualified_backup group=%d files=%d seconds=%.3f files_per_second=%.3f tree=%s", groupSize, files, wall.Seconds(), float64(files)/wall.Seconds(), snapshot.Tree)
+			if unchanged != "" {
+				if snapshot.CrawlPlan == nil || snapshot.CrawlPlan.Mode != "full" || snapshot.CrawlPlan.ReusedSubtrees != 0 {
+					t.Fatal("unchanged benchmark parent is not a complete full traversal")
+				}
+				if forceCompare == "1" {
+					publicationQualificationForceComparison(t, cell, source, candidate, options, daemonOptions, &client, id,
+						frozenPaths, digest, regularFiles, files, size)
+				} else {
+					publicationQualificationUnchanged(t, cell, source, candidate, options, daemonOptions, &client, id,
+						frozenPaths, digest, regularFiles, files, size)
+				}
+			}
 		})
 		if t.Failed() {
 			break
 		}
+	}
+}
+
+func publicationQualificationUnchanged(t *testing.T, cell, source, candidate string, options global.Options,
+	daemonOptions daemon.Options, client **daemon.Client, parent vaultic.ID, paths map[string]bool, digest string,
+	regularFiles, files, size uint64,
+) {
+	t.Helper()
+	before, err := (*client).WriterStatus(t.Context())
+	rtest.OK(t, err)
+	if before.ActiveTransactions != 0 || before.ActiveWriteIntents != 0 {
+		t.Fatal("unchanged pass requires an idle private writer")
+	}
+	t.Log("starting unchanged full crawl; require at least 600 main-phase seconds without throttling or repeats")
+	wall, cpu := publicationQualificationCommand(t, cell, "unchanged", candidate,
+		"--repo="+options.Repo, "--password-file="+options.PasswordFile, "--metadata-daemon-socket="+daemonOptions.Socket,
+		"--metadata-encryption-mode=required", "--metadata-passphrase-file="+daemonOptions.PassphraseFile, "--no-cache", "--json",
+		"backup", "--no-scan", "--one-file-system", "--read-concurrency=16", "--metadata-publication-group-size=64",
+		"--metadata-reconciliation-queue-depth=256", "--metadata-on-demand", "--metadata-cache-mib=64",
+		"--working-memory-mode=ram", "--working-memory-ram-limit=160GiB", "--working-memory-scratch="+filepath.Join(options.Repo, "working"),
+		"--working-memory-disk-budget=2GiB", source)
+	output, err := os.ReadFile(filepath.Join(cell, "unchanged.stdout.log"))
+	rtest.OK(t, err)
+	var summary m5BackupSummary
+	var measurement unchangedCrawlMeasurement
+	var snapshotID string
+	for _, line := range bytes.Split(output, []byte{'\n'}) {
+		var event struct {
+			MessageType string `json:"message_type"`
+			SnapshotID  string `json:"snapshot_id"`
+		}
+		if json.Unmarshal(line, &event) != nil {
+			continue
+		}
+		switch event.MessageType {
+		case "summary":
+			rtest.OK(t, json.Unmarshal(line, &summary))
+			snapshotID = event.SnapshotID
+		case "backup_critical_path":
+			rtest.OK(t, json.Unmarshal(line, &measurement))
+		}
+	}
+	rtest.OK(t, validateUnchangedCrawlMeasurement(summary, measurement, regularFiles, uint64(len(paths))))
+	id, err := vaultic.ParseID(snapshotID)
+	rtest.OK(t, err)
+	snapshot := testLoadSnapshot(t, options, id)
+	if snapshot.Parent == nil || *snapshot.Parent != parent || snapshot.CrawlPlan == nil || snapshot.CrawlPlan.Mode != "full" ||
+		snapshot.CrawlPlan.ReusedSubtrees != 0 || len(snapshot.Paths) != 1 || snapshot.Paths[0] != source {
+		t.Fatal("unchanged pass lacks the complete parent and nonselective source provenance")
+	}
+	after, err := (*client).WriterStatus(t.Context())
+	rtest.OK(t, err)
+	if after.ActiveTransactions != 0 || after.ActiveWriteIntents != 0 {
+		t.Fatal("unchanged pass left active transactions or intents")
+	}
+	restored := filepath.Join(cell, "unchanged-restore")
+	rtest.OK(t, testRunRestoreAssumeFailure(t, id.String(), restoreOptions{Target: restored, Verify: true}, options))
+	actual, actualFiles, actualBytes := m5FilesSelected(t, filepath.Join(restored, strings.TrimPrefix(source, "/")), false, paths)
+	current, currentFiles, currentBytes := m5FilesSelected(t, source, false, paths)
+	if actual != digest || current != digest || actualFiles != files || currentFiles != files || actualBytes != size || currentBytes != size {
+		t.Fatal("unchanged restore or final source differs from sealed input")
+	}
+	rtest.OK(t, publicationQualificationReopen(t.Context(), client, daemonOptions))
+	retained := testLoadSnapshot(t, options, id)
+	if retained.Tree == nil || snapshot.Tree == nil || *retained.Tree != *snapshot.Tree {
+		t.Fatal("unchanged snapshot changed after encrypted reopen")
+	}
+	result, err := json.MarshalIndent(map[string]any{
+		"main_seconds": measurement.SecondsElapsed, "command_seconds": wall.Seconds(), "cli_cpu_seconds": cpu,
+		"observed_entries": measurement.Reconciliation.Observed, "entries_per_second": float64(len(paths)) / measurement.SecondsElapsed,
+		"regular_files": regularFiles, "bytes": size, "input_sha256": digest, "summary": summary,
+		"parent": parent.String(), "snapshot": id.String(), "writer_before": before, "writer_after": after,
+		"restore_verified": true, "reopen_verified": true, "source_unchanged": true,
+		"source_payload_reads_measured": false, "production_repository_modified": false,
+	}, "", "  ")
+	rtest.OK(t, err)
+	file, err := os.OpenFile(filepath.Join(cell, "unchanged-result.json"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	rtest.OK(t, err)
+	rtest.OK(t, file.Chmod(0600))
+	_, err = file.Write(append(result, '\n'))
+	rtest.OK(t, errors.Join(err, file.Sync(), file.Close()))
+	t.Logf("qualified_unchanged_crawl main_seconds=%.3f entries=%d entries_per_second=%.3f data_blobs=%d",
+		measurement.SecondsElapsed, len(paths), float64(len(paths))/measurement.SecondsElapsed, summary.DataBlobs)
+}
+
+func TestPublicationForceComparisonRetry(t *testing.T) {
+	if os.Getenv("VAULTIC_PHASE35_THROUGHPUT_FORCE_COMPARE_RETRY") != "1" {
+		t.Skip("qualified-parent force-comparison retry not selected")
+	}
+	const previous = "/volume2/NASDA2/vaultic-test-m6/force-compare-fme-cae1-20261103-10k"
+	root := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT")
+	if root != previous+"/retry" {
+		t.Fatal("retry requires the new private child of the retained failed capture")
+	}
+	rtest.OK(t, validatePublicationQualificationRoot(root, "/volume2/NASDA2/vaultic-test-m6"))
+	parentCell := filepath.Join(previous, "group-64")
+	var receipt struct {
+		RestoreVerified bool   `json:"restore_verified"`
+		ReopenVerified  bool   `json:"reopen_verified"`
+		InputSHA256     string `json:"input_sha256"`
+		Snapshot        string `json:"snapshot"`
+		Files           uint64 `json:"files"`
+		Bytes           uint64 `json:"bytes"`
+	}
+	encoded, err := os.ReadFile(filepath.Join(parentCell, "result.json"))
+	rtest.OK(t, err)
+	rtest.OK(t, json.Unmarshal(encoded, &receipt))
+	if !receipt.RestoreVerified || !receipt.ReopenVerified || receipt.Files != 9218 || receipt.Bytes != 2460946936 ||
+		receipt.InputSHA256 != "2f76a6f4397effad64c9922cc6337a836b3c4ac21b870114942e02b63b996f80" {
+		t.Fatal("retry parent lacks qualified source and reopen evidence")
+	}
+	parent, err := vaultic.ParseID(receipt.Snapshot)
+	rtest.OK(t, err)
+	source := filepath.Join(previous, "input")
+	selected, err := boundedLiveSourcePaths(source, 10001)
+	rtest.OK(t, err)
+	if len(selected) != 10000 {
+		t.Fatal("qualified retry source scope changed")
+	}
+	paths := make(map[string]bool, len(selected))
+	for _, path := range selected {
+		paths[path] = true
+	}
+	digest, files, size := m5FilesSelected(t, source, false, paths)
+	regularFiles := publicationQualificationRegularFiles(t, source, selected)
+	if digest != receipt.InputSHA256 || files != receipt.Files || size != receipt.Bytes || regularFiles != 9209 {
+		t.Fatal("qualified retry source content changed")
+	}
+	const candidate = "/root/proj/vaultic/bin/phase35-force-10k/linux-amd64/vaultic"
+	const binary = "/root/proj/vaultic/bin/phase35-force-10k/linux-amd64/vaulticdb"
+	for path, expected := range map[string]string{candidate: os.Getenv("VAULTIC_PHASE35_THROUGHPUT_CANDIDATE_SHA256"), binary: os.Getenv("VAULTIC_PHASE35_THROUGHPUT_NATIVE_SHA256")} {
+		contents, err := os.ReadFile(path)
+		rtest.OK(t, err)
+		if fmt.Sprintf("%x", sha256.Sum256(contents)) != expected {
+			t.Fatal("retry executable pin differs")
+		}
+	}
+	controlRoot := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_CONTROL_ROOT")
+	resolved, err := filepath.EvalSymlinks(controlRoot)
+	rtest.OK(t, err)
+	info, err := os.Stat(controlRoot)
+	rtest.OK(t, err)
+	if resolved != controlRoot || !strings.HasPrefix(controlRoot, "/run/vaultic-unchanged-") || info.Mode().Perm() != 0700 {
+		t.Fatal("retry requires a private canonical runtime")
+	}
+	control, err := os.MkdirTemp(controlRoot, "fc-")
+	rtest.OK(t, err)
+	rtest.OK(t, os.Chmod(control, 0700))
+	t.Cleanup(func() { _ = os.RemoveAll(control) })
+	current := daemon.Options{Socket: filepath.Join(control, "db.sock"), RepositoryID: "c4d68689c785d02a28d6eec485c62132823dc9873ff7f627c2bac80258251528",
+		DaemonPath: binary, DataDir: filepath.Join(parentCell, "db"), WALDataDir: filepath.Join(parentCell, "db", "wal"),
+		ObjectStore: "local", WALStore: "local", WALFlushInterval: 100 * time.Millisecond, MetaCacheBytes: 128 << 20, BlockCacheBytes: 512 << 20,
+		EncryptionMode: "required", PassphraseFile: "/volume2/NASDA2/rustic/etc/metadata-recovery", StartTimeout: 90 * time.Second}
+	options := publicationQualificationOptions(filepath.Join(parentCell, "repo"), current.Socket, current.PassphraseFile)
+	rtest.OK(t, publicationQualificationLoadPassword(&options))
+	cell := filepath.Join(root, "group-64")
+	rtest.OK(t, os.Mkdir(cell, 0700))
+	rtest.OK(t, os.Chmod(cell, 0700))
+	for _, name := range []string{"result.json", "backup.stdout.log", "backup.stderr.log"} {
+		publicationQualificationCopy(t, filepath.Join(cell, name), filepath.Join(parentCell, name))
+	}
+	defer feature.TestSetFlag(t, feature.Flag, feature.SlateDBAuthoritative, true)()
+	var owner *daemon.Client
+	defer func() {
+		if owner != nil {
+			rtest.OK(t, owner.Close(context.Background()))
+		}
+	}()
+	publicationQualificationForceComparison(t, cell, source, candidate, options, current, &owner, parent, paths, digest, regularFiles, files, size)
+}
+
+func publicationQualificationForceComparison(t *testing.T, cell, source, candidate string, options global.Options,
+	daemonOptions daemon.Options, owner **daemon.Client, parent vaultic.ID, paths map[string]bool, digest string,
+	regularFiles, files, size uint64,
+) {
+	t.Helper()
+	if len(paths) != 10000 {
+		t.Fatal("force comparison requires exactly 10000 entries")
+	}
+	parentOutput, err := os.ReadFile(filepath.Join(filepath.Dir(daemonOptions.DataDir), "backup.stdout.log"))
+	rtest.OK(t, err)
+	var parentSummary m5BackupSummary
+	for _, line := range bytes.Split(parentOutput, []byte{'\n'}) {
+		var row m5BackupSummary
+		if json.Unmarshal(line, &row) == nil && row.MessageType == "summary" {
+			parentSummary = row
+		}
+	}
+	if parentSummary.MessageType != "summary" || parentSummary.TotalFilesProcessed != regularFiles {
+		t.Fatal("parent fixture did not establish complete source content")
+	}
+	if *owner != nil {
+		rtest.OK(t, (*owner).Close(context.Background()))
+		*owner = nil
+	}
+	repositoryHash := fmt.Sprintf("%x", sha256.Sum256([]byte(daemonOptions.RepositoryID)))
+	for _, forced := range []bool{false, true} {
+		name := "unforced"
+		if forced {
+			name = "forced"
+		}
+		leg := filepath.Join(cell, name)
+		rtest.OK(t, os.Mkdir(leg, 0700))
+		rtest.OK(t, os.Chmod(leg, 0700))
+		for _, pair := range [][2]string{{daemonOptions.DataDir, filepath.Join(leg, "db")}, {options.Repo, filepath.Join(leg, "repo")}} {
+			rtest.OK(t, os.Mkdir(pair[1], 0700))
+			publicationQualificationCommand(t, leg, "copy-"+filepath.Base(pair[1]), "rsync", "-a", "--chmod=D700,F600", "--exclude=*.coordination.lock", pair[0]+"/", pair[1]+"/")
+			publicationQualificationCommand(t, leg, "checksum-"+filepath.Base(pair[1]), "rsync", "-rcni", "--delete", "--exclude=*.coordination.lock", pair[0]+"/", pair[1]+"/")
+			check, err := os.ReadFile(filepath.Join(leg, "checksum-"+filepath.Base(pair[1])+".stdout.log"))
+			rtest.OK(t, err)
+			if len(bytes.TrimSpace(check)) != 0 {
+				t.Fatal("comparison parent clone checksum differs")
+			}
+			rtest.OK(t, os.Chmod(pair[1], 0700))
+		}
+		current := daemonOptions
+		current.DataDir, current.WALDataDir = filepath.Join(leg, "db"), filepath.Join(leg, "db", "wal")
+		control, err := os.MkdirTemp(filepath.Dir(daemonOptions.Socket), "fc-")
+		rtest.OK(t, err)
+		rtest.OK(t, os.Chmod(control, 0700))
+		t.Cleanup(func() { _ = os.RemoveAll(control) })
+		current.Socket = filepath.Join(control, "db.sock")
+		binding := filepath.Join(current.DataDir, repositoryHash, "_vaultic", "wal-target-v1")
+		copied, err := os.ReadFile(binding)
+		rtest.OK(t, err)
+		if string(copied) != "vaulticdb-local-wal-after-bulk-import-v1:"+daemonOptions.DataDir+"/wal" {
+			t.Fatal("comparison copied WAL binding differs")
+		}
+		rtest.OK(t, os.WriteFile(binding, []byte("vaulticdb-local-wal-after-bulk-import-v1:"+current.DataDir+"/wal"), 0600))
+		*owner, err = daemon.Ensure(t.Context(), current)
+		rtest.OK(t, err)
+		legOptions := publicationQualificationOptions(filepath.Join(leg, "repo"), current.Socket, current.PassphraseFile)
+		rtest.OK(t, publicationQualificationLoadPassword(&legOptions))
+		before, err := (*owner).WriterStatus(t.Context())
+		rtest.OK(t, err)
+		if before.ActiveTransactions != 0 || before.ActiveWriteIntents != 0 {
+			t.Fatal("comparison writer is not idle")
+		}
+		args := []string{"--repo=" + legOptions.Repo, "--password-file=" + legOptions.PasswordFile, "--metadata-daemon-socket=" + current.Socket,
+			"--metadata-encryption-mode=required", "--metadata-passphrase-file=" + current.PassphraseFile, "--no-cache", "--json",
+			"backup", "--no-scan", "--one-file-system", "--read-concurrency=16", "--metadata-publication-group-size=64",
+			"--metadata-reconciliation-queue-depth=256", "--metadata-on-demand", "--metadata-cache-mib=64",
+			"--working-memory-mode=ram", "--working-memory-ram-limit=160GiB", "--working-memory-scratch=" + filepath.Join(legOptions.Repo, "working"), "--working-memory-disk-budget=2GiB"}
+		if forced {
+			args = append(args, "--force")
+		} else {
+			args = append(args, "--parent="+parent.String())
+		}
+		args = append(args, source)
+		wall, cpu := publicationQualificationCommand(t, leg, "backup", candidate, args...)
+		output, err := os.ReadFile(filepath.Join(leg, "backup.stdout.log"))
+		rtest.OK(t, err)
+		var summary m5BackupSummary
+		var measurement unchangedCrawlMeasurement
+		var snapshotID string
+		var critical json.RawMessage
+		for _, line := range bytes.Split(output, []byte{'\n'}) {
+			var event struct {
+				MessageType string `json:"message_type"`
+				SnapshotID  string `json:"snapshot_id"`
+			}
+			if json.Unmarshal(line, &event) != nil {
+				continue
+			}
+			if event.MessageType == "summary" {
+				rtest.OK(t, json.Unmarshal(line, &summary))
+				snapshotID = event.SnapshotID
+			}
+			if event.MessageType == "backup_critical_path" {
+				rtest.OK(t, json.Unmarshal(line, &measurement))
+				critical = append(critical[:0], line...)
+			}
+		}
+		rtest.OK(t, validateForceComparisonMeasurement(summary, measurement, regularFiles, uint64(len(paths)), forced))
+		id, err := vaultic.ParseID(snapshotID)
+		rtest.OK(t, err)
+		snapshot := testLoadSnapshot(t, legOptions, id)
+		if snapshot.CrawlPlan == nil || snapshot.CrawlPlan.Mode != "full" || snapshot.CrawlPlan.ReusedSubtrees != 0 || len(snapshot.Paths) != 1 || snapshot.Paths[0] != source {
+			t.Fatal("comparison snapshot scope differs")
+		}
+		if (!forced && (snapshot.Parent == nil || *snapshot.Parent != parent)) || (forced && snapshot.Parent != nil) {
+			t.Fatal("comparison parent semantics differ")
+		}
+		after, err := (*owner).WriterStatus(t.Context())
+		rtest.OK(t, err)
+		if after.ActiveTransactions != 0 || after.ActiveWriteIntents != 0 {
+			t.Fatal("comparison left active writer work")
+		}
+		restored := filepath.Join(leg, "restore")
+		rtest.OK(t, testRunRestoreAssumeFailure(t, id.String(), restoreOptions{Target: restored, Verify: true}, legOptions))
+		actual, actualFiles, actualBytes := m5FilesSelected(t, filepath.Join(restored, strings.TrimPrefix(source, "/")), false, paths)
+		retained, retainedFiles, retainedBytes := m5FilesSelected(t, source, false, paths)
+		if actual != digest || retained != digest || actualFiles != files || retainedFiles != files || actualBytes != size || retainedBytes != size {
+			t.Fatal("comparison restore or source changed")
+		}
+		rtest.OK(t, publicationQualificationReopen(t.Context(), owner, current))
+		reopened := testLoadSnapshot(t, legOptions, id)
+		if reopened.Tree == nil || snapshot.Tree == nil || *reopened.Tree != *snapshot.Tree {
+			t.Fatal("comparison encrypted reopen differs")
+		}
+		result, err := json.MarshalIndent(map[string]any{"forced": forced, "main_seconds": measurement.SecondsElapsed, "command_seconds": wall.Seconds(),
+			"entries": len(paths), "regular_files": regularFiles, "bytes": size, "input_sha256": digest, "entries_per_second": float64(len(paths)) / measurement.SecondsElapsed,
+			"cli_cpu_seconds": cpu, "summary": summary, "critical_path": critical, "writer_before": before, "writer_after": after,
+			"baseline_parent": parent.String(), "parent_setup_summary": parentSummary, "snapshot": id.String(), "restore_verified": true, "reopen_verified": true, "source_unchanged": true,
+			"source_payload_reads_measured": false, "production_repository_modified": false, "qualification_limit": "single pair; frozen restored-source NFS fixture, not original source paths/inodes"}, "", "  ")
+		rtest.OK(t, err)
+		file, err := os.OpenFile(filepath.Join(leg, "result.json"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		rtest.OK(t, err)
+		rtest.OK(t, file.Chmod(0600))
+		_, err = file.Write(append(result, '\n'))
+		rtest.OK(t, errors.Join(err, file.Sync(), file.Close()))
+		t.Logf("qualified_force_comparison forced=%t main_seconds=%.3f entries_per_second=%.3f data_blobs=%d", forced, measurement.SecondsElapsed, float64(len(paths))/measurement.SecondsElapsed, summary.DataBlobs)
+		rtest.OK(t, (*owner).Close(context.Background()))
+		*owner = nil
 	}
 }
 

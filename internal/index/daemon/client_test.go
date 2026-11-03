@@ -23,6 +23,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/workingkv"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -85,6 +86,45 @@ func TestRPCWaitAttribution(t *testing.T) {
 			stats = client.RPCWaitStats()
 			if len(stats) != 1 || stats[0].Active != 0 || stats[0].OldestActiveNS != 0 || stats[0].Calls != 1 || stats[0].Failures != 1 || stats[0].ElapsedWorkerNS == 0 {
 				t.Fatalf("completed wait not recorded: %+v", stats)
+			}
+		})
+	}
+}
+
+func TestRPCReadTimingAttribution(t *testing.T) {
+	for _, scenario := range []struct {
+		name           string
+		headers        metadata.MD
+		failure        error
+		valid, invalid uint64
+	}{
+		{name: "paired", headers: metadata.Pairs("x-vaulticdb-read-handler-ns", "1", "x-vaulticdb-read-storage-ns", "0"), valid: 1},
+		{name: "older-daemon"},
+		{name: "malformed", headers: metadata.Pairs("x-vaulticdb-read-handler-ns", "bad", "x-vaulticdb-read-storage-ns", "0"), invalid: 1},
+		{name: "incomplete", headers: metadata.Pairs("x-vaulticdb-read-handler-ns", "1"), invalid: 1},
+		{name: "impossible", headers: metadata.Pairs("x-vaulticdb-read-handler-ns", "1", "x-vaulticdb-read-storage-ns", "2"), invalid: 1},
+		{name: "duplicate", headers: metadata.Pairs("x-vaulticdb-read-handler-ns", "1", "x-vaulticdb-read-handler-ns", "1", "x-vaulticdb-read-storage-ns", "0"), invalid: 1},
+		{name: "failed", headers: metadata.Pairs("x-vaulticdb-read-handler-ns", "1", "x-vaulticdb-read-storage-ns", "0"), failure: context.Canceled},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			client := &Client{}
+			request := &vaulticdbv1.MultiGetRequest{Keys: [][]byte{schema.BlobKey(daemonTestID(17))}}
+			err := client.rpcWait.intercept(t.Context(), "/vaulticdb.v1.VaulticDB/MultiGet", request, nil, nil,
+				func(_ context.Context, _ string, _, _ any, _ *grpc.ClientConn, options ...grpc.CallOption) error {
+					for _, option := range options {
+						if header, ok := option.(grpc.HeaderCallOption); ok {
+							*header.HeaderAddr = scenario.headers
+						}
+					}
+					return scenario.failure
+				})
+			if !errors.Is(err, scenario.failure) {
+				t.Fatalf("timing changed RPC outcome: %v", err)
+			}
+			stats := client.RPCWaitStats()[0]
+			if stats.ServerTimingCalls != scenario.valid || stats.InvalidServerTimings != scenario.invalid ||
+				stats.BlobReadTimingCalls != scenario.valid || stats.ServerTimingClientNS != stats.ServerHandlerNS+stats.OutsideHandlerNS {
+				t.Fatalf("incorrect paired timing: %+v", stats)
 			}
 		})
 	}

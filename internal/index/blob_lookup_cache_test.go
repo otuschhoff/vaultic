@@ -152,6 +152,58 @@ func TestCachedBlobLookupStats(t *testing.T) {
 		stats.SizeRPCs != 2 || stats.SizeHandles != 3 || stats.SizeRPCNanoseconds == 0 || stats.LocationRPCs != 0 {
 		t.Fatalf("unexpected closed cache stats: %+v", stats)
 	}
+	var completed uint64
+	for _, count := range stats.SizeRPCDurationBuckets {
+		completed += count
+	}
+	if completed != stats.SizeRPCs || stats.SizeRPCActive != 0 || stats.SizeRPCPeakActive != 1 ||
+		stats.SizeRPCMaxNanoseconds == 0 || stats.LookupCalls != 3 || stats.RPCConcurrencyLimit != 1 ||
+		stats.LookupNanoseconds < stats.SlotWaitNanoseconds+stats.ResultWaitNanoseconds {
+		t.Fatalf("unexpected timing stats: %+v", stats)
+	}
+}
+
+func TestCachedBlobLookupConcurrentTelemetry(t *testing.T) {
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	session := &testBlobLookupSession{ctx: t.Context(), query: func(ctx context.Context, handles []vaultic.BlobHandle) ([]vaultic.BlobSize, error) {
+		started <- struct{}{}
+		select {
+		case <-release:
+			return make([]vaultic.BlobSize, len(handles)), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}}
+	lookup, err := NewCachedBlobLookup(session, NewLegacyEngine(), 2*blobLookupCacheEntryBytes, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lookup.Close()
+	done := make(chan error, 2)
+	for range 2 {
+		go func() {
+			_, err := lookup.LookupSizesContext(t.Context(), []vaultic.BlobHandle{vaultic.NewRandomBlobHandle()})
+			done <- err
+		}()
+	}
+	for range 2 {
+		<-started
+	}
+	stats := lookup.Stats()
+	if stats.SizeRPCActive != 2 || stats.SizeRPCPeakActive != 2 || stats.RPCConcurrencyLimit != 2 {
+		t.Fatalf("concurrent service not visible: %+v", stats)
+	}
+	close(release)
+	for range 2 {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	stats = lookup.Stats()
+	if stats.SizeRPCActive != 0 || stats.SizeRPCs != 2 || stats.LookupCalls != 2 || stats.ResultWaitNanoseconds == 0 {
+		t.Fatalf("completed concurrent service not visible: %+v", stats)
+	}
 }
 
 func TestCachedBlobLookupEvictionAndOverlay(t *testing.T) {

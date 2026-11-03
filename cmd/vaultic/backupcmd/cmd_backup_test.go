@@ -100,6 +100,23 @@ func TestBackupCloseReportsLookupStatsAfterCancellation(t *testing.T) {
 	}
 }
 
+func TestBackupRPCWaitDelta(test *testing.T) {
+	current := daemon.RPCWaitStats{Method: "Get", Active: 2, OldestActiveNS: 3}
+	baseline := daemon.RPCWaitStats{Method: "Get", Active: 99, OldestActiveNS: 99}
+	expected := current
+	for _, name := range []string{"Calls", "Failures", "ElapsedWorkerNS", "ServerTimingCalls", "ServerTimingClientNS",
+		"ServerHandlerNS", "ServerStorageNS", "OutsideHandlerNS", "InvalidServerTimings", "BlobReadTimingCalls",
+		"BlobReadClientNS", "BlobReadHandlerNS", "BlobReadStorageNS"} {
+		reflect.ValueOf(&current).Elem().FieldByName(name).SetUint(10)
+		reflect.ValueOf(&baseline).Elem().FieldByName(name).SetUint(4)
+		reflect.ValueOf(&expected).Elem().FieldByName(name).SetUint(6)
+	}
+	actual := backupRPCWaitDelta(current, baseline)
+	if !reflect.DeepEqual(actual, expected) {
+		test.Fatalf("RPC interval counters or active gauges differ: %+v", actual)
+	}
+}
+
 type backupReconciliationStore struct {
 	reconcile.Store
 }
