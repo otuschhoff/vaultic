@@ -1,6 +1,6 @@
 # Metadata Read Amplification Reduction
 
-Status: design and diagnostic instrumentation; no throughput optimization deployed.
+Status: opt-in implementation and private correctness qualification; no production deployment.
 Date: 2026-11-03.
 Related contract: [backup readiness](indexdb-backup-readiness.md).
 
@@ -82,7 +82,7 @@ report labels those means cumulative; unrecorded startup durations are not
 invented. The reporter now subtracts all cumulative timing counters from the
 same baseline and has a focused race-tested regression. Preserve raw captures.
 
-Unresolved questions:
+Unresolved representative-workload questions:
 
 - Which repeated ranges are SST indexes, filters, data blocks or other objects?
 - How much time is raw fetching, crypto queueing, authentication/decryption,
@@ -90,6 +90,137 @@ Unresolved questions:
 - Which ranges miss decoded metadata, block, encrypted-object or decrypted caches?
 - How much backend traffic reaches NFS, and how much reaches physical storage?
 - How do these answers change with concurrency, real batching and cache sizing?
+
+## Implemented Controls
+
+The implementation retains existing defaults. Content readers, unchanged-file
+validators and actual metadata RPCs have separate concurrency controls.
+
+| Control | Default | Behavior |
+| --- | --- | --- |
+| `--unchanged-read-concurrency` | 0 | Synchronous unchanged validation; 1-128 enables a separate bounded pool |
+| `--metadata-read-concurrency` | 4 | Shared size/location RPC limiter; maximum 128 |
+| `--metadata-batch-delay` | 0 | Optional cross-file coalescing; maximum 5ms and 256 unique handles/batch |
+| `--metadata-exact-catalog` | false | Complete pinned-session ID/type/size scan into encrypted admitted working storage |
+| `--metadata-daemon-meta-cache-bytes` | 0 | Startup override; zero preserves the daemon's metadata-cache default |
+| `--metadata-daemon-block-cache-bytes` | 0 | Startup override; zero preserves the daemon's block-cache default |
+| `--metadata-daemon-multi-get` | false | Enables genuine engine MultiGet at startup without enabling bulk-import WAL behavior |
+
+Batching and catalog options require `--metadata-on-demand` and its existing
+scratch/cache or shared-working-policy prerequisites. Startup overrides do not
+reconfigure an already connected daemon. The CLI size-cache budget remains
+distinct from both native engine caches.
+
+Validation jobs and completed pending futures remain charged until completion
+and ordered consumption respectively. Cancellation and consumption release
+future charges exactly once. Workers preserve source ordering and ordinary
+missing-content fallback, recheck source metadata through the configured
+filesystem before reuse, and never allow the error callback to suppress a
+metadata availability failure. Content-reader queues close only after validator
+handoffs finish. The unbuffered validation queue bounds active jobs and the
+single traversal waiter; admission also bounds retained results.
+
+Coalescing deduplicates pending handles, preserves requested ordering and
+duplicates, and flushes on the configured deadline or the batch bound. Joined
+requests share the leader's RPC slot instead of consuming the whole limiter.
+Individual caller cancellation does not cancel an owner-session fetch. Batch
+buffers remain admitted until all consumers finish, and failed requests never
+become cached negatives.
+
+The exact catalog scans `b:` records in pinned 64-record pages and validates the
+session before and after loading. No partial scan activates positive or negative
+answers. ID and blob type remain distinct; zero sizes are valid. Keys are HMAC
+tokens and values are AES-GCM authenticated sizes in the existing RAM/KV/auto
+working store. Local writes override the old view, including an exact negative.
+Corruption, budget exhaustion, cancellation and dead sessions fail closed.
+Catalog entry count, load duration and working-store resources remain reported;
+startup and total-command cost must still include the complete load.
+
+Native optional encryption-read telemetry now exposes requested plaintext and
+rounded ciphertext bytes, origin calls/bytes/time, encryption-header decoding,
+header-cache hits/misses/evictions, crypto queue/service time and read classes.
+Crypto queue timing includes semaphore and executor scheduling. Main critical
+frames subtract the same valid daemon baseline; missing, partial, null or reset
+telemetry is unavailable, not an invented zero. Location-slot wait time is also
+reported separately from location RPC elapsed work.
+
+Scope limits: ciphertext-origin reads can be served by an encrypted cache and
+are not physical NFS/HDD traffic. Encryption counters can include wrapped WAL
+origins and other clients. Header decoding is not full SST decoding; no claim
+is made to isolate SST decode or cache-lock time. No trusted plaintext cache,
+compaction change, metadata relocation or production configuration is introduced.
+
+## Implementation Qualification
+
+Focused race tests cover overlapping unchanged validation, exact restored
+content, missing blobs, source mutation, fatal lookup errors, cancellation,
+hardlinks, symlinks, exclusions and drained working reservations. Cache tests
+cover enabled batching, shared caller cancellation, Close, duplicate ordering,
+bounded batches, failed/partial catalog scans, authenticated malformed sizes,
+RAM/KV/auto storage, budget exhaustion and write-overlay precedence. Native
+read-session tests exercise MultiGet off/on and a catalog excluding post-session
+writes. Injected origin and crypto delays pass two native attribution tests.
+
+The affected index, global and backup-command suites pass race detection.
+The full archiver race suite passes with root DAC-bypass capabilities dropped;
+the unrestricted root run cannot exercise its unreadable-file permission cases.
+Eight private encrypted native workflow cases pass exact restore and reopen:
+metadata caches 128/256/512/1024 MiB, coalesced RPC limits 4/8/16, and exact catalog.
+These 75-file fixtures check correctness and settings, not throughput gains or
+the useful cache/concurrency knee.
+
+`helpers/phase35-m6/metadata_read.py` supervises fresh named 10k `parallel`,
+`coalesced` and `catalog` modes using the previously qualified parent/input
+read-only. Each captures unforced and forced legs in independent checksum-verified
+clones, retains exact restore/reopen/source checks, binary/source pins and process
+observations, and bounds RSS, time, fixture bytes and shared free space. Run it in
+a private mount namespace with core dumps disabled. It refuses existing evidence
+and production activation; captures needing kill fallback are rejected.
+
+The coalesced candidate's supervised 10k pair completed successfully. Its
+settings were 16 unchanged validators, eight actual metadata RPC slots, 1ms
+batch delay, engine MultiGet enabled, 128 MiB metadata cache and 512 MiB block
+cache. Content readers remained 16 and publication groups remained 64.
+
+| Mode | Main Seconds | Command Seconds | Entries/Second | Size RPCs / Handles | Logical Metadata GB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Historical unforced control | 207.267 | 224.284 | 48.247 | 8180 / 9210 | 112.860 |
+| Coalesced unforced candidate | 69.457 | 87.463 | 143.973 | 7695 / 9210 | 205.138 |
+| Historical forced control | 47.484 | 66.944 | 210.597 | 9210 / 9210 | 98.296 |
+| Coalesced forced candidate | 18.158 | 38.298 | 550.732 | 1613 / 9210 | 105.751 |
+
+Both candidate legs observed/scanned all 10,000 entries, processed 9,209 regular
+files with the expected force/parent semantics, stored zero new data blobs, and
+passed exact restore, encrypted reopen, unchanged-source and idle-writer checks.
+Their 1,449 added bytes were ancestor-tree metadata. The outer capture accepted
+cleanup, and a subsequent process check found no candidate daemon survivors.
+Peak combined owned RSS was 42,029,805,568 bytes; the 1,702.534-second outer time
+includes clones, checksum verification and restores, not sustained main backup.
+
+Unforced batching averaged only 1.197 handles/RPC; forced averaged 5.710. Actual
+size RPCs peaked at eight in both legs. Writer prepared-work waits were
+60.028 seconds (86.4% of main) and 9.404 seconds (51.8%). Writer batch time was
+7.759/6.952 seconds; it matters more after the forced path's read waits shrink.
+Unforced encryption counters recorded 141.865 origin worker-seconds, 15.489
+crypto queue worker-seconds and 82.466 crypto service worker-seconds. Forced
+recorded 126.748, 234.734 and 64.672 respectively. These overlap across requests
+and are not additive wall-time shares. Header-cache evictions were zero.
+
+**Verdict: correctness accepted; amplification candidate not qualified.**
+The descriptive main-time ratios are 2.984 and 2.615 versus the historical
+control, but logical metadata work rose by 81.8% and 7.6%. This is evidence of
+latency overlap, not a measured amplification reduction. The combined setting
+change and historical, non-interleaved control cannot isolate causes. Do not
+promote this bundle, raise defaults, or call its short screen sustained acceptance.
+
+Evidence root:
+`/volume2/NASDA2/vaultic-test-m6/metadata-read-fme-cae1-20261103-10k-coalesced`.
+Its immutable `verified-comparison.json` distinguishes capture acceptance from
+amplification, sustained and deployment qualification. All 11 launch pins and
+38 root-relative `METADATA-READ-SHA256SUMS` entries verified. The earlier control
+remains sealed and unchanged. Representative separate-variable cache/caller
+screens, catalog loading cost and naturally ten-minute repeated full-crawl gates
+remain open; correctness fixtures do not substitute for those measurements.
 
 ## Correctness Contract
 

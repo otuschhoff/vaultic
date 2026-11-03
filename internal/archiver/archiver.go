@@ -19,6 +19,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/fs"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 	"github.com/otuschhoff/vaultic/internal/workingkv"
+	"github.com/otuschhoff/vaultic/internal/workingstate"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -100,9 +101,11 @@ type Archiver struct {
 	FS              fs.FS
 	Options         Options
 
-	fileSaver     *fileSaver
-	treeSaver     *treeSaver
-	cwalkManifest interface {
+	fileSaver         *fileSaver
+	treeSaver         *treeSaver
+	validationJobs    chan func(context.Context)
+	validationWorkers sync.WaitGroup
+	cwalkManifest     interface {
 		Names(string) ([]string, bool, error)
 		Close() error
 	}
@@ -168,7 +171,8 @@ type Options struct {
 	// ReadConcurrency sets how many files are read in concurrently. If
 	// it's set to zero, at most two files are read in concurrently (which
 	// turned out to be a good default for most situations).
-	ReadConcurrency uint
+	ReadConcurrency          uint
+	UnchangedReadConcurrency uint
 
 	// SaveTreeConcurrency sets how many trees are marshalled and saved to the
 	// repo concurrently.
@@ -482,8 +486,9 @@ func (arch *Archiver) dirToNodeAndEntries(snPath, dir string, meta fs.File) (nod
 // immediately, then storing a reference directly requires less memory than
 // using the indirection via a channel.
 type futureNode struct {
-	ch  <-chan futureNodeResult
-	res *futureNodeResult
+	ch      <-chan futureNodeResult
+	res     *futureNodeResult
+	release func()
 }
 
 type futureNodeResult struct {
@@ -506,6 +511,10 @@ func newFutureNodeWithResult(res futureNodeResult) futureNode {
 }
 
 func (fn *futureNode) take(ctx context.Context) futureNodeResult {
+	if fn.release != nil {
+		defer fn.release()
+		fn.release = nil
+	}
 	if fn.res != nil {
 		res := fn.res
 		// free result
@@ -717,6 +726,87 @@ func (arch *Archiver) saveRegularFile(
 	debug.Log("  %v regular file", target)
 	if previous != nil && arch.ReuseNode(snPath, target, fileInfo, previous) &&
 		!fileChanged(fileInfo, previous, arch.ChangeIgnoreFlags) {
+		if arch.validationJobs != nil {
+			release, err := workingstate.Reserve(ctx, uint64(len(previous.Content))*32+uint64(len(snPath)+len(target))+4096)
+			if err != nil {
+				return futureNode{}, false, fmt.Errorf("%w: %w", vaultic.ErrMetadataLookup, err)
+			}
+			releaseFuture, err := workingstate.Reserve(ctx, uint64(len(previous.Content))*32+uint64(len(snPath)+len(target))+4096)
+			if err != nil {
+				release()
+				return futureNode{}, false, fmt.Errorf("%w: %w", vaultic.ErrMetadataLookup, err)
+			}
+			future, result := newFutureNode()
+			releaseFutureOnce := sync.OnceFunc(releaseFuture)
+			stopRelease := context.AfterFunc(ctx, releaseFutureOnce)
+			future.release = func() { stopRelease(); releaseFutureOnce() }
+			job := func(workerContext context.Context) {
+				defer release()
+				completion := futureNodeResult{snPath: snPath, target: target}
+				owned := true
+				defer func() {
+					if owned {
+						if closeErr := meta.Close(); closeErr != nil && completion.err == nil {
+							completion.err = closeErr
+						}
+					}
+					result <- completion
+					close(result)
+				}()
+				present, lookupErr := arch.allBlobsPresent(workerContext, previous)
+				if lookupErr != nil {
+					completion.err = lookupErr
+					return
+				}
+				if present {
+					currentInfo, statErr := arch.FS.Lstat(target)
+					if statErr != nil {
+						completion.err = statErr
+						return
+					}
+					if fileChanged(currentInfo, previous, arch.ChangeIgnoreFlags) {
+						read, excluded, readErr := arch.readRegularFile(workerContext, snPath, target, meta, previous, start, &owned, filterError)
+						completion.err = readErr
+						if readErr == nil && !excluded {
+							completion = read.take(workerContext)
+						}
+						return
+					}
+					node, nodeErr := arch.nodeFromFileInfo(snPath, target, meta, false)
+					if nodeErr == nil {
+						node.Content = previous.Content
+						arch.trackItem(snPath, previous, previous, ItemStats{}, time.Since(start))
+						arch.CompleteBlob(previous.Size)
+						arch.reconcileNode(snPath, target, node)
+					}
+					completion.node, completion.err = node, nodeErr
+					return
+				}
+				if missingErr := arch.error(absoluteTarget, errors.Errorf("parts of %v not found in the repository index; storing the file again", target)); missingErr != nil {
+					completion.err = missingErr
+					return
+				}
+				read, excluded, readErr := arch.readRegularFile(workerContext, snPath, target, meta, previous, start, &owned, filterError)
+				if readErr != nil {
+					completion.err = readErr
+					return
+				}
+				if excluded {
+					return
+				}
+				completion = read.take(workerContext)
+			}
+			select {
+			case arch.validationJobs <- job:
+				*closeFile = false
+				return future, false, nil
+			case <-ctx.Done():
+				release()
+				future.release()
+				close(result)
+				return futureNode{}, false, ctx.Err()
+			}
+		}
 		present, err := arch.allBlobsPresent(ctx, previous)
 		if err != nil {
 			return futureNode{}, false, err
@@ -739,6 +829,12 @@ func (arch *Archiver) saveRegularFile(
 			return futureNode{}, false, err
 		}
 	}
+	return arch.readRegularFile(ctx, snPath, target, meta, previous, start, closeFile, filterError)
+}
+
+func (arch *Archiver) readRegularFile(ctx context.Context, snPath, target string, meta fs.File, previous *data.Node,
+	start time.Time, closeFile *bool, filterError func(error) (futureNode, bool, error),
+) (futureNode, bool, error) {
 	if err := meta.MakeReadable(); err != nil {
 		debug.Log("MakeReadable() for %v returned error: %v", target, err)
 		return filterError(err)
@@ -1031,11 +1127,42 @@ func (arch *Archiver) runWorkers(ctx context.Context, wg *errgroup.Group, upload
 		arch.Options.ReadConcurrency)
 	arch.fileSaver.CompleteBlob = arch.CompleteBlob
 	arch.fileSaver.NodeFromFileInfo = arch.nodeFromFileInfo
+	if arch.Options.UnchangedReadConcurrency > 0 {
+		jobs := make(chan func(context.Context))
+		arch.validationJobs = jobs
+		for range arch.Options.UnchangedReadConcurrency {
+			arch.validationWorkers.Add(1)
+			wg.Go(func() error {
+				defer arch.validationWorkers.Done()
+				for {
+					select {
+					case job, open := <-jobs:
+						if !open {
+							return nil
+						}
+						job(ctx)
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}
+			})
+		}
+	}
 
-	arch.treeSaver = newTreeSaver(ctx, wg, arch.Options.SaveTreeConcurrency, uploader, arch.Error)
+	arch.treeSaver = newTreeSaver(ctx, wg, arch.Options.SaveTreeConcurrency, uploader, func(target string, err error) error {
+		if errors.Is(err, vaultic.ErrMetadataLookup) {
+			return err
+		}
+		return arch.Error(target, err)
+	})
 }
 
 func (arch *Archiver) stopWorkers() {
+	if arch.validationJobs != nil {
+		close(arch.validationJobs)
+		arch.validationWorkers.Wait()
+		arch.validationJobs = nil
+	}
 	arch.fileSaver.TriggerShutdown()
 	arch.treeSaver.TriggerShutdown()
 	arch.fileSaver = nil
@@ -1044,6 +1171,9 @@ func (arch *Archiver) stopWorkers() {
 
 // Snapshot saves several targets and returns a snapshot.
 func (arch *Archiver) Snapshot(ctx context.Context, targets []string, snapshotOptions SnapshotOptions) (*data.Snapshot, vaultic.ID, *Summary, error) {
+	if arch.Options.UnchangedReadConcurrency > 128 {
+		return nil, vaultic.ID{}, nil, errors.New("unchanged validation concurrency must not exceed 128")
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, vaultic.ID{}, nil, err
 	}

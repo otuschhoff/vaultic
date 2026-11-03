@@ -23,6 +23,21 @@ import (
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
+func TestMetadataDaemonReadTuningFlags(test *testing.T) {
+	var options Options
+	flags := pflag.NewFlagSet("read-tuning", pflag.ContinueOnError)
+	options.addRepositoryAccessFlags(flags)
+	for _, capacity := range []uint64{128 << 20, 256 << 20, 512 << 20, 1024 << 20} {
+		rtest.OK(test, flags.Set("metadata-daemon-meta-cache-bytes", fmt.Sprint(capacity)))
+		rtest.OK(test, flags.Set("metadata-daemon-block-cache-bytes", "536870912"))
+		rtest.OK(test, flags.Set("metadata-daemon-multi-get", "true"))
+		daemonOptions := metadataDaemonOptions(options, "read-tuning")
+		if daemonOptions.MetaCacheBytes != capacity || daemonOptions.BlockCacheBytes != 512<<20 || !daemonOptions.EngineMultiGet {
+			test.Fatalf("read tuning was not forwarded: %+v", daemonOptions)
+		}
+	}
+}
+
 func TestReadRepo(t *testing.T) {
 	tempDir := rtest.TempDir(t)
 

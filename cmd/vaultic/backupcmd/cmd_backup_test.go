@@ -51,6 +51,10 @@ func TestBackupSnapshotModeValidation(t *testing.T) {
 		{name: "conflict", options: backupOptions{SnapshotPerSource: true, CoalesceSources: true}, wantError: true},
 		{name: "stdin", options: backupOptions{SnapshotPerSource: true, Stdin: true}, wantError: true},
 		{name: "command", options: backupOptions{SnapshotPerSource: true, StdinCommand: true}, wantError: true},
+		{name: "catalog-without-on-demand", options: backupOptions{MetadataExactCatalog: true}, wantError: true},
+		{name: "catalog", options: backupOptions{MetadataExactCatalog: true, MetadataOnDemand: true, MetadataScratch: "scratch", MetadataCacheMiB: 64}},
+		{name: "batch-without-on-demand", options: backupOptions{MetadataBatchDelay: time.Millisecond}, wantError: true},
+		{name: "batch", options: backupOptions{MetadataBatchDelay: time.Millisecond, MetadataOnDemand: true, MetadataScratch: "scratch", MetadataCacheMiB: 64}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := test.options.Check(global.Options{}, []string{"source"})
@@ -97,6 +101,22 @@ func TestBackupCloseReportsLookupStatsAfterCancellation(t *testing.T) {
 	}
 	if record.MessageType != "metadata_lookup_stats" || record.Capacity != 2 || record.SizeRPCs != 7 {
 		t.Fatalf("invalid final stats: %+v", record)
+	}
+}
+
+func TestBackupEncryptionReadDelta(test *testing.T) {
+	baseline := &daemon.EncryptionReadMetrics{Reads: 4, CiphertextOriginNanoseconds: 500, CryptoQueueNanoseconds: 10}
+	current := &daemon.EncryptionReadMetrics{Reads: 6, CiphertextOriginNanoseconds: 900, CryptoQueueNanoseconds: 30}
+	actual := backupEncryptionReadDelta(current, baseline)
+	if actual == nil || actual.Reads != 2 || actual.CiphertextOriginNanoseconds != 400 || actual.CryptoQueueNanoseconds != 20 || current.Reads != 6 || baseline.Reads != 4 {
+		test.Fatalf("invalid or destructive main-interval delta: %+v", actual)
+	}
+	if backupEncryptionReadDelta(nil, baseline) != nil || backupEncryptionReadDelta(current, nil) != nil {
+		test.Fatal("unavailable telemetry must not become a zero baseline")
+	}
+	current.CryptoQueueNanoseconds = 1
+	if backupEncryptionReadDelta(current, baseline) != nil {
+		test.Fatal("counter reset must not expose a partial interval")
 	}
 }
 
@@ -418,6 +438,17 @@ func TestBackupCloseReportsNFSStatsAfterCancellation(t *testing.T) {
 
 func TestMetadataCacheBudgetFlag(t *testing.T) {
 	command := NewCommand(&global.Options{})
+	if limit, err := command.Flags().GetInt("metadata-read-concurrency"); err != nil || limit != 4 {
+		t.Fatalf("default concurrency=%d err=%v", limit, err)
+	}
+	for _, options := range []backupOptions{
+		{UnchangedReadConcurrency: 129}, {MetadataReadConcurrency: -1}, {MetadataReadConcurrency: 129},
+		{MetadataBatchDelay: -time.Millisecond}, {MetadataBatchDelay: 6 * time.Millisecond}, {MetadataBatchDelay: time.Millisecond},
+	} {
+		if err := options.validateParent(); err == nil {
+			t.Fatalf("invalid metadata tuning accepted: %+v", options)
+		}
+	}
 	if budget, err := command.Flags().GetInt("metadata-cache-mib"); err != nil || budget != 64 {
 		t.Fatalf("default budget=%d err=%v", budget, err)
 	}

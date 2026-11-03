@@ -3565,6 +3565,7 @@ type AttributionSnapshot struct {
 	EngineMultiGetProjectedReadsGap_128     uint64                   `protobuf:"varint,55,opt,name=engine_multi_get_projected_reads_gap_128,json=engineMultiGetProjectedReadsGap128,proto3" json:"engine_multi_get_projected_reads_gap_128,omitempty"`
 	EngineMultiGetProjectedReadBytesGap_128 uint64                   `protobuf:"varint,56,opt,name=engine_multi_get_projected_read_bytes_gap_128,json=engineMultiGetProjectedReadBytesGap128,proto3" json:"engine_multi_get_projected_read_bytes_gap_128,omitempty"`
 	EngineMultiGetMetricsAvailable          bool                     `protobuf:"varint,57,opt,name=engine_multi_get_metrics_available,json=engineMultiGetMetricsAvailable,proto3" json:"engine_multi_get_metrics_available,omitempty"`
+	EncryptionReadMetricsJson               []byte                   `protobuf:"bytes,58,opt,name=encryption_read_metrics_json,json=encryptionReadMetricsJson,proto3" json:"encryption_read_metrics_json,omitempty"`
 	unknownFields                           protoimpl.UnknownFields
 	sizeCache                               protoimpl.SizeCache
 }
@@ -3996,6 +3997,13 @@ func (x *AttributionSnapshot) GetEngineMultiGetMetricsAvailable() bool {
 		return x.EngineMultiGetMetricsAvailable
 	}
 	return false
+}
+
+func (x *AttributionSnapshot) GetEncryptionReadMetricsJson() []byte {
+	if x != nil {
+		return x.EncryptionReadMetricsJson
+	}
+	return nil
 }
 
 type DemoteWriterRequest struct {
@@ -6734,7 +6742,7 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	"\x04copy\x18\x0e \x01(\v2%.vaulticdb.v1.ObjectOperationSnapshotR\x04copy\x12=\n" +
 	"\x06rename\x18\x0f \x01(\v2%.vaulticdb.v1.ObjectOperationSnapshotR\x06rename\x122\n" +
 	"\x15retry_delay_available\x18\x10 \x01(\bR\x13retryDelayAvailable\x12B\n" +
-	"\x1dbackground_pressure_available\x18\x11 \x01(\bR\x1bbackgroundPressureAvailable\"\x89\x1f\n" +
+	"\x1dbackground_pressure_available\x18\x11 \x01(\bR\x1bbackgroundPressureAvailable\"\xca\x1f\n" +
 	"\x13AttributionSnapshot\x12C\n" +
 	"\x0eadmission_wait\x18\x01 \x01(\v2\x1c.vaulticdb.v1.TimingSnapshotR\radmissionWait\x12=\n" +
 	"\vfence_check\x18\x02 \x01(\v2\x1c.vaulticdb.v1.TimingSnapshotR\n" +
@@ -6794,7 +6802,8 @@ const file_vaulticdb_v1_daemon_proto_rawDesc = "" +
 	",engine_multi_get_projected_read_bytes_gap_32\x186 \x01(\x04R%engineMultiGetProjectedReadBytesGap32\x12T\n" +
 	"(engine_multi_get_projected_reads_gap_128\x187 \x01(\x04R\"engineMultiGetProjectedReadsGap128\x12]\n" +
 	"-engine_multi_get_projected_read_bytes_gap_128\x188 \x01(\x04R&engineMultiGetProjectedReadBytesGap128\x12J\n" +
-	"\"engine_multi_get_metrics_available\x189 \x01(\bR\x1eengineMultiGetMetricsAvailable\"\xbf\x01\n" +
+	"\"engine_multi_get_metrics_available\x189 \x01(\bR\x1eengineMultiGetMetricsAvailable\x12?\n" +
+	"\x1cencryption_read_metrics_json\x18: \x01(\fR\x19encryptionReadMetricsJson\"\xbf\x01\n" +
 	"\x13DemoteWriterRequest\x12#\n" +
 	"\rrepository_id\x18\x01 \x01(\tR\frepositoryId\x126\n" +
 	"\acontext\x18\x02 \x01(\v2\x1c.vaulticdb.v1.RequestContextR\acontext\x12\x14\n" +

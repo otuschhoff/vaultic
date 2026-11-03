@@ -85,6 +85,7 @@ type Options struct {
 	L0SSTSizeBytes                uint64
 	BlockCacheBytes               uint64
 	MetaCacheBytes                uint64
+	EngineMultiGet                bool
 	WALS3Bucket                   string
 	WALS3Prefix                   string
 	WALS3Endpoint                 string
@@ -418,7 +419,50 @@ type ReadCacheStatus struct {
 	Tiers                    []ReadCacheTierStatus `json:"tiers"`
 }
 
+type EncryptionReadMetrics struct {
+	Reads                       uint64 `json:"reads"`
+	RequestedPlaintextBytes     uint64 `json:"requested_plaintext_bytes"`
+	RoundedCiphertextBytes      uint64 `json:"rounded_ciphertext_bytes"`
+	CiphertextOriginCalls       uint64 `json:"ciphertext_origin_calls"`
+	CiphertextOriginBytes       uint64 `json:"ciphertext_origin_bytes"`
+	CiphertextOriginNanoseconds uint64 `json:"ciphertext_origin_ns"`
+	HeaderDecodeNanoseconds     uint64 `json:"header_decode_ns"`
+	HeaderCacheHits             uint64 `json:"header_cache_hits"`
+	HeaderCacheMisses           uint64 `json:"header_cache_misses"`
+	HeaderCacheEvictions        uint64 `json:"header_cache_evictions"`
+	CryptoJobs                  uint64 `json:"crypto_jobs"`
+	CryptoQueueNanoseconds      uint64 `json:"crypto_queue_ns"`
+	CryptoServiceNanoseconds    uint64 `json:"crypto_service_ns"`
+	HeadReads                   uint64 `json:"head_reads"`
+	FullReads                   uint64 `json:"full_reads"`
+	RangeReads                  uint64 `json:"range_reads"`
+}
+
+func encryptionReadMetrics(encoded []byte) *EncryptionReadMetrics {
+	if len(encoded) == 0 || len(encoded) > 4096 || !bytes.HasPrefix(bytes.TrimSpace(encoded), []byte("{")) {
+		return nil
+	}
+	var result EncryptionReadMetrics
+	if err := json.Unmarshal(encoded, &result); err != nil {
+		return nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		return nil
+	}
+	for _, name := range []string{"reads", "requested_plaintext_bytes", "rounded_ciphertext_bytes",
+		"ciphertext_origin_calls", "ciphertext_origin_bytes", "ciphertext_origin_ns", "header_decode_ns",
+		"header_cache_hits", "header_cache_misses", "header_cache_evictions", "crypto_jobs", "crypto_queue_ns",
+		"crypto_service_ns", "head_reads", "full_reads", "range_reads"} {
+		if value, found := fields[name]; !found || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return nil
+		}
+	}
+	return &result
+}
+
 type AttributionSnapshot struct {
+	EncryptionReads                        *EncryptionReadMetrics  `json:"encryption_reads,omitempty"`
 	AdmissionWait                          TimingSnapshot          `json:"admission_wait"`
 	AdmissionLockHold                      TimingSnapshot          `json:"admission_lock_hold"`
 	FenceCheck                             TimingSnapshot          `json:"fence_check"`
@@ -845,8 +889,10 @@ func prepareDaemonCommand(options Options) (*exec.Cmd, *os.File, *os.File, error
 	if options.MetaCacheBytes > 0 {
 		cmd.Env = append(cmd.Env, "VAULTICDB_META_CACHE_BYTES="+strconv.FormatUint(options.MetaCacheBytes, 10))
 	}
-	if options.FreshBulkImport {
+	if options.EngineMultiGet || options.FreshBulkImport {
 		setEnvironment(&cmd.Env, "VAULTICDB_SLATEDB_MULTIGET", "true")
+	}
+	if options.FreshBulkImport {
 		setEnvironment(&cmd.Env, "VAULTICDB_BULK_IMPORT_LOCAL_WAL_DATA_DIR", options.WALDataDir)
 		if options.BulkImportReadCacheBytes > 0 && os.Getenv("VAULTICDB_READ_CACHE_TIERS") == "" {
 			for name, value := range map[string]string{
@@ -1910,6 +1956,7 @@ func attributionSnapshot(response *vaulticdbv1.AttributionSnapshot) AttributionS
 		EngineMemtableWriteBytes:               response.GetEngineMemtableWriteBytes(),
 		EngineWALFlushBytes:                    response.GetEngineWalFlushBytes(),
 		EngineGetKeys:                          response.GetEngineGetKeys(),
+		EncryptionReads:                        encryptionReadMetrics(response.GetEncryptionReadMetricsJson()),
 		EngineFilterPointPositive:              response.GetEngineFilterPointPositives(),
 		EngineFilterPointNegative:              response.GetEngineFilterPointNegatives(),
 		EngineFilterPointFalsePositive:         response.GetEngineFilterPointFalsePositives(),

@@ -75,6 +75,18 @@ func TestReadSessionBlobSizeMultiGetModes(t *testing.T) {
 			if calls != want {
 				t.Fatalf("engine multi-get calls=%d want=%d", calls, want)
 			}
+			catalog := make(map[vaultic.BlobHandle]vaultic.BlobSize)
+			if err := session.ScanBlobSizes(ctx, func(batch []vaultic.BlobHandle, sizes []vaultic.BlobSize) error {
+				for ordinal, handle := range batch {
+					catalog[handle] = sizes[ordinal]
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if len(catalog) != 2 || catalog[handles[0]] != sizes[0] || catalog[handles[1]] != sizes[1] || catalog[handles[2]].Found {
+				t.Fatalf("catalog escaped the pinned session: %+v", catalog)
+			}
 		})
 	}
 }

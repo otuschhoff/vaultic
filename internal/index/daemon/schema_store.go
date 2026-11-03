@@ -14,6 +14,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/repository/crypto"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/workingstate"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -611,6 +612,43 @@ func (session *ReadSession) ScanPackInventory(ctx context.Context, pending func(
 		return [vaultic.NumBlobTypes]uint64{}, false, err
 	}
 	return sizes, true, nil
+}
+
+func (session *ReadSession) ScanBlobSizes(ctx context.Context, consume func([]vaultic.BlobHandle, []vaultic.BlobSize) error) error {
+	if err := session.Validate(ctx); err != nil {
+		return err
+	}
+	err := session.ScanRange(ctx, []byte("b:"), 64, func(entries []KeyValue) error {
+		release, err := workingstate.Reserve(ctx, uint64(len(entries))*1024+4096)
+		if err != nil {
+			return err
+		}
+		defer release()
+		handles := make([]vaultic.BlobHandle, 0, len(entries)*2)
+		sizes := make([]vaultic.BlobSize, 0, len(entries)*2)
+		for _, entry := range entries {
+			if len(entry.Key) != 34 || string(entry.Key[:2]) != "b:" {
+				return schema.ErrMalformed
+			}
+			decoded, err := decodeBlobSizes(entry.Value)
+			if err != nil {
+				return err
+			}
+			var id vaultic.ID
+			copy(id[:], entry.Key[2:])
+			for blobType, size := range decoded {
+				if size.Found {
+					handles = append(handles, vaultic.BlobHandle{ID: id, Type: vaultic.BlobType(blobType)})
+					sizes = append(sizes, size)
+				}
+			}
+		}
+		return consume(handles, sizes)
+	})
+	if err != nil {
+		return err
+	}
+	return session.Validate(ctx)
 }
 
 func (session *ReadSession) ScanPrefix(ctx context.Context, prefix, afterKey []byte, pageSize uint32) ([]KeyValue, bool, error) {

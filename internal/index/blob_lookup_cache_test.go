@@ -24,6 +24,141 @@ type testBlobLookupSession struct {
 	ctx       context.Context
 	query     func(context.Context, []vaultic.BlobHandle) ([]vaultic.BlobSize, error)
 	locations func(context.Context, vaultic.BlobHandle) ([]*pack.PackedBlob, error)
+	scan      func(context.Context, func([]vaultic.BlobHandle, []vaultic.BlobSize) error) error
+}
+
+func (session *testBlobLookupSession) ScanBlobSizes(ctx context.Context, consume func([]vaultic.BlobHandle, []vaultic.BlobSize) error) error {
+	return session.scan(ctx, consume)
+}
+
+func TestCachedBlobExactCatalog(test *testing.T) {
+	for _, mode := range []workingkv.Mode{workingkv.ModeRAM, workingkv.ModeKV, workingkv.ModeAuto} {
+		test.Run(string(mode), func(test *testing.T) {
+			root := test.TempDir()
+			policy, err := workingkv.NewPolicy(mode, 8<<20, root)
+			if err != nil {
+				test.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(workingkv.WithPolicy(test.Context(), policy))
+			defer cancel()
+			present, absent := vaultic.NewRandomBlobHandle(), vaultic.NewRandomBlobHandle()
+			session := &testBlobLookupSession{ctx: ctx, query: func(context.Context, []vaultic.BlobHandle) ([]vaultic.BlobSize, error) {
+				test.Error("exact catalog performed a size RPC")
+				return nil, errors.New("unexpected RPC")
+			}, scan: func(ctx context.Context, consume func([]vaultic.BlobHandle, []vaultic.BlobSize) error) error {
+				return consume([]vaultic.BlobHandle{present}, []vaultic.BlobSize{{Found: true, Size: 71}})
+			}}
+			lookup, local, err := NewSpillingBlobLookupContext(ctx, session, root, blobLookupCacheEntryBytes, 4)
+			if err != nil {
+				test.Fatal(err)
+			}
+			defer lookup.Close()
+			if err := lookup.loadExactCatalog(ctx, root); err != nil {
+				test.Fatal(err)
+			}
+			sizes, err := lookup.LookupSizesContext(ctx, []vaultic.BlobHandle{absent, present, present})
+			if err != nil || len(sizes) != 3 || sizes[0].Found || sizes[1] != (vaultic.BlobSize{Found: true, Size: 71}) || sizes[1] != sizes[2] {
+				test.Fatalf("catalog mismatch: %+v %v", sizes, err)
+			}
+			local.AddPending(absent, 93)
+			if size, found, err := lookup.LookupSizeContext(ctx, absent); err != nil || !found || size != 93 {
+				test.Fatalf("new write hidden by catalog absence: %d %v %v", size, found, err)
+			}
+			if stats := lookup.Stats(); !stats.ExactCatalog || stats.CatalogEntries != 1 || stats.CatalogLoadNanoseconds == 0 {
+				test.Fatalf("catalog loading cost missing: %+v", stats)
+			}
+			cancel()
+			if _, _, err := lookup.LookupSizeContext(test.Context(), present); !errors.Is(err, context.Canceled) {
+				test.Fatalf("dead read session served catalog: %v", err)
+			}
+			if err := lookup.Close(); err != nil {
+				test.Fatal(err)
+			}
+			if policy.Budget().Used != 0 {
+				test.Fatalf("catalog reservations leaked: %+v", policy.Budget())
+			}
+		})
+	}
+}
+
+func TestCachedBlobExactCatalogFailure(test *testing.T) {
+	failure := errors.New("incomplete scan")
+	session := &testBlobLookupSession{ctx: test.Context(), scan: func(ctx context.Context, consume func([]vaultic.BlobHandle, []vaultic.BlobSize) error) error {
+		if err := consume([]vaultic.BlobHandle{vaultic.NewRandomBlobHandle()}, []vaultic.BlobSize{{Found: true, Size: 9}}); err != nil {
+			return err
+		}
+		return failure
+	}}
+	lookup, err := NewCachedBlobLookup(session, NewLegacyEngine(), blobLookupCacheEntryBytes, 1)
+	if err != nil {
+		test.Fatal(err)
+	}
+	defer lookup.Close()
+	if err := lookup.loadExactCatalog(test.Context(), test.TempDir()); !errors.Is(err, failure) || lookup.catalog != nil {
+		test.Fatalf("partial catalog activated: %v", err)
+	}
+}
+
+func TestCachedBlobExactCatalogCorruptAndBudget(test *testing.T) {
+	for _, exhausted := range []bool{false, true} {
+		test.Run(fmt.Sprint(exhausted), func(test *testing.T) {
+			root := test.TempDir()
+			policy, err := workingkv.NewPolicy(workingkv.ModeRAM, 8<<20, root)
+			if err != nil {
+				test.Fatal(err)
+			}
+			ctx := workingkv.WithPolicy(test.Context(), policy)
+			handle := vaultic.NewRandomBlobHandle()
+			session := &testBlobLookupSession{ctx: ctx, scan: func(ctx context.Context, consume func([]vaultic.BlobHandle, []vaultic.BlobSize) error) error {
+				return consume([]vaultic.BlobHandle{handle}, []vaultic.BlobSize{{Found: true, Size: 1}})
+			}}
+			lookup, err := NewCachedBlobLookupContext(ctx, session, NewLegacyEngine(), blobLookupCacheEntryBytes, 1)
+			if err != nil {
+				test.Fatal(err)
+			}
+			defer lookup.Close()
+			baseline := policy.Budget().Used
+			var held uint64
+			if exhausted {
+				held = policy.Budget().Limit - policy.Budget().Used - 1024
+				if err := policy.Reserve(held); err != nil {
+					test.Fatal(err)
+				}
+				defer policy.Release(held)
+			}
+			err = lookup.loadExactCatalog(ctx, root)
+			if exhausted {
+				if err == nil || lookup.catalog != nil {
+					test.Fatal("over-budget catalog activated")
+				}
+				if policy.Budget().Used != held+baseline {
+					test.Fatalf("partial catalog leaked: %+v", policy.Budget())
+				}
+				return
+			}
+			if err != nil {
+				test.Fatal(err)
+			}
+			key := lookup.catalog.prefix(handle)
+			nonce := make([]byte, lookup.catalog.cipher.NonceSize())
+			invalid := lookup.catalog.cipher.Seal(nonce, nonce, make([]byte, 9), key)
+			if err := lookup.catalog.database.Put(ctx, []workingkv.Entry{{Key: key, Value: invalid}}); err != nil {
+				test.Fatal(err)
+			}
+			if _, _, err := lookup.LookupSizeContext(ctx, handle); !errors.Is(err, workingkv.ErrWorkingStateCorrupt) {
+				test.Fatalf("malformed authenticated catalog size usable: %v", err)
+			}
+			if _, _, err := lookup.LookupSizeContext(ctx, vaultic.NewRandomBlobHandle()); err == nil {
+				test.Fatal("catalog corruption became an exact negative")
+			}
+			if err := lookup.Close(); err != nil {
+				test.Fatal(err)
+			}
+			if policy.Budget().Used != 0 {
+				test.Fatalf("corrupt catalog leaked reservations: %+v", policy.Budget())
+			}
+		})
+	}
 }
 
 func (session *testBlobLookupSession) LookupContext(ctx context.Context, handle vaultic.BlobHandle) ([]*pack.PackedBlob, error) {
@@ -100,6 +235,58 @@ func (session *testBlobLookupSession) Context() context.Context { return session
 
 func (session *testBlobLookupSession) LookupBlobSizesContext(ctx context.Context, handles []vaultic.BlobHandle) ([]vaultic.BlobSize, error) {
 	return session.query(ctx, handles)
+}
+
+func TestCachedBlobLookupCoalescing(test *testing.T) {
+	for _, failure := range []bool{false, true} {
+		test.Run(fmt.Sprint(failure), func(test *testing.T) {
+			var calls atomic.Int32
+			session := &testBlobLookupSession{ctx: test.Context(), query: func(_ context.Context, handles []vaultic.BlobHandle) ([]vaultic.BlobSize, error) {
+				calls.Add(1)
+				if len(handles) > vaultic.BlobLookupBatchSize {
+					test.Errorf("unbounded batch: %d", len(handles))
+				}
+				if failure {
+					return nil, errors.New("coalesced read failed")
+				}
+				sizes := make([]vaultic.BlobSize, len(handles))
+				for ordinal, handle := range handles {
+					sizes[ordinal] = vaultic.BlobSize{Found: handle.ID[0]%2 == 0, Size: uint(handle.ID[0])}
+				}
+				return sizes, nil
+			}}
+			lookup, err := NewCachedBlobLookupContext(test.Context(), session, NewLegacyEngine(), 32*blobLookupCacheEntryBytes, 16, 5*time.Millisecond)
+			if err != nil {
+				test.Fatal(err)
+			}
+			defer lookup.Close()
+			start := make(chan struct{})
+			var workers sync.WaitGroup
+			for ordinal := range 16 {
+				workers.Go(func() {
+					<-start
+					handle := vaultic.NewRandomBlobHandle()
+					handle.ID[0] = byte(ordinal)
+					sizes, lookupErr := lookup.LookupSizesContext(test.Context(), []vaultic.BlobHandle{handle, handle})
+					if failure {
+						if lookupErr == nil {
+							test.Error("shared failure became absence")
+						}
+						return
+					}
+					if lookupErr != nil || len(sizes) != 2 || sizes[0] != sizes[1] || sizes[0].Size != uint(ordinal) || sizes[0].Found != (ordinal%2 == 0) {
+						test.Errorf("coalesced result mismatch: %+v %v", sizes, lookupErr)
+					}
+				})
+			}
+			close(start)
+			workers.Wait()
+			lookup.Close()
+			if !failure && (calls.Load() >= 16 || lookup.Stats().SizeRPCs != uint64(calls.Load()) || lookup.Stats().SizeHandles != 16) {
+				test.Fatalf("requests not coalesced or deduplicated: calls=%d stats=%+v", calls.Load(), lookup.Stats())
+			}
+		})
+	}
 }
 
 func TestCachedBlobLookupRPCDeadlineAttribution(t *testing.T) {
@@ -260,6 +447,13 @@ func TestCachedBlobLookupEvictionAndOverlay(t *testing.T) {
 }
 
 func TestCachedBlobLookupCoalescesIndependentCancellation(t *testing.T) {
+	for _, delay := range []time.Duration{0, 5 * time.Millisecond} {
+		t.Run(delay.String(), func(t *testing.T) { testCachedBlobIndependentCancellation(t, delay) })
+	}
+}
+
+func testCachedBlobIndependentCancellation(t *testing.T, delay time.Duration) {
+	t.Helper()
 	started, release := make(chan struct{}), make(chan struct{})
 	var calls atomic.Int64
 	session := &testBlobLookupSession{ctx: t.Context(), query: func(ctx context.Context, handles []vaultic.BlobHandle) ([]vaultic.BlobSize, error) {
@@ -273,7 +467,7 @@ func TestCachedBlobLookupCoalescesIndependentCancellation(t *testing.T) {
 			return nil, ctx.Err()
 		}
 	}}
-	lookup, err := NewCachedBlobLookup(session, NewLegacyEngine(), 2*blobLookupCacheEntryBytes, 2)
+	lookup, err := NewCachedBlobLookupContext(t.Context(), session, NewLegacyEngine(), 2*blobLookupCacheEntryBytes, 2, delay)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,6 +525,13 @@ func TestCachedBlobLookupOverlayWinsInflightMiss(t *testing.T) {
 }
 
 func TestCachedBlobLookupFailureAndClose(t *testing.T) {
+	for _, delay := range []time.Duration{0, 5 * time.Millisecond} {
+		t.Run(delay.String(), func(t *testing.T) { testCachedBlobFailureAndClose(t, delay) })
+	}
+}
+
+func testCachedBlobFailureAndClose(t *testing.T, delay time.Duration) {
+	t.Helper()
 	for _, malformed := range []bool{false, true} {
 		failure := errors.New("session unavailable")
 		session := &testBlobLookupSession{ctx: t.Context(), query: func(context.Context, []vaultic.BlobHandle) ([]vaultic.BlobSize, error) {
@@ -339,7 +540,7 @@ func TestCachedBlobLookupFailureAndClose(t *testing.T) {
 			}
 			return nil, failure
 		}}
-		lookup, err := NewCachedBlobLookup(session, NewLegacyEngine(), blobLookupCacheEntryBytes, 1)
+		lookup, err := NewCachedBlobLookupContext(t.Context(), session, NewLegacyEngine(), blobLookupCacheEntryBytes, 1, delay)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -358,7 +559,7 @@ func TestCachedBlobLookupFailureAndClose(t *testing.T) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}}
-	lookup, err := NewCachedBlobLookup(session, NewLegacyEngine(), blobLookupCacheEntryBytes, 1)
+	lookup, err := NewCachedBlobLookupContext(t.Context(), session, NewLegacyEngine(), blobLookupCacheEntryBytes, 1, delay)
 	if err != nil {
 		t.Fatal(err)
 	}

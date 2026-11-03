@@ -21,6 +21,7 @@ mod tests {
     struct CountingStore {
         inner: InMemory,
         reads: Mutex<Vec<(String, u64, u64)>>,
+        delay: Option<std::time::Duration>,
     }
 
     impl Display for CountingStore {
@@ -49,6 +50,9 @@ mod tests {
         }
 
         async fn get_opts(&self, location: &Path, options: GetOptions) -> Result<GetResult> {
+            if let Some(delay) = self.delay {
+                tokio::time::sleep(delay).await;
+            }
             let result = self.inner.get_opts(location, options).await?;
             let meta = result.meta.clone();
             let range = result.range.clone();
@@ -93,6 +97,72 @@ mod tests {
         EncryptedObjectStore::new(inner, repository, vec![EncryptionKey::new(1, [7; 32])], 1)
             .unwrap()
             .with_chunk_size(16)
+    }
+
+    #[tokio::test]
+    async fn encrypted_read_work_attribution() {
+        let inner = Arc::new(CountingStore {
+            delay: Some(std::time::Duration::from_millis(5)),
+            ..Default::default()
+        });
+        let encrypted = store(inner.clone(), "attribution");
+        let path = Path::from("metadata");
+        encrypted
+            .put(
+                &path,
+                Bytes::from_static(b"0123456789abcdef0123456789abcdef").into(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            encrypted.get_range(&path, 3..7).await.unwrap(),
+            Bytes::from_static(b"3456")
+        );
+        assert_eq!(
+            encrypted.get_range(&path, 3..7).await.unwrap(),
+            Bytes::from_static(b"3456")
+        );
+        let metrics = encrypted.read_metrics.snapshot();
+        assert_eq!(metrics["reads"], 2);
+        assert_eq!(metrics["range_reads"], 2);
+        assert_eq!(metrics["requested_plaintext_bytes"], 8);
+        assert_eq!(metrics["rounded_ciphertext_bytes"], 64);
+        assert_eq!(metrics["ciphertext_origin_calls"], 3);
+        assert_eq!(
+            metrics["ciphertext_origin_bytes"],
+            (HEADER_SIZE + 64) as u64
+        );
+        assert_eq!(metrics["header_cache_misses"], 1);
+        assert_eq!(metrics["header_cache_hits"], 1);
+        assert_eq!(metrics["crypto_jobs"], 2);
+        assert!(metrics["ciphertext_origin_ns"].as_u64().unwrap() >= 15_000_000);
+        assert!(metrics["crypto_service_ns"].as_u64().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn crypto_queue_and_service_attribution() {
+        let executor = CryptoExecutor::new(1).unwrap();
+        let metrics = Arc::new(EncryptionReadMetrics::default());
+        let held = executor.permits.acquire().await.unwrap();
+        let operation = executor.run_measured(
+            || {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                Ok(17)
+            },
+            Some(metrics.clone()),
+        );
+        tokio::pin!(operation);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(5), &mut operation)
+                .await
+                .is_err()
+        );
+        drop(held);
+        assert_eq!(operation.await.unwrap(), 17);
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot["crypto_jobs"], 1);
+        assert!(snapshot["crypto_queue_ns"].as_u64().unwrap() >= 5_000_000);
+        assert!(snapshot["crypto_service_ns"].as_u64().unwrap() >= 5_000_000);
     }
 
     #[test]

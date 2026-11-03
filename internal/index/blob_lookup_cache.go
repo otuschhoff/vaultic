@@ -37,49 +37,69 @@ type blobLookupBatch struct {
 }
 
 type CachedBlobLookup struct {
-	ctx               context.Context
-	cancel            context.CancelCauseFunc
-	session           blobLookupSession
-	local             *LegacyEngine
-	cache             *lru.Cache[vaultic.BlobHandle, vaultic.BlobSize]
-	cacheMutex        sync.RWMutex
-	cacheCharge       uint64
-	slots             chan struct{}
-	mutex             sync.Mutex
-	pending           map[vaultic.BlobHandle]blobLookupResult
-	workers           sync.WaitGroup
-	written           *writtenBlobStore
-	stats             blobLookupCounters
-	capacity          int
-	policy            *workingkv.Policy
-	charge            uint64
-	closeOnce         sync.Once
-	closeErr          error
-	unregisterEvictor func()
+	catalog                *writtenBlobStore
+	catalogEntries         uint64
+	catalogLoadNanoseconds uint64
+	coalesceDelay          time.Duration
+	collecting             *coalescedBlobLookup
+	ctx                    context.Context
+	cancel                 context.CancelCauseFunc
+	session                blobLookupSession
+	local                  *LegacyEngine
+	cache                  *lru.Cache[vaultic.BlobHandle, vaultic.BlobSize]
+	cacheMutex             sync.RWMutex
+	cacheCharge            uint64
+	slots                  chan struct{}
+	mutex                  sync.Mutex
+	pending                map[vaultic.BlobHandle]blobLookupResult
+	workers                sync.WaitGroup
+	written                *writtenBlobStore
+	stats                  blobLookupCounters
+	capacity               int
+	policy                 *workingkv.Policy
+	charge                 uint64
+	closeOnce              sync.Once
+	closeErr               error
+	unregisterEvictor      func()
+}
+
+type coalescedBlobLookup struct {
+	users   int
+	handles []vaultic.BlobHandle
+	sizes   []vaultic.BlobSize
+	err     error
+	flush   chan struct{}
+	done    chan struct{}
+	release func()
 }
 
 type blobLookupCounters struct {
-	hits                   atomic.Uint64
-	negativeHits           atomic.Uint64
-	misses                 atomic.Uint64
-	evictions              atomic.Uint64
-	peakEntries            atomic.Uint64
-	sizeRPCs               atomic.Uint64
-	sizeHandles            atomic.Uint64
-	sizeRPCNanoseconds     atomic.Uint64
-	sizeRPCActive          atomic.Uint64
-	sizeRPCPeakActive      atomic.Uint64
-	sizeRPCMaxNanoseconds  atomic.Uint64
-	sizeRPCDurationBuckets [8]atomic.Uint64
-	lookupCalls            atomic.Uint64
-	lookupNanoseconds      atomic.Uint64
-	slotWaitNanoseconds    atomic.Uint64
-	resultWaitNanoseconds  atomic.Uint64
-	locationRPCs           atomic.Uint64
-	locationRPCNanoseconds atomic.Uint64
+	hits                        atomic.Uint64
+	negativeHits                atomic.Uint64
+	misses                      atomic.Uint64
+	evictions                   atomic.Uint64
+	peakEntries                 atomic.Uint64
+	sizeRPCs                    atomic.Uint64
+	sizeHandles                 atomic.Uint64
+	sizeRPCNanoseconds          atomic.Uint64
+	sizeRPCActive               atomic.Uint64
+	sizeRPCPeakActive           atomic.Uint64
+	sizeRPCMaxNanoseconds       atomic.Uint64
+	sizeRPCDurationBuckets      [8]atomic.Uint64
+	lookupCalls                 atomic.Uint64
+	lookupNanoseconds           atomic.Uint64
+	slotWaitNanoseconds         atomic.Uint64
+	resultWaitNanoseconds       atomic.Uint64
+	locationRPCs                atomic.Uint64
+	locationRPCNanoseconds      atomic.Uint64
+	locationSlotWaitNanoseconds atomic.Uint64
 }
 
 type BlobLookupStats struct {
+	CatalogEntries                        uint64                          `json:"catalog_entries"`
+	CatalogLoadNanoseconds                uint64                          `json:"catalog_load_nanoseconds"`
+	ExactCatalog                          bool                            `json:"exact_catalog"`
+	CatalogWorkingState                   *telemetry.WorkingStateSnapshot `json:"catalog_working_state,omitempty"`
 	WorkingState                          *telemetry.WorkingStateSnapshot `json:"working_state,omitempty"`
 	CacheHits                             uint64                          `json:"cache_hits"`
 	NegativeHits                          uint64                          `json:"negative_hits"`
@@ -103,17 +123,22 @@ type BlobLookupStats struct {
 	RPCConcurrencyLimit                   int                             `json:"rpc_concurrency_limit"`
 	LocationRPCs                          uint64                          `json:"location_rpcs"`
 	LocationRPCNanoseconds                uint64                          `json:"location_rpc_nanoseconds"`
+	LocationSlotWaitNanoseconds           uint64                          `json:"location_slot_wait_nanoseconds"`
+	CoalesceDelayNanoseconds              uint64                          `json:"coalesce_delay_nanoseconds"`
 }
 
 func (lookup *CachedBlobLookup) Stats() BlobLookupStats {
 	stats := BlobLookupStats{
+		CatalogEntries: lookup.catalogEntries, CatalogLoadNanoseconds: lookup.catalogLoadNanoseconds, ExactCatalog: lookup.catalog != nil,
 		CacheHits: lookup.stats.hits.Load(), NegativeHits: lookup.stats.negativeHits.Load(), CacheMisses: lookup.stats.misses.Load(),
 		Evictions: lookup.stats.evictions.Load(), PeakEntries: lookup.stats.peakEntries.Load(), Capacity: lookup.capacity,
 		AccountedCapacityBytes: lookup.capacity * blobLookupCacheEntryBytes,
 		SizeRPCs:               lookup.stats.sizeRPCs.Load(), SizeHandles: lookup.stats.sizeHandles.Load(),
 		SizeRPCNanoseconds: lookup.stats.sizeRPCNanoseconds.Load(), LocationRPCs: lookup.stats.locationRPCs.Load(),
-		LocationRPCNanoseconds: lookup.stats.locationRPCNanoseconds.Load(),
-		SizeRPCActive:          lookup.stats.sizeRPCActive.Load(), SizeRPCPeakActive: lookup.stats.sizeRPCPeakActive.Load(),
+		LocationRPCNanoseconds:      lookup.stats.locationRPCNanoseconds.Load(),
+		LocationSlotWaitNanoseconds: lookup.stats.locationSlotWaitNanoseconds.Load(),
+		CoalesceDelayNanoseconds:    uint64(lookup.coalesceDelay),
+		SizeRPCActive:               lookup.stats.sizeRPCActive.Load(), SizeRPCPeakActive: lookup.stats.sizeRPCPeakActive.Load(),
 		SizeRPCMaxNanoseconds: lookup.stats.sizeRPCMaxNanoseconds.Load(),
 		LookupCalls:           lookup.stats.lookupCalls.Load(), LookupNanoseconds: lookup.stats.lookupNanoseconds.Load(),
 		SlotWaitNanoseconds: lookup.stats.slotWaitNanoseconds.Load(), ResultWaitNanoseconds: lookup.stats.resultWaitNanoseconds.Load(),
@@ -127,7 +152,42 @@ func (lookup *CachedBlobLookup) Stats() BlobLookupStats {
 		state := lookup.written.WorkingState()
 		stats.WorkingState = &state
 	}
+	if lookup.catalog != nil {
+		state := lookup.catalog.WorkingState()
+		stats.CatalogWorkingState = &state
+	}
 	return stats
+}
+
+func (lookup *CachedBlobLookup) loadExactCatalog(ctx context.Context, directory string) error {
+	source, ok := lookup.session.(interface {
+		ScanBlobSizes(context.Context, func([]vaultic.BlobHandle, []vaultic.BlobSize) error) error
+	})
+	if !ok {
+		return fmt.Errorf("read session does not support an exact blob catalog")
+	}
+	started := time.Now()
+	catalog, err := newWrittenBlobStoreContext(ctx, directory)
+	if err != nil {
+		return err
+	}
+	var entries uint64
+	err = source.ScanBlobSizes(ctx, func(handles []vaultic.BlobHandle, sizes []vaultic.BlobSize) error {
+		if err := catalog.storeSizes(ctx, handles, sizes); err != nil {
+			return err
+		}
+		entries += uint64(len(handles))
+		return nil
+	})
+	if err == nil {
+		err = context.Cause(lookup.ctx)
+	}
+	if err != nil {
+		return errors.Join(err, catalog.Close())
+	}
+	lookup.catalog, lookup.catalogEntries = catalog, entries
+	lookup.catalogLoadNanoseconds = uint64(time.Since(started))
+	return nil
 }
 
 func (lookup *CachedBlobLookup) cachedSize(handle vaultic.BlobHandle) (vaultic.BlobSize, bool) {
@@ -186,13 +246,13 @@ func NewSpillingBlobLookup(session blobLookupSession, directory string, budgetBy
 	return NewSpillingBlobLookupContext(session.Context(), session, directory, budgetBytes, concurrency)
 }
 
-func NewSpillingBlobLookupContext(ctx context.Context, session blobLookupSession, directory string, budgetBytes, concurrency int) (*CachedBlobLookup, *LegacyEngine, error) {
+func NewSpillingBlobLookupContext(ctx context.Context, session blobLookupSession, directory string, budgetBytes, concurrency int, coalesceDelay ...time.Duration) (*CachedBlobLookup, *LegacyEngine, error) {
 	written, err := newWrittenBlobStoreContext(ctx, directory)
 	if err != nil {
 		return nil, nil, err
 	}
 	local := NewLegacyEngine(legacyindex.NewSpillingMasterIndex(written.StoreIndex))
-	lookup, err := NewCachedBlobLookupContext(ctx, session, local, budgetBytes, concurrency)
+	lookup, err := NewCachedBlobLookupContext(ctx, session, local, budgetBytes, concurrency, coalesceDelay...)
 	if err != nil {
 		return nil, nil, errors.Join(err, written.Close())
 	}
@@ -287,13 +347,17 @@ func (lookup *CachedBlobLookup) LookupContext(ctx context.Context, handle vaulti
 		}
 		return local, nil
 	}
+	slotStarted := time.Now()
 	select {
 	case lookup.slots <- struct{}{}:
 	case <-ctx.Done():
+		lookup.stats.locationSlotWaitNanoseconds.Add(uint64(time.Since(slotStarted)))
 		return nil, ctx.Err()
 	case <-lookup.ctx.Done():
+		lookup.stats.locationSlotWaitNanoseconds.Add(uint64(time.Since(slotStarted)))
 		return nil, context.Cause(lookup.ctx)
 	}
+	lookup.stats.locationSlotWaitNanoseconds.Add(uint64(time.Since(slotStarted)))
 	lookup.mutex.Lock()
 	if err := context.Cause(lookup.ctx); err != nil {
 		lookup.mutex.Unlock()
@@ -349,7 +413,17 @@ func NewCachedBlobLookup(session blobLookupSession, local *LegacyEngine, budgetB
 	return NewCachedBlobLookupContext(session.Context(), session, local, budgetBytes, concurrency)
 }
 
-func NewCachedBlobLookupContext(parent context.Context, session blobLookupSession, local *LegacyEngine, budgetBytes, concurrency int) (*CachedBlobLookup, error) {
+func NewCachedBlobLookupContext(parent context.Context, session blobLookupSession, local *LegacyEngine, budgetBytes, concurrency int, coalesceDelay ...time.Duration) (*CachedBlobLookup, error) {
+	var delay time.Duration
+	if len(coalesceDelay) > 1 {
+		return nil, fmt.Errorf("at most one coalescing delay is allowed")
+	}
+	if len(coalesceDelay) == 1 {
+		delay = coalesceDelay[0]
+	}
+	if delay < 0 || delay > 5*time.Millisecond {
+		return nil, fmt.Errorf("blob coalescing delay must be between zero and 5ms")
+	}
 	if session == nil || local == nil || budgetBytes < blobLookupCacheEntryBytes || concurrency < 1 {
 		return nil, fmt.Errorf("blob lookup cache requires a session, write index, positive budget and concurrency")
 	}
@@ -382,7 +456,8 @@ func NewCachedBlobLookupContext(parent context.Context, session blobLookupSessio
 	}
 	ctx, cancel := context.WithCancelCause(owner)
 	lookup := &CachedBlobLookup{ctx: ctx, cancel: cancel, session: session, local: local, cache: cache,
-		slots: make(chan struct{}, concurrency), pending: make(map[vaultic.BlobHandle]blobLookupResult),
+		coalesceDelay: delay,
+		slots:         make(chan struct{}, concurrency), pending: make(map[vaultic.BlobHandle]blobLookupResult),
 		capacity: budgetBytes / blobLookupCacheEntryBytes, policy: policy, charge: charge}
 	if policy != nil {
 		lookup.cacheCharge = uint64(lookup.capacity) * blobLookupCacheEntryBytes
@@ -426,6 +501,28 @@ func (lookup *CachedBlobLookup) LookupSizesContext(ctx context.Context, handles 
 	if err != nil {
 		lookup.mutex.Unlock()
 		return nil, err
+	}
+	if lookup.catalog != nil {
+		defer lookup.mutex.Unlock()
+		for ordinal, handle := range handles {
+			if results[ordinal].Found {
+				continue
+			}
+			results[ordinal], err = lookup.catalog.lookupSize(ctx, handle)
+			if err != nil {
+				if ctx.Err() == nil {
+					lookup.cancel(err)
+				}
+				return nil, err
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := context.Cause(lookup.ctx); err != nil {
+			return nil, err
+		}
+		return results, nil
 	}
 	cached := true
 	for ordinal, handle := range handles {
@@ -555,7 +652,103 @@ func (lookup *CachedBlobLookup) fetch(handles []vaultic.BlobHandle, batch *blobL
 	if batch.release != nil {
 		defer batch.release()
 	}
-	defer func() { <-lookup.slots }()
+	slotOwned := true
+	defer func() {
+		if slotOwned {
+			<-lookup.slots
+		}
+	}()
+	var sizes []vaultic.BlobSize
+	var err error
+	if lookup.coalesceDelay > 0 {
+		sizes, err = lookup.coalescedSizes(handles, &slotOwned)
+	} else {
+		sizes, err = lookup.querySizes(handles)
+	}
+	lookup.mutex.Lock()
+	defer lookup.mutex.Unlock()
+	if err == nil {
+		err = context.Cause(lookup.ctx)
+	}
+	if err != nil {
+		lookup.cancel(err)
+	}
+	batch.err = err
+	if err == nil {
+		batch.sizes = sizes
+	}
+	for ordinal, handle := range handles {
+		if err == nil {
+			lookup.cacheSize(handle, sizes[ordinal])
+		}
+		delete(lookup.pending, handle)
+	}
+	close(batch.done)
+}
+
+func (lookup *CachedBlobLookup) coalescedSizes(handles []vaultic.BlobHandle, slotOwned *bool) ([]vaultic.BlobSize, error) {
+	lookup.mutex.Lock()
+	group := lookup.collecting
+	if group != nil && len(group.handles)+len(handles) > vaultic.BlobLookupBatchSize {
+		close(group.flush)
+		lookup.collecting = nil
+		group = nil
+	}
+	leader := group == nil
+	if leader {
+		release, err := workingstate.Reserve(lookup.ctx, uint64(vaultic.BlobLookupBatchSize)*128+4096)
+		if err != nil {
+			lookup.mutex.Unlock()
+			return nil, err
+		}
+		group = &coalescedBlobLookup{handles: make([]vaultic.BlobHandle, 0, vaultic.BlobLookupBatchSize), flush: make(chan struct{}), done: make(chan struct{}), release: release}
+		lookup.collecting = group
+	}
+	start := len(group.handles)
+	group.users++
+	group.handles = append(group.handles, handles...)
+	if len(group.handles) == vaultic.BlobLookupBatchSize {
+		close(group.flush)
+		lookup.collecting = nil
+	}
+	lookup.mutex.Unlock()
+	if !leader {
+		<-lookup.slots
+		*slotOwned = false
+	}
+	defer func() {
+		lookup.mutex.Lock()
+		group.users--
+		if group.users == 0 {
+			group.release()
+		}
+		lookup.mutex.Unlock()
+	}()
+	if leader {
+		timer := time.NewTimer(lookup.coalesceDelay)
+		select {
+		case <-timer.C:
+		case <-group.flush:
+		case <-lookup.ctx.Done():
+		}
+		timer.Stop()
+		lookup.mutex.Lock()
+		if lookup.collecting == group {
+			lookup.collecting = nil
+		}
+		lookup.mutex.Unlock()
+		group.sizes, group.err = lookup.querySizes(group.handles)
+		close(group.done)
+	} else {
+		<-group.done
+	}
+	if group.err != nil {
+		return nil, group.err
+	}
+	return append([]vaultic.BlobSize(nil), group.sizes[start:start+len(handles)]...), nil
+}
+
+func (lookup *CachedBlobLookup) querySizes(handles []vaultic.BlobHandle) ([]vaultic.BlobSize, error) {
 	started := time.Now()
 	lookup.stats.sizeRPCs.Add(1)
 	lookup.stats.sizeHandles.Add(uint64(len(handles)))
@@ -589,25 +782,7 @@ func (lookup *CachedBlobLookup) fetch(handles []vaultic.BlobHandle, batch *blobL
 	if err == nil && len(sizes) != len(handles) {
 		err = fmt.Errorf("blob lookup returned %d results for %d handles", len(sizes), len(handles))
 	}
-	lookup.mutex.Lock()
-	defer lookup.mutex.Unlock()
-	if err == nil {
-		err = context.Cause(lookup.ctx)
-	}
-	if err != nil {
-		lookup.cancel(err)
-	}
-	batch.err = err
-	if err == nil {
-		batch.sizes = sizes
-	}
-	for ordinal, handle := range handles {
-		if err == nil {
-			lookup.cacheSize(handle, sizes[ordinal])
-		}
-		delete(lookup.pending, handle)
-	}
-	close(batch.done)
+	return sizes, err
 }
 
 func (lookup *CachedBlobLookup) AddPendingContext(ctx context.Context, handle vaultic.BlobHandle, size uint) (bool, error) {
@@ -651,6 +826,9 @@ func (lookup *CachedBlobLookup) Close() error {
 		}
 		if lookup.written != nil {
 			lookup.closeErr = errors.Join(lookup.written.Close(), lookup.local.Close())
+		}
+		if lookup.catalog != nil {
+			lookup.closeErr = errors.Join(lookup.closeErr, lookup.catalog.Close())
 		}
 		if lookup.policy != nil {
 			lookup.policy.Release(lookup.charge)

@@ -5,7 +5,11 @@ use std::{
     env,
     fmt::{Debug, Display, Formatter},
     ops::Range,
-    sync::{Arc, Mutex, RwLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, RwLock,
+    },
+    time::Instant,
 };
 
 use async_trait::async_trait;
@@ -63,12 +67,83 @@ pub fn is_integrity_error(error: &(dyn std::error::Error + 'static)) -> bool {
 
 #[derive(Clone)]
 pub(crate) struct EncryptedObjectStore {
+    read_metrics: Arc<EncryptionReadMetrics>,
     inner: Arc<dyn ObjectStore>,
     repository_id: RepositoryId,
     keyring: Arc<RwLock<Keyring>>,
     crypto: Arc<CryptoExecutor>,
     headers: Arc<Mutex<HeaderCache>>,
     chunk_size: usize,
+}
+
+#[derive(Default)]
+struct EncryptionReadMetrics {
+    reads: AtomicU64,
+    requested_plaintext_bytes: AtomicU64,
+    rounded_ciphertext_bytes: AtomicU64,
+    ciphertext_origin_calls: AtomicU64,
+    ciphertext_origin_bytes: AtomicU64,
+    ciphertext_origin_ns: AtomicU64,
+    header_decode_ns: AtomicU64,
+    header_cache_hits: AtomicU64,
+    header_cache_misses: AtomicU64,
+    header_cache_evictions: AtomicU64,
+    crypto_jobs: AtomicU64,
+    crypto_queue_ns: AtomicU64,
+    crypto_service_ns: AtomicU64,
+    head_reads: AtomicU64,
+    full_reads: AtomicU64,
+    range_reads: AtomicU64,
+}
+
+struct ReadTiming<'counter> {
+    counter: &'counter AtomicU64,
+    started: Instant,
+}
+
+impl<'counter> ReadTiming<'counter> {
+    fn new(counter: &'counter AtomicU64) -> Self {
+        Self {
+            counter,
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Drop for ReadTiming<'_> {
+    fn drop(&mut self) {
+        self.counter.fetch_add(
+            self.started
+                .elapsed()
+                .as_nanos()
+                .try_into()
+                .unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+    }
+}
+
+impl EncryptionReadMetrics {
+    fn snapshot(&self) -> serde_json::Value {
+        serde_json::json!({
+            "reads": self.reads.load(Ordering::Relaxed),
+            "requested_plaintext_bytes": self.requested_plaintext_bytes.load(Ordering::Relaxed),
+            "rounded_ciphertext_bytes": self.rounded_ciphertext_bytes.load(Ordering::Relaxed),
+            "ciphertext_origin_calls": self.ciphertext_origin_calls.load(Ordering::Relaxed),
+            "ciphertext_origin_bytes": self.ciphertext_origin_bytes.load(Ordering::Relaxed),
+            "ciphertext_origin_ns": self.ciphertext_origin_ns.load(Ordering::Relaxed),
+            "header_decode_ns": self.header_decode_ns.load(Ordering::Relaxed),
+            "header_cache_hits": self.header_cache_hits.load(Ordering::Relaxed),
+            "header_cache_misses": self.header_cache_misses.load(Ordering::Relaxed),
+            "header_cache_evictions": self.header_cache_evictions.load(Ordering::Relaxed),
+            "crypto_jobs": self.crypto_jobs.load(Ordering::Relaxed),
+            "crypto_queue_ns": self.crypto_queue_ns.load(Ordering::Relaxed),
+            "crypto_service_ns": self.crypto_service_ns.load(Ordering::Relaxed),
+            "head_reads": self.head_reads.load(Ordering::Relaxed),
+            "full_reads": self.full_reads.load(Ordering::Relaxed),
+            "range_reads": self.range_reads.load(Ordering::Relaxed),
+        })
+    }
 }
 
 #[derive(Default)]
@@ -132,6 +207,19 @@ impl CryptoExecutor {
         T: Send + 'static,
         F: FnOnce() -> Result<T> + Send + 'static,
     {
+        self.run_measured(operation, None).await
+    }
+
+    async fn run_measured<T, F>(
+        &self,
+        operation: F,
+        metrics: Option<Arc<EncryptionReadMetrics>>,
+    ) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T> + Send + 'static,
+    {
+        let queued = Instant::now();
         let permit = Arc::clone(&self.permits)
             .acquire_owned()
             .await
@@ -139,7 +227,18 @@ impl CryptoExecutor {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         self.pool.spawn(move || {
             let _permit = permit;
-            let _ = sender.send(operation());
+            let result = if let Some(metrics) = metrics {
+                metrics.crypto_jobs.fetch_add(1, Ordering::Relaxed);
+                metrics.crypto_queue_ns.fetch_add(
+                    queued.elapsed().as_nanos().try_into().unwrap_or(u64::MAX),
+                    Ordering::Relaxed,
+                );
+                let _service = ReadTiming::new(&metrics.crypto_service_ns);
+                operation()
+            } else {
+                operation()
+            };
+            let _ = sender.send(result);
         });
         receiver
             .await
@@ -278,6 +377,7 @@ impl EncryptedObjectStore {
         let crypto = Arc::new(CryptoExecutor::new(configured_crypto_threads()?)?);
         Ok(Self {
             inner,
+            read_metrics: Arc::new(EncryptionReadMetrics::default()),
             repository_id: repository_id.into(),
             keyring: Arc::new(RwLock::new(Keyring {
                 keys,
@@ -292,6 +392,7 @@ impl EncryptedObjectStore {
     pub(crate) fn with_inner(&self, inner: Arc<dyn ObjectStore>) -> Self {
         Self {
             inner,
+            read_metrics: self.read_metrics.clone(),
             repository_id: self.repository_id.clone(),
             keyring: self.keyring.clone(),
             crypto: self.crypto.clone(),
@@ -325,15 +426,33 @@ impl EncryptedObjectStore {
     }
 
     fn cached_header(&self, location: &Path) -> Option<CachedHeader> {
-        self.headers
+        let cached = self
+            .headers
             .lock()
             .ok()
-            .and_then(|headers| headers.get(location))
+            .and_then(|headers| headers.get(location));
+        if cached.is_some() {
+            self.read_metrics
+                .header_cache_hits
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.read_metrics
+                .header_cache_misses
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        cached
     }
 
     fn cache_header(&self, location: &Path, header: Header, meta: &ObjectMeta) {
         if let Ok(mut headers) = self.headers.lock() {
+            let evicts = headers.entries.len() == HEADER_CACHE_ENTRIES
+                && !headers.entries.contains_key(location);
             headers.insert(location.clone(), header, meta.clone());
+            if evicts {
+                self.read_metrics
+                    .header_cache_evictions
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -456,7 +575,10 @@ impl EncryptedObjectStore {
         let store = self.clone();
         let location = location.clone();
         self.crypto
-            .run(move || store.decrypt_chunks_sync(&location, header, first_chunk, ciphertext))
+            .run_measured(
+                move || store.decrypt_chunks_sync(&location, header, first_chunk, ciphertext),
+                Some(self.read_metrics.clone()),
+            )
             .await
     }
 
@@ -602,11 +724,21 @@ impl EncryptedObjectStore {
     )> {
         options.range = Some(GetRange::Bounded(0..HEADER_SIZE as u64));
         options.head = false;
+        self.read_metrics
+            .ciphertext_origin_calls
+            .fetch_add(1, Ordering::Relaxed);
+        let fetch = ReadTiming::new(&self.read_metrics.ciphertext_origin_ns);
         let result = self.inner.get_opts(location, options).await?;
         let meta = result.meta.clone();
         let attributes = result.attributes.clone();
         let extensions = result.extensions.clone();
-        let header = decode_header(&result.bytes().await?)?;
+        let bytes = result.bytes().await?;
+        self.read_metrics
+            .ciphertext_origin_bytes
+            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        drop(fetch);
+        let _decode = ReadTiming::new(&self.read_metrics.header_decode_ns);
+        let header = decode_header(&bytes)?;
         Ok((header, meta, attributes, extensions))
     }
 }
@@ -657,8 +789,18 @@ impl ObjectStore for EncryptedObjectStore {
     }
 
     async fn get_opts(&self, location: &Path, mut options: GetOptions) -> Result<GetResult> {
+        self.read_metrics.reads.fetch_add(1, Ordering::Relaxed);
         let requested_range = options.range.take();
         let head = options.head;
+        if head {
+            self.read_metrics.head_reads.fetch_add(1, Ordering::Relaxed);
+        } else if requested_range.is_some() {
+            self.read_metrics
+                .range_reads
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.read_metrics.full_reads.fetch_add(1, Ordering::Relaxed);
+        }
         let mut header_response = None;
         let mut cached_meta = None;
         let mut header = if head {
@@ -694,6 +836,9 @@ impl ObjectStore for EncryptedObjectStore {
             };
             (Bytes::new(), meta, attributes, extensions)
         } else {
+            self.read_metrics
+                .requested_plaintext_bytes
+                .fetch_add(range.len() as u64, Ordering::Relaxed);
             let first_chunk = range.start / header.chunk_size;
             let last_chunk = (range.end - 1) / header.chunk_size;
             let ciphertext_start = encrypted_chunk_offset(header, first_chunk)?;
@@ -704,6 +849,14 @@ impl ObjectStore for EncryptedObjectStore {
                 ciphertext_start as u64..ciphertext_end as u64,
             ));
             options.head = false;
+            self.read_metrics.rounded_ciphertext_bytes.fetch_add(
+                (ciphertext_end - ciphertext_start) as u64,
+                Ordering::Relaxed,
+            );
+            self.read_metrics
+                .ciphertext_origin_calls
+                .fetch_add(1, Ordering::Relaxed);
+            let fetch = ReadTiming::new(&self.read_metrics.ciphertext_origin_ns);
             let encrypted = self.inner.get_opts(location, options).await?;
             if cached_meta
                 .as_ref()
@@ -715,8 +868,13 @@ impl ObjectStore for EncryptedObjectStore {
             let encrypted_meta = encrypted.meta.clone();
             let attributes = encrypted.attributes.clone();
             let extensions = encrypted.extensions.clone();
+            let ciphertext = encrypted.bytes().await?;
+            self.read_metrics
+                .ciphertext_origin_bytes
+                .fetch_add(ciphertext.len() as u64, Ordering::Relaxed);
+            drop(fetch);
             let chunks = self
-                .decrypt_chunks(location, header, first_chunk, encrypted.bytes().await?)
+                .decrypt_chunks(location, header, first_chunk, ciphertext)
                 .await?;
             let relative_start = range.start - first_chunk * header.chunk_size;
             let payload = if range.len() == chunks.len() {

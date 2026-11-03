@@ -60,54 +60,57 @@ type Options struct {
 	AzureKeyVaultTimeout       time.Duration
 	KeyHint                    string
 	// MasterKey* open the repository directly with a master key (no password).
-	MasterKey                    string
-	MasterKeyFile                string
-	MasterKeyCommand             string
-	MetadataKeyInDB              bool
-	MetadataDaemonSocket         string
-	MetadataDaemonPath           string
-	MetadataDaemonDataDir        string
-	MetadataDaemonObjectStore    string
-	MetadataDaemonS3Bucket       string
-	MetadataDaemonS3Prefix       string
-	MetadataDaemonS3Endpoint     string
-	MetadataDaemonS3Region       string
-	MetadataDaemonS3Provider     string
-	MetadataDaemonS3BucketLookup string
-	MetadataEncryptionMode       string
-	MetadataPassphraseFile       string
-	MetadataAzureTokenFile       string
-	MetadataGCPTokenFile         string
-	MetadataVaultTokenFile       string
-	MetadataPKCS11PINFile        string
-	MetadataRecoveryUnlock       bool
-	MetadataLossRecovery         bool
-	KeyBrokerSocket              string
-	KeyBrokerReleaseManifest     string
-	KeyBrokerLeaseDuration       time.Duration
-	StorageTokenTTL              time.Duration
-	StorageTokenRenewMargin      time.Duration
-	BrokerOutageGrace            time.Duration
-	StorageCredentialTier        string
-	StorageLockCredential        bool
-	Quiet                        bool
-	Verbose                      int
-	LogFile                      string
-	LogLevel                     string
-	NoProgress                   bool
-	ProgressInterval             time.Duration
-	NoLock                       bool
-	RetryLock                    time.Duration
-	JSON                         bool
-	CacheDir                     string
-	NoCache                      bool
-	CleanupCache                 bool
-	Compression                  repository.CompressionMode
-	PackSize                     uint
-	TreePackSize                 uint
-	DataPackSize                 uint
-	NoExtraVerify                bool
-	InsecureNoPassword           bool
+	MasterKey                     string
+	MasterKeyFile                 string
+	MasterKeyCommand              string
+	MetadataKeyInDB               bool
+	MetadataDaemonSocket          string
+	MetadataDaemonPath            string
+	MetadataDaemonDataDir         string
+	MetadataDaemonObjectStore     string
+	MetadataDaemonMetaCacheBytes  uint64
+	MetadataDaemonBlockCacheBytes uint64
+	MetadataDaemonMultiGet        bool
+	MetadataDaemonS3Bucket        string
+	MetadataDaemonS3Prefix        string
+	MetadataDaemonS3Endpoint      string
+	MetadataDaemonS3Region        string
+	MetadataDaemonS3Provider      string
+	MetadataDaemonS3BucketLookup  string
+	MetadataEncryptionMode        string
+	MetadataPassphraseFile        string
+	MetadataAzureTokenFile        string
+	MetadataGCPTokenFile          string
+	MetadataVaultTokenFile        string
+	MetadataPKCS11PINFile         string
+	MetadataRecoveryUnlock        bool
+	MetadataLossRecovery          bool
+	KeyBrokerSocket               string
+	KeyBrokerReleaseManifest      string
+	KeyBrokerLeaseDuration        time.Duration
+	StorageTokenTTL               time.Duration
+	StorageTokenRenewMargin       time.Duration
+	BrokerOutageGrace             time.Duration
+	StorageCredentialTier         string
+	StorageLockCredential         bool
+	Quiet                         bool
+	Verbose                       int
+	LogFile                       string
+	LogLevel                      string
+	NoProgress                    bool
+	ProgressInterval              time.Duration
+	NoLock                        bool
+	RetryLock                     time.Duration
+	JSON                          bool
+	CacheDir                      string
+	NoCache                       bool
+	CleanupCache                  bool
+	Compression                   repository.CompressionMode
+	PackSize                      uint
+	TreePackSize                  uint
+	DataPackSize                  uint
+	NoExtraVerify                 bool
+	InsecureNoPassword            bool
 
 	// RepoHot is the location of the hot part of a hot/cold repository
 	// (empty for a normal repository).
@@ -292,6 +295,9 @@ func (globalOptions *Options) addRepositoryAccessFlags(f *pflag.FlagSet) {
 	f.StringVar(&globalOptions.MetadataDaemonPath, "metadata-daemon-path", "", "start this vaulticdb binary for key-in-DB unlock")
 	f.StringVar(&globalOptions.MetadataDaemonDataDir, "metadata-daemon-data-dir", "", "local vaulticdb data directory for key-in-DB unlock")
 	f.StringVar(&globalOptions.MetadataDaemonObjectStore, "metadata-daemon-object-store", "", "vaulticdb object store for key-in-DB unlock")
+	f.Uint64Var(&globalOptions.MetadataDaemonMetaCacheBytes, "metadata-daemon-meta-cache-bytes", 0, "index/filter cache capacity when starting a daemon (zero uses its default)")
+	f.Uint64Var(&globalOptions.MetadataDaemonBlockCacheBytes, "metadata-daemon-block-cache-bytes", 0, "block cache capacity when starting a daemon (zero uses its default)")
+	f.BoolVar(&globalOptions.MetadataDaemonMultiGet, "metadata-daemon-multi-get", false, "enable SlateDB engine multi-get when starting a daemon")
 	f.StringVar(&globalOptions.MetadataDaemonS3Bucket, "metadata-daemon-s3-bucket", "", "vaulticdb S3 bucket for key-in-DB unlock")
 	f.StringVar(&globalOptions.MetadataDaemonS3Prefix, "metadata-daemon-s3-prefix", "", "vaulticdb S3 prefix for key-in-DB unlock")
 	f.StringVar(&globalOptions.MetadataDaemonS3Endpoint, "metadata-daemon-s3-endpoint", "", "vaulticdb S3 endpoint for key-in-DB unlock")

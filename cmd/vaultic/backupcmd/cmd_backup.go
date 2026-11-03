@@ -112,6 +112,10 @@ type backupOptions struct {
 	UseFsSnapshot             bool
 	DryRun                    bool
 	ReadConcurrency           uint
+	UnchangedReadConcurrency  uint
+	MetadataReadConcurrency   int
+	MetadataBatchDelay        time.Duration
+	MetadataExactCatalog      bool
 	NoScan                    bool
 	UseCWalk                  bool
 	NoCWalk                   bool
@@ -192,6 +196,10 @@ func (options *backupOptions) AddFlags(f *pflag.FlagSet) {
 	f.BoolVar(&options.DeleteNever, "delete-never", false, "mark the snapshot as never deletable by forget (delete protection)")
 	f.StringVar(&options.DeleteAfter, "delete-after", "", "mark the snapshot as not deletable before a `duration` from now (e.g. 10d; delete protection)")
 	f.UintVar(&options.ReadConcurrency, "read-concurrency", 0, "read `n` files concurrently (default: $VAULTIC_READ_CONCURRENCY or 2)")
+	f.UintVar(&options.UnchangedReadConcurrency, "unchanged-read-concurrency", 0, "validate `n` unchanged files concurrently (0 uses synchronous validation)")
+	f.IntVar(&options.MetadataReadConcurrency, "metadata-read-concurrency", 4, "limit concurrent metadata lookup requests to `n`")
+	f.DurationVar(&options.MetadataBatchDelay, "metadata-batch-delay", 0, "coalesce on-demand metadata reads for up to `duration` (maximum 5ms)")
+	f.BoolVar(&options.MetadataExactCatalog, "metadata-exact-catalog", false, "load a complete pinned blob-size catalog into encrypted working storage")
 	f.StringVarP(
 		&options.Host,
 		"host",
@@ -606,6 +614,18 @@ func (options backupOptions) validateDeferred() error {
 }
 
 func (options backupOptions) validateParent() error {
+	if options.UnchangedReadConcurrency > 128 || options.MetadataReadConcurrency < 0 || options.MetadataReadConcurrency > 128 {
+		return errors.Fatal("metadata and unchanged read concurrency must not exceed 128")
+	}
+	if options.MetadataBatchDelay < 0 || options.MetadataBatchDelay > 5*time.Millisecond {
+		return errors.Fatal("--metadata-batch-delay must be between zero and 5ms")
+	}
+	if !options.MetadataOnDemand && options.MetadataBatchDelay != 0 {
+		return errors.Fatal("--metadata-batch-delay requires --metadata-on-demand")
+	}
+	if options.MetadataExactCatalog && !options.MetadataOnDemand {
+		return errors.Fatal("--metadata-exact-catalog requires --metadata-on-demand")
+	}
 	if options.MetadataOnDemand {
 		if options.MetadataScratch == "" && !options.workingMemorySelected {
 			return errors.Fatal("--metadata-on-demand requires --metadata-scratch")

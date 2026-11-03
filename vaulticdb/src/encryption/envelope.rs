@@ -214,6 +214,10 @@ impl KeyManager {
         Arc::new(self.encrypted.with_inner(inner))
     }
 
+    pub fn read_metrics(&self) -> serde_json::Value {
+        self.encrypted.read_metrics.snapshot()
+    }
+
     pub async fn publish_capsule_mirror(
         &self,
         capsule: &super::recovery_capsule::RecoveryCapsule,

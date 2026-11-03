@@ -267,6 +267,8 @@ type BackupLookupOptions struct {
 	ScratchDirectory string
 	CacheBytes       int
 	Concurrency      int
+	CoalesceDelay    time.Duration
+	ExactCatalog     bool
 }
 
 func NewBackupDaemonEngine(ctx context.Context, client *daemon.Client, options BackupLookupOptions) (*DaemonEngine, error) {
@@ -277,9 +279,14 @@ func NewBackupDaemonEngine(ctx context.Context, client *daemon.Client, options B
 	if err != nil {
 		return nil, err
 	}
-	lookup, local, err := NewSpillingBlobLookupContext(ctx, session, options.ScratchDirectory, options.CacheBytes, options.Concurrency)
+	lookup, local, err := NewSpillingBlobLookupContext(ctx, session, options.ScratchDirectory, options.CacheBytes, options.Concurrency, options.CoalesceDelay)
 	if err != nil {
 		return nil, errors.Join(err, session.Close(context.WithoutCancel(ctx)))
+	}
+	if options.ExactCatalog {
+		if err := lookup.loadExactCatalog(ctx, options.ScratchDirectory); err != nil {
+			return nil, errors.Join(err, lookup.Close(), session.Close(context.WithoutCancel(ctx)))
+		}
 	}
 	engine := NewDaemonEngine(client, local)
 	engine.session, engine.lookup = session, lookup

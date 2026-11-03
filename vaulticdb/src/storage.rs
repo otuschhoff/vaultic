@@ -1874,7 +1874,13 @@ impl Storage {
                     {
                         Ok(db) => db,
                         Err(error) => {
-                            recovery::diagnose_if_needed(&error, &path, object_store.clone(), wal_object_store.clone()).await;
+                            recovery::diagnose_if_needed(
+                                &error,
+                                &path,
+                                object_store.clone(),
+                                wal_object_store.clone(),
+                            )
+                            .await;
                             let primary = error.context("open SlateDB database");
                             return Err(failed_open_cleanup(
                                 primary,
@@ -1895,7 +1901,13 @@ impl Storage {
                         {
                             Ok(reader) => reader,
                             Err(error) => {
-                                recovery::diagnose_if_needed(&error, &path, object_store.clone(), wal_object_store.clone()).await;
+                                recovery::diagnose_if_needed(
+                                    &error,
+                                    &path,
+                                    object_store.clone(),
+                                    wal_object_store.clone(),
+                                )
+                                .await;
                                 let primary =
                                     error.context("open SlateDB database as non-fencing reader");
                                 return Err(failed_open_cleanup(
@@ -2102,6 +2114,13 @@ impl Storage {
 
     pub(crate) fn attribution(&self) -> &StorageAttribution {
         &self.attribution
+    }
+
+    pub(crate) fn encryption_read_metrics_json(&self) -> Vec<u8> {
+        self.key_manager
+            .as_ref()
+            .and_then(|manager| serde_json::to_vec(&manager.read_metrics()).ok())
+            .unwrap_or_default()
     }
 
     pub(crate) fn engine_metrics_snapshot(&self) -> EngineMetricsSnapshot {

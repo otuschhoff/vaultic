@@ -1,11 +1,32 @@
 package daemon
 
 import (
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	vaulticdbv1 "github.com/otuschhoff/vaultic/internal/index/proto/vaulticdb/v1"
 )
+
+func TestEncryptionReadMetricsCompatibility(test *testing.T) {
+	for _, encoded := range []string{"", "null", "[]", "{", "{}", `{"reads":-1}`, `{"reads":1}`, strings.Repeat(" ", 4097)} {
+		if metrics := encryptionReadMetrics([]byte(encoded)); metrics != nil {
+			test.Fatalf("invalid optional telemetry accepted: %q", encoded)
+		}
+	}
+	encoded, err := json.Marshal(EncryptionReadMetrics{Reads: 2, RequestedPlaintextBytes: 7, RoundedCiphertextBytes: 32})
+	if err != nil {
+		test.Fatal(err)
+	}
+	if metrics := encryptionReadMetrics([]byte(strings.Replace(string(encoded), `"reads":2`, `"reads":null`, 1))); metrics != nil {
+		test.Fatal("null counter became an available zero")
+	}
+	status := writerStatus(&vaulticdbv1.WriterStatusResponse{Attribution: &vaulticdbv1.AttributionSnapshot{EncryptionReadMetricsJson: encoded}})
+	if status.Attribution.EncryptionReads == nil || status.Attribution.EncryptionReads.Reads != 2 || status.Attribution.EncryptionReads.RequestedPlaintextBytes != 7 || status.Attribution.EncryptionReads.RoundedCiphertextBytes != 32 {
+		test.Fatalf("optional encryption metrics lost: %+v", status.Attribution.EncryptionReads)
+	}
+}
 
 func TestWriterStatusAttributionMapping(t *testing.T) {
 	status := writerStatus(&vaulticdbv1.WriterStatusResponse{

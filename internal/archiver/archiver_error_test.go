@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,7 +22,138 @@ import (
 	"github.com/otuschhoff/vaultic/internal/repository"
 	rtest "github.com/otuschhoff/vaultic/internal/test"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
+	"github.com/otuschhoff/vaultic/internal/workingkv"
 )
+
+type concurrentValidationRepo struct {
+	*repository.Repository
+	entered chan struct{}
+	release chan struct{}
+	active  atomic.Int32
+	peak    atomic.Int32
+	missing bool
+	failure error
+}
+
+func (repo *concurrentValidationRepo) LookupBlobSizesContext(ctx context.Context, handles []vaultic.BlobHandle) ([]vaultic.BlobSize, error) {
+	active := repo.active.Add(1)
+	defer repo.active.Add(-1)
+	for peak := repo.peak.Load(); active > peak; peak = repo.peak.Load() {
+		if repo.peak.CompareAndSwap(peak, active) {
+			break
+		}
+	}
+	repo.entered <- struct{}{}
+	select {
+	case <-repo.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if repo.failure != nil {
+		return nil, repo.failure
+	}
+	results := make([]vaultic.BlobSize, len(handles))
+	for ordinal := range results {
+		results[ordinal].Found = !repo.missing
+	}
+	return results, nil
+}
+
+func TestArchiverConcurrentUnchangedValidation(test *testing.T) {
+	for _, mode := range []string{"reuse", "missing", "mutate", "failure", "cancel"} {
+		test.Run(mode, func(test *testing.T) {
+			input := TestDir{}
+			for ordinal := range 8 {
+				input[fmt.Sprintf("file-%02d", ordinal)] = TestFile{Content: fmt.Sprintf("content-%d", ordinal)}
+			}
+			input["symlink"] = TestSymlink{Target: "file-00"}
+			input["excluded"] = TestDir{"file": TestFile{Content: "excluded-content"}}
+			root, repo := prepareTempdirRepoSrc(test, input)
+			back := rtest.Chdir(test, root)
+			defer back()
+			rtest.OK(test, os.Link("file-00", "hardlink"))
+			input["hardlink"] = TestFile{Content: "content-0"}
+			parent, _, _, err := New(repo, fs.NewLocal(), Options{}).Snapshot(test.Context(), []string{"."}, SnapshotOptions{Time: time.Now()})
+			rtest.OK(test, err)
+			reader := &concurrentValidationRepo{Repository: repo, entered: make(chan struct{}, 16), release: make(chan struct{}), missing: mode == "missing"}
+			if mode == "failure" {
+				reader.failure = errors.New("validation unavailable")
+			}
+			policy, err := workingkv.NewPolicy(workingkv.ModeRAM, 256<<20, test.TempDir())
+			rtest.OK(test, err)
+			ctx, cancel := context.WithTimeout(workingkv.WithPolicy(test.Context(), policy), 10*time.Second)
+			defer cancel()
+			arch := New(reader, fs.NewLocal(), Options{UnchangedReadConcurrency: 4})
+			arch.SelectByName = func(target string) bool { return filepath.Base(target) != "excluded" }
+			delete(input, "excluded")
+			arch.Error = func(string, error) error { return nil }
+			var published atomic.Bool
+			arch.BeforeSnapshot = func() error { published.Store(true); return nil }
+			var result *data.Snapshot
+			done := make(chan error, 1)
+			go func() {
+				saved, _, _, snapshotErr := arch.Snapshot(ctx, []string{"."}, SnapshotOptions{Time: time.Now(), ParentSnapshot: parent})
+				result = saved
+				done <- snapshotErr
+			}()
+			for range 2 {
+				select {
+				case <-reader.entered:
+				case <-ctx.Done():
+					test.Fatal("unchanged validation did not overlap")
+				}
+			}
+			if mode == "cancel" {
+				cancel()
+			}
+			if mode == "mutate" {
+				for name := range input {
+					if _, regular := input[name].(TestFile); !regular {
+						continue
+					}
+					content := "updated-source-" + name
+					if name == "hardlink" {
+						content = "updated-source-file-00"
+					}
+					rtest.OK(test, os.WriteFile(name, []byte(content), 0600))
+					input[name] = TestFile{Content: content}
+				}
+			}
+			close(reader.release)
+			err = <-done
+			if mode == "cancel" {
+				if !errors.Is(err, context.Canceled) {
+					test.Fatalf("cancellation lost: %v", err)
+				}
+			} else if mode == "failure" {
+				if !errors.Is(err, reader.failure) {
+					test.Fatalf("lookup failure lost: %v", err)
+				}
+			} else {
+				rtest.OK(test, err)
+				TestEnsureTree(test.Context(), test, "", repo, *result.Tree, input)
+			}
+			if (mode == "failure" || mode == "cancel") && (published.Load() || result != nil) {
+				test.Fatal("failed validation published a snapshot")
+			}
+			if reader.peak.Load() < 2 || reader.peak.Load() > 4 || reader.active.Load() != 0 {
+				test.Fatalf("unbounded or leaked validation: peak=%d active=%d", reader.peak.Load(), reader.active.Load())
+			}
+			rtest.OK(test, repo.Close())
+			deadline := time.NewTimer(time.Second)
+			defer deadline.Stop()
+			ticker := time.NewTicker(time.Millisecond)
+			defer ticker.Stop()
+			for policy.Budget().Used != 0 {
+				select {
+				case <-ticker.C:
+				case <-deadline.C:
+					test.Fatalf("validator future reservations leaked: %+v", policy.Budget())
+				}
+			}
+		})
+	}
+}
 
 type metadataFailureRepo struct {
 	*repository.Repository

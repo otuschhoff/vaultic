@@ -18,6 +18,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/telemetry"
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 	"github.com/otuschhoff/vaultic/internal/workingkv"
+	"github.com/otuschhoff/vaultic/internal/workingstate"
 )
 
 type writtenBlobStore struct {
@@ -66,6 +67,55 @@ func newWrittenBlobStoreContext(ctx context.Context, directory string) (*written
 		return err
 	})
 	return result, nil
+}
+
+func (store *writtenBlobStore) storeSizes(ctx context.Context, handles []vaultic.BlobHandle, sizes []vaultic.BlobSize) error {
+	if err := vaultic.ValidateBlobLookupBatch(handles); err != nil {
+		return err
+	}
+	if len(handles) != len(sizes) {
+		return workingkv.ErrWorkingStateCorrupt
+	}
+	release, err := workingstate.Reserve(ctx, uint64(len(handles))*512+4096)
+	if err != nil {
+		return err
+	}
+	defer release()
+	entries := make([]workingkv.Entry, len(handles))
+	for ordinal, handle := range handles {
+		if !sizes[ordinal].Found {
+			return workingkv.ErrWorkingStateCorrupt
+		}
+		var encoded [8]byte
+		binary.LittleEndian.PutUint64(encoded[:], uint64(sizes[ordinal].Size))
+		key := store.prefix(handle)
+		nonce := make([]byte, store.cipher.NonceSize())
+		if _, err := rand.Read(nonce); err != nil {
+			return err
+		}
+		entries[ordinal] = workingkv.Entry{Key: key, Value: store.cipher.Seal(nonce, nonce, encoded[:], key)}
+	}
+	return store.database.Put(ctx, entries)
+}
+
+func (store *writtenBlobStore) lookupSize(ctx context.Context, handle vaultic.BlobHandle) (vaultic.BlobSize, error) {
+	key := store.prefix(handle)
+	value, found, err := store.database.Get(ctx, key)
+	if err != nil || !found {
+		return vaultic.BlobSize{}, err
+	}
+	if len(value) < store.cipher.NonceSize() {
+		return vaultic.BlobSize{}, workingkv.ErrWorkingStateCorrupt
+	}
+	plaintext, err := store.cipher.Open(nil, value[:store.cipher.NonceSize()], value[store.cipher.NonceSize():], key)
+	if err != nil || len(plaintext) != 8 {
+		return vaultic.BlobSize{}, workingkv.ErrWorkingStateCorrupt
+	}
+	size := binary.LittleEndian.Uint64(plaintext)
+	if size > uint64(^uint(0)) {
+		return vaultic.BlobSize{}, workingkv.ErrWorkingStateCorrupt
+	}
+	return vaultic.BlobSize{Size: uint(size), Found: true}, nil
 }
 
 func (store *writtenBlobStore) token(value []byte) []byte {

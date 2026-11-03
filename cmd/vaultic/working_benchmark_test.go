@@ -239,6 +239,31 @@ func publicationQualificationReopen(ctx context.Context, client **daemon.Client,
 }
 
 func TestPublicationQualificationOnDemandBackup(t *testing.T) {
+	testPublicationReadCandidate(t, "", nil, 0, false)
+}
+
+func TestMetadataReadCandidatesNative(t *testing.T) {
+	const candidate = "/root/proj/vaultic/bin/phase35-metadata-read/linux-amd64/vaultic"
+	if os.Getenv("VAULTIC_METADATA_READ_QUALIFY") != "1" {
+		t.Skip("isolated metadata-read candidate qualification is opt-in")
+	}
+	for _, capacity := range []uint64{128 << 20, 256 << 20, 512 << 20, 1024 << 20} {
+		t.Run(fmt.Sprintf("meta-cache-%d", capacity>>20), func(t *testing.T) {
+			testPublicationReadCandidate(t, candidate, []string{"--unchanged-read-concurrency=8"}, capacity, false)
+		})
+	}
+	for _, limit := range []int{4, 8, 16} {
+		t.Run(fmt.Sprintf("coalesced-rpc-%d", limit), func(t *testing.T) {
+			testPublicationReadCandidate(t, candidate, []string{"--unchanged-read-concurrency=16", "--metadata-batch-delay=1ms", fmt.Sprintf("--metadata-read-concurrency=%d", limit)}, 128<<20, true)
+		})
+	}
+	t.Run("exact-catalog", func(t *testing.T) {
+		testPublicationReadCandidate(t, candidate, []string{"--unchanged-read-concurrency=8", "--metadata-exact-catalog"}, 128<<20, false)
+	})
+}
+
+func testPublicationReadCandidate(t *testing.T, candidate string, extraFlags []string, metaCacheBytes uint64, multiGet bool) {
+	t.Helper()
 	binary := testVaulticDBBinary(t)
 	defer feature.TestSetFlag(t, feature.Flag, feature.SlateDBAuthoritative, true)()
 	environment, cleanup := withTestEnvironment(t)
@@ -259,7 +284,8 @@ func TestPublicationQualificationOnDemandBackup(t *testing.T) {
 		passphrase := filepath.Join(t.TempDir(), "passphrase")
 		rtest.OK(t, os.WriteFile(passphrase, []byte("test recovery passphrase\n"), 0600))
 		daemonOptions := daemon.Options{Socket: testMetadataSocket(t), RepositoryID: repositoryID,
-			DaemonPath: binary, DataDir: t.TempDir(), EncryptionMode: "initialize", PassphraseFile: passphrase}
+			DaemonPath: binary, DataDir: t.TempDir(), EncryptionMode: "initialize", PassphraseFile: passphrase,
+			MetaCacheBytes: metaCacheBytes, BlockCacheBytes: 512 << 20, EngineMultiGet: multiGet}
 		client, err := daemon.Ensure(ctx, daemonOptions)
 		if err != nil {
 			return err
@@ -324,12 +350,18 @@ func TestPublicationQualificationOnDemandBackup(t *testing.T) {
 			return err
 		}
 		unchanged := t.TempDir()
-		publicationQualificationCommand(t, unchanged, "unchanged", "/root/proj/vaultic/bin/phase35-critical-path-paired-reads/linux-amd64/vaultic",
-			"--repo="+options.Repo, "--password-file="+password, "--metadata-daemon-socket="+daemonOptions.Socket,
-			"--metadata-encryption-mode=required", "--metadata-passphrase-file="+passphrase, "--no-cache", "--json",
+		if candidate == "" {
+			candidate = "/root/proj/vaultic/bin/phase35-critical-path-paired-reads/linux-amd64/vaultic"
+		}
+		args := []string{
+			"--repo=" + options.Repo, "--password-file=" + password, "--metadata-daemon-socket=" + daemonOptions.Socket,
+			"--metadata-encryption-mode=required", "--metadata-passphrase-file=" + passphrase, "--no-cache", "--json",
 			"backup", "--no-scan", "--one-file-system", "--metadata-publication-group-size=64", "--metadata-on-demand", "--metadata-cache-mib=64",
-			"--working-memory-mode=ram", "--working-memory-ram-limit=160GiB", "--working-memory-scratch="+scratch,
-			"--working-memory-disk-budget=2GiB", environment.testdata)
+			"--working-memory-mode=ram", "--working-memory-ram-limit=160GiB", "--working-memory-scratch=" + scratch,
+			"--working-memory-disk-budget=2GiB"}
+		args = append(args, extraFlags...)
+		args = append(args, environment.testdata)
+		publicationQualificationCommand(t, unchanged, "unchanged", candidate, args...)
 		output, err = os.ReadFile(filepath.Join(unchanged, "unchanged.stdout.log"))
 		if err != nil {
 			return err
@@ -391,6 +423,16 @@ func TestPublicationQualificationOnDemandBackup(t *testing.T) {
 		}
 		t.Logf("unchanged_native_full_crawl files=%d observed=%d data_blobs=%d metadata_and_pack_bytes=%d main_seconds=%.6f files_per_second=%.3f archive_seconds=%.6f",
 			regularFiles, main.Reconciliation.Observed, summary.DataBlobs, summary.DataAdded, main.SecondsElapsed, float64(regularFiles)/main.SecondsElapsed, summary.TotalDuration)
+		status, err := client.WriterStatus(ctx)
+		if err != nil {
+			return err
+		}
+		if status.ActiveTransactions != 0 || status.ActiveWriteIntents != 0 || (metaCacheBytes != 0 && status.EngineMetaCacheBytes != metaCacheBytes) {
+			return fmt.Errorf("candidate left active work or ignored cache sizing")
+		}
+		if candidate == "/root/proj/vaultic/bin/phase35-metadata-read/linux-amd64/vaultic" && status.Attribution.EncryptionReads == nil {
+			return fmt.Errorf("authenticated native transport omitted encryption read attribution")
+		}
 		return nil
 	}))
 }
@@ -1629,7 +1671,20 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 	}
 	const previous = "/volume2/NASDA2/vaultic-test-m6/force-compare-fme-cae1-20261103-10k"
 	root := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT")
-	if root != previous+"/retry" {
+	mode := os.Getenv("VAULTIC_PHASE35_METADATA_READ_COMPARE")
+	var extraFlags []string
+	switch mode {
+	case "":
+	case "parallel":
+		extraFlags = []string{"--unchanged-read-concurrency=8"}
+	case "coalesced":
+		extraFlags = []string{"--unchanged-read-concurrency=16", "--metadata-read-concurrency=8", "--metadata-batch-delay=1ms"}
+	case "catalog":
+		extraFlags = []string{"--unchanged-read-concurrency=8", "--metadata-exact-catalog"}
+	default:
+		t.Fatal("unknown metadata-read qualification mode")
+	}
+	if (mode == "" && root != previous+"/retry") || (mode != "" && root != "/volume2/NASDA2/vaultic-test-m6/metadata-read-fme-cae1-20261103-10k-"+mode) {
 		t.Fatal("retry requires the new private child of the retained failed capture")
 	}
 	rtest.OK(t, validatePublicationQualificationRoot(root, "/volume2/NASDA2/vaultic-test-m6"))
@@ -1666,8 +1721,12 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 	if digest != receipt.InputSHA256 || files != receipt.Files || size != receipt.Bytes || regularFiles != 9209 {
 		t.Fatal("qualified retry source content changed")
 	}
-	const candidate = "/root/proj/vaultic/bin/phase35-force-10k/linux-amd64/vaultic"
-	const binary = "/root/proj/vaultic/bin/phase35-force-10k/linux-amd64/vaulticdb"
+	candidate := "/root/proj/vaultic/bin/phase35-force-10k/linux-amd64/vaultic"
+	binary := "/root/proj/vaultic/bin/phase35-force-10k/linux-amd64/vaulticdb"
+	if mode != "" {
+		candidate = "/root/proj/vaultic/bin/phase35-metadata-read/linux-amd64/vaultic"
+		binary = "/root/proj/vaultic/bin/phase35-metadata-read/linux-amd64/vaulticdb"
+	}
 	for path, expected := range map[string]string{candidate: os.Getenv("VAULTIC_PHASE35_THROUGHPUT_CANDIDATE_SHA256"), binary: os.Getenv("VAULTIC_PHASE35_THROUGHPUT_NATIVE_SHA256")} {
 		contents, err := os.ReadFile(path)
 		rtest.OK(t, err)
@@ -1691,6 +1750,7 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 		DaemonPath: binary, DataDir: filepath.Join(parentCell, "db"), WALDataDir: filepath.Join(parentCell, "db", "wal"),
 		ObjectStore: "local", WALStore: "local", WALFlushInterval: 100 * time.Millisecond, MetaCacheBytes: 128 << 20, BlockCacheBytes: 512 << 20,
 		EncryptionMode: "required", PassphraseFile: "/volume2/NASDA2/rustic/etc/metadata-recovery", StartTimeout: 90 * time.Second}
+	current.EngineMultiGet = mode == "coalesced"
 	options := publicationQualificationOptions(filepath.Join(parentCell, "repo"), current.Socket, current.PassphraseFile)
 	rtest.OK(t, publicationQualificationLoadPassword(&options))
 	cell := filepath.Join(root, "group-64")
@@ -1706,12 +1766,12 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 			rtest.OK(t, owner.Close(context.Background()))
 		}
 	}()
-	publicationQualificationForceComparison(t, cell, source, candidate, options, current, &owner, parent, paths, digest, regularFiles, files, size)
+	publicationQualificationForceComparison(t, cell, source, candidate, options, current, &owner, parent, paths, digest, regularFiles, files, size, extraFlags...)
 }
 
 func publicationQualificationForceComparison(t *testing.T, cell, source, candidate string, options global.Options,
 	daemonOptions daemon.Options, owner **daemon.Client, parent vaultic.ID, paths map[string]bool, digest string,
-	regularFiles, files, size uint64,
+	regularFiles, files, size uint64, extraFlags ...string,
 ) {
 	t.Helper()
 	if len(paths) != 10000 {
@@ -1781,6 +1841,7 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 			"backup", "--no-scan", "--one-file-system", "--read-concurrency=16", "--metadata-publication-group-size=64",
 			"--metadata-reconciliation-queue-depth=256", "--metadata-on-demand", "--metadata-cache-mib=64",
 			"--working-memory-mode=ram", "--working-memory-ram-limit=160GiB", "--working-memory-scratch=" + filepath.Join(legOptions.Repo, "working"), "--working-memory-disk-budget=2GiB"}
+		args = append(args, extraFlags...)
 		if forced {
 			args = append(args, "--force")
 		} else {
@@ -1839,6 +1900,8 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 			t.Fatal("comparison encrypted reopen differs")
 		}
 		result, err := json.MarshalIndent(map[string]any{"forced": forced, "main_seconds": measurement.SecondsElapsed, "command_seconds": wall.Seconds(),
+			"candidate": candidate, "metadata_read_flags": extraFlags, "engine_multi_get": current.EngineMultiGet,
+			"metadata_cache_bytes": current.MetaCacheBytes, "block_cache_bytes": current.BlockCacheBytes,
 			"entries": len(paths), "regular_files": regularFiles, "bytes": size, "input_sha256": digest, "entries_per_second": float64(len(paths)) / measurement.SecondsElapsed,
 			"cli_cpu_seconds": cpu, "summary": summary, "critical_path": critical, "writer_before": before, "writer_after": after,
 			"baseline_parent": parent.String(), "parent_setup_summary": parentSummary, "snapshot": id.String(), "restore_verified": true, "reopen_verified": true, "source_unchanged": true,

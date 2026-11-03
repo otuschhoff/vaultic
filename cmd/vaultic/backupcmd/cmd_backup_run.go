@@ -348,17 +348,18 @@ type backupDBWait struct {
 }
 
 type backupCriticalPath struct {
-	MessageType          string            `json:"message_type"`
-	Phase                string            `json:"phase"`
-	SecondsElapsed       float64           `json:"seconds_elapsed"`
-	Reconciliation       reconcile.Metrics `json:"reconciliation"`
-	RPC                  []backupRPCWait   `json:"rpc"`
-	DB                   []backupDBWait    `json:"db"`
-	DBScope              string            `json:"db_scope"`
-	DBSnapshotAvailable  bool              `json:"db_snapshot_available"`
-	DBIntervalAvailable  bool              `json:"db_interval_available"`
-	DBCounterReset       bool              `json:"db_counter_reset"`
-	DBEngineBackpressure uint64            `json:"db_engine_backpressure"`
+	MessageType          string                        `json:"message_type"`
+	Phase                string                        `json:"phase"`
+	SecondsElapsed       float64                       `json:"seconds_elapsed"`
+	Reconciliation       reconcile.Metrics             `json:"reconciliation"`
+	RPC                  []backupRPCWait               `json:"rpc"`
+	DB                   []backupDBWait                `json:"db"`
+	DBScope              string                        `json:"db_scope"`
+	DBSnapshotAvailable  bool                          `json:"db_snapshot_available"`
+	DBIntervalAvailable  bool                          `json:"db_interval_available"`
+	DBCounterReset       bool                          `json:"db_counter_reset"`
+	DBEngineBackpressure uint64                        `json:"db_engine_backpressure"`
+	EncryptionReads      *daemon.EncryptionReadMetrics `json:"encryption_reads,omitempty"`
 }
 
 func backupDBStages(state daemon.WriterStatus) map[string]daemon.TimingSnapshot {
@@ -379,6 +380,38 @@ func backupCounterDelta(current, baseline uint64) uint64 {
 		return 0
 	}
 	return current - baseline
+}
+
+func backupEncryptionReadDelta(current, baseline *daemon.EncryptionReadMetrics) *daemon.EncryptionReadMetrics {
+	if current == nil || baseline == nil {
+		return nil
+	}
+	result := *current
+	fields := [][2]*uint64{
+		{&result.Reads, &baseline.Reads},
+		{&result.RequestedPlaintextBytes, &baseline.RequestedPlaintextBytes},
+		{&result.RoundedCiphertextBytes, &baseline.RoundedCiphertextBytes},
+		{&result.CiphertextOriginCalls, &baseline.CiphertextOriginCalls},
+		{&result.CiphertextOriginBytes, &baseline.CiphertextOriginBytes},
+		{&result.CiphertextOriginNanoseconds, &baseline.CiphertextOriginNanoseconds},
+		{&result.HeaderDecodeNanoseconds, &baseline.HeaderDecodeNanoseconds},
+		{&result.HeaderCacheHits, &baseline.HeaderCacheHits},
+		{&result.HeaderCacheMisses, &baseline.HeaderCacheMisses},
+		{&result.HeaderCacheEvictions, &baseline.HeaderCacheEvictions},
+		{&result.CryptoJobs, &baseline.CryptoJobs},
+		{&result.CryptoQueueNanoseconds, &baseline.CryptoQueueNanoseconds},
+		{&result.CryptoServiceNanoseconds, &baseline.CryptoServiceNanoseconds},
+		{&result.HeadReads, &baseline.HeadReads},
+		{&result.FullReads, &baseline.FullReads},
+		{&result.RangeReads, &baseline.RangeReads},
+	}
+	for _, field := range fields {
+		if *field[0] < *field[1] {
+			return nil
+		}
+		*field[0] -= *field[1]
+	}
+	return &result
 }
 
 func backupRPCWaitDelta(current, baseline daemon.RPCWaitStats) daemon.RPCWaitStats {
@@ -478,6 +511,7 @@ func (run *backupRun) startCriticalPathReporting() func() {
 			}
 			if sample.DBIntervalAvailable {
 				sample.DBEngineBackpressure = backupCounterDelta(state.Attribution.EngineBackpressureCount, dbBaseline.Attribution.EngineBackpressureCount)
+				sample.EncryptionReads = backupEncryptionReadDelta(state.Attribution.EncryptionReads, dbBaseline.Attribution.EncryptionReads)
 			}
 			sort.Slice(sample.DB, func(first, second int) bool { return sample.DB[first].Stage < sample.DB[second].Stage })
 		}
@@ -674,8 +708,14 @@ func loadBackupParent(run *backupRun) error {
 		run.printer.V("load index files")
 	}
 	if run.options.MetadataOnDemand {
+		concurrency := run.options.MetadataReadConcurrency
+		if concurrency == 0 {
+			concurrency = 4
+		}
 		return run.repo.LoadBackupIndex(run.ctx, run.printer, enginepkg.BackupLookupOptions{
-			ScratchDirectory: run.options.MetadataScratch, CacheBytes: run.options.MetadataCacheMiB << 20, Concurrency: 4,
+			ScratchDirectory: run.options.MetadataScratch, CacheBytes: run.options.MetadataCacheMiB << 20, Concurrency: concurrency,
+			CoalesceDelay: run.options.MetadataBatchDelay,
+			ExactCatalog:  run.options.MetadataExactCatalog,
 		})
 	}
 	if err := run.repo.LoadIndex(run.ctx, run.printer); err != nil {
@@ -1081,7 +1121,7 @@ func configureArchiver(ctx context.Context, run *backupRun) error {
 	cancelCtx, cancel := context.WithCancel(groupCtx)
 	run.group, run.cancel = group, cancel
 	configureBackupScanner(cancelCtx, run, selectByName, selectItem)
-	options := archiver.Options{ReadConcurrency: run.options.ReadConcurrency}
+	options := archiver.Options{ReadConcurrency: run.options.ReadConcurrency, UnchangedReadConcurrency: run.options.UnchangedReadConcurrency}
 	options.SelectionError = run.markerStore.Error
 	if run.options.UseCWalk && (!run.pathdiffPlan.Selective || len(run.pathdiffPlan.ChangedDirs) > 0) {
 		options.CWalkConcurrency, options.CWalkQueue = run.options.CWalkConcurrency, 4096
