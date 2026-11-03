@@ -891,20 +891,28 @@ func validateForceComparisonMeasurement(summary m5BackupSummary, measurement unc
 }
 
 func TestForceComparisonMeasurement(t *testing.T) {
+	for _, entries := range []uint64{10000, 50000} {
+		t.Run(fmt.Sprint(entries), func(t *testing.T) { testForceComparisonMeasurement(t, entries) })
+	}
+}
+
+func testForceComparisonMeasurement(t *testing.T, entries uint64) {
+	t.Helper()
+	files := entries * 9 / 10
 	measurement := unchangedCrawlMeasurement{SecondsElapsed: 1}
-	measurement.Reconciliation.Observed, measurement.Reconciliation.Scanned = 10000, 10000
+	measurement.Reconciliation.Observed, measurement.Reconciliation.Scanned = entries, entries
 	measurement.Reconciliation.WriterPhase = "done"
 	for _, forced := range []bool{false, true} {
 		t.Run(fmt.Sprint(forced), func(t *testing.T) {
-			summary := m5BackupSummary{MessageType: "summary", TotalFilesProcessed: 9000}
+			summary := m5BackupSummary{MessageType: "summary", TotalFilesProcessed: files}
 			if forced {
-				summary.New = 9000
+				summary.New = files
 			} else {
-				summary.Unmodified = 9000
+				summary.Unmodified = files
 			}
-			rtest.OK(t, validateForceComparisonMeasurement(summary, measurement, 9000, 10000, forced))
+			rtest.OK(t, validateForceComparisonMeasurement(summary, measurement, files, entries, forced))
 			summary.DataAdded = 1449
-			rtest.OK(t, validateForceComparisonMeasurement(summary, measurement, 9000, 10000, forced))
+			rtest.OK(t, validateForceComparisonMeasurement(summary, measurement, files, entries, forced))
 			for _, failure := range []string{"new-data", "scope", "mode", "unfinished"} {
 				candidate, observed := summary, measurement
 				switch failure {
@@ -917,7 +925,7 @@ func TestForceComparisonMeasurement(t *testing.T) {
 				case "unfinished":
 					observed.Reconciliation.WriterPhase = "wait_prepared"
 				}
-				if validateForceComparisonMeasurement(candidate, observed, 9000, 10000, forced) == nil {
+				if validateForceComparisonMeasurement(candidate, observed, files, entries, forced) == nil {
 					t.Fatalf("accepted %s", failure)
 				}
 			}
@@ -957,6 +965,34 @@ func TestUnchangedCrawlMeasurement(t *testing.T) {
 	}
 }
 
+func publicationForceInodeLimit(value string) (int, error) {
+	switch value {
+	case "":
+		return 10000, nil
+	case "50000":
+		return 50000, nil
+	default:
+		return 0, fmt.Errorf("unsupported force-comparison inode limit %q", value)
+	}
+}
+
+func TestPublicationForceInodeLimit(t *testing.T) {
+	for _, value := range []string{"", "50000", "10000", "500000", "-1"} {
+		limit, err := publicationForceInodeLimit(value)
+		if value == "" || value == "50000" {
+			want := 10000
+			if value == "50000" {
+				want = 50000
+			}
+			if err != nil || limit != want {
+				t.Fatalf("limit=%d err=%v for %q", limit, err, value)
+			}
+		} else if err == nil {
+			t.Fatalf("unapproved inode count accepted: %q", value)
+		}
+	}
+}
+
 func TestPublicationBackupQualification(t *testing.T) {
 	root := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT")
 	if root == "" {
@@ -973,6 +1009,16 @@ func TestPublicationBackupQualification(t *testing.T) {
 	}
 	unchanged := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_UNCHANGED")
 	forceCompare := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_FORCE_COMPARE")
+	expanded := os.Getenv("VAULTIC_PHASE35_METADATA_READ_INODE_LIMIT")
+	forceCompareLimit, err := publicationForceInodeLimit(expanded)
+	rtest.OK(t, err)
+	var metadataReadFlags []string
+	if expanded != "" {
+		if forceCompare != "1" || os.Getenv("VAULTIC_PHASE35_METADATA_READ_COMPARE") != "coalesced" || root != "/volume2/NASDA2/vaultic-test-m6/metadata-read-fme-cae1-20261103-50k-coalesced" {
+			t.Fatal("expanded scope requires the fresh 50k coalesced capture")
+		}
+		metadataReadFlags = []string{"--unchanged-read-concurrency=16", "--metadata-read-concurrency=8", "--metadata-batch-delay=1ms"}
+	}
 	if forceCompare != "" && (forceCompare != "1" || unchanged != "1") {
 		t.Fatal("force comparison requires the fresh unchanged qualification mode")
 	}
@@ -992,7 +1038,8 @@ func TestPublicationBackupQualification(t *testing.T) {
 		if selected != "/root/proj/vaultic/bin/phase35-critical-path/linux-amd64/vaultic" &&
 			selected != "/root/proj/vaultic/bin/phase35-critical-path-fill/linux-amd64/vaultic" &&
 			selected != "/root/proj/vaultic/bin/phase35-critical-path-paired-reads/linux-amd64/vaultic" &&
-			!(forceCompare == "1" && selected == "/root/proj/vaultic/bin/phase35-force-10k/linux-amd64/vaultic") {
+			!(forceCompare == "1" && selected == "/root/proj/vaultic/bin/phase35-force-10k/linux-amd64/vaultic") &&
+			!(expanded == "50000" && selected == "/root/proj/vaultic/bin/phase35-metadata-read/linux-amd64/vaultic") {
 			t.Fatal("candidate is not the separate critical-path build")
 		}
 		encoded, err := os.ReadFile(selected)
@@ -1004,7 +1051,8 @@ func TestPublicationBackupQualification(t *testing.T) {
 	}
 	binary := "/root/proj/vaultic/bin/profile/linux-amd64/vaulticdb"
 	if selected := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_NATIVE"); selected != "" {
-		if forceCompare != "1" || selected != "/root/proj/vaultic/bin/phase35-force-10k/linux-amd64/vaulticdb" {
+		if forceCompare != "1" || (selected != "/root/proj/vaultic/bin/phase35-force-10k/linux-amd64/vaulticdb" &&
+			!(expanded == "50000" && selected == "/root/proj/vaultic/bin/phase35-metadata-read/linux-amd64/vaulticdb")) {
 			t.Fatal("native override requires the private force-comparison build")
 		}
 		encoded, err := os.ReadFile(selected)
@@ -1013,6 +1061,9 @@ func TestPublicationBackupQualification(t *testing.T) {
 			t.Fatal("native comparison digest mismatch")
 		}
 		binary = selected
+	}
+	if expanded != "" && (candidate != "/root/proj/vaultic/bin/phase35-metadata-read/linux-amd64/vaultic" || binary != "/root/proj/vaultic/bin/phase35-metadata-read/linux-amd64/vaulticdb") {
+		t.Fatal("expanded scope requires the measurement-pinned metadata-read binaries")
 	}
 	var marker struct {
 		Clone                                                  string
@@ -1059,10 +1110,10 @@ func TestPublicationBackupQualification(t *testing.T) {
 		t.Log("copying accepted restored source into a fresh stable NFS fixture")
 		acceptedSource := filepath.Join(accepted, "restore/ncl1-1-vs-50/fme_cae1")
 		if forceCompare == "1" {
-			selected, err := boundedLiveSourcePaths(acceptedSource, 10000)
+			selected, err := boundedLiveSourcePaths(acceptedSource, uint64(forceCompareLimit))
 			rtest.OK(t, err)
-			if len(selected) != 10000 {
-				t.Fatal("accepted source lacks 10000 entries")
+			if len(selected) != forceCompareLimit {
+				t.Fatalf("accepted source lacks %d entries", forceCompareLimit)
 			}
 			manifest := filepath.Join(root, "selected-paths.nul")
 			rtest.OK(t, os.WriteFile(manifest, []byte(strings.Join(selected[1:], "\x00")+"\x00"), 0600))
@@ -1076,7 +1127,7 @@ func TestPublicationBackupQualification(t *testing.T) {
 		rtest.OK(t, err)
 		entryCount := 100000
 		if forceCompare == "1" {
-			entryCount = 10000
+			entryCount = forceCompareLimit
 		}
 		if len(paths) != entryCount {
 			t.Fatalf("frozen restore has %d entries, expected %d", len(paths), entryCount)
@@ -1090,7 +1141,7 @@ func TestPublicationBackupQualification(t *testing.T) {
 		if forceCompare == "1" {
 			expected, expectedFiles, expectedBytes := m5FilesSelected(t, acceptedSource, false, frozenPaths)
 			if digest != expected || files != expectedFiles || size != expectedBytes {
-				t.Fatal("10k fixture differs from accepted source subset")
+				t.Fatal("force-comparison fixture differs from accepted source subset")
 			}
 		} else if digest != result.InputSHA256 || files != result.Files || size != result.Bytes || regularFiles != 89300 {
 			t.Fatal("frozen source differs from the accepted restore")
@@ -1275,6 +1326,7 @@ func TestPublicationBackupQualification(t *testing.T) {
 				DataDir: database, WALDataDir: filepath.Join(database, "wal"), ObjectStore: "local", WALStore: "local",
 				WALFlushInterval: 100 * time.Millisecond, MetaCacheBytes: 128 << 20, BlockCacheBytes: 512 << 20,
 				EncryptionMode: "required", PassphraseFile: "/volume2/NASDA2/rustic/etc/metadata-recovery", StartTimeout: 90 * time.Second}
+			daemonOptions.EngineMultiGet = expanded == "50000"
 			started := time.Now()
 			client, err := daemon.Ensure(t.Context(), daemonOptions)
 			rtest.OK(t, err)
@@ -1570,7 +1622,7 @@ func TestPublicationBackupQualification(t *testing.T) {
 				}
 				if forceCompare == "1" {
 					publicationQualificationForceComparison(t, cell, source, candidate, options, daemonOptions, &client, id,
-						frozenPaths, digest, regularFiles, files, size)
+						frozenPaths, digest, regularFiles, files, size, metadataReadFlags...)
 				} else {
 					publicationQualificationUnchanged(t, cell, source, candidate, options, daemonOptions, &client, id,
 						frozenPaths, digest, regularFiles, files, size)
@@ -1665,14 +1717,106 @@ func publicationQualificationUnchanged(t *testing.T, cell, source, candidate str
 		measurement.SecondsElapsed, len(paths), float64(len(paths))/measurement.SecondsElapsed, summary.DataBlobs)
 }
 
+type publicationDBTuning struct {
+	MetaCacheBytes  uint64
+	BlockCacheBytes uint64
+	CryptoThreads   int
+	Flags           []string
+}
+
+func publicationDBProfile(profile string) (publicationDBTuning, error) {
+	tuning := publicationDBTuning{MetaCacheBytes: 128 << 20, BlockCacheBytes: 512 << 20, CryptoThreads: 8,
+		Flags: []string{"--read-concurrency=64", "--metadata-read-concurrency=32", "--metadata-batch-delay=1ms"}}
+	switch profile {
+	case "db-control", "db-control-end":
+	case "db-crypto32":
+		tuning.CryptoThreads = 32
+	case "db-meta2g":
+		tuning.MetaCacheBytes = 2 << 30
+	case "db-block8g":
+		tuning.BlockCacheBytes = 8 << 30
+	case "db-batch5ms":
+		tuning.Flags[2] = "--metadata-batch-delay=5ms"
+	case "db-rpc64":
+		tuning.Flags[1] = "--metadata-read-concurrency=64"
+	default:
+		return publicationDBTuning{}, fmt.Errorf("unsupported DB profile %q", profile)
+	}
+	return tuning, nil
+}
+
+func TestPublicationDBProfile(t *testing.T) {
+	for profile, expected := range map[string]struct {
+		meta, block uint64
+		crypto      int
+		rpc, delay  string
+	}{
+		"db-control":     {128 << 20, 512 << 20, 8, "32", "1ms"},
+		"db-control-end": {128 << 20, 512 << 20, 8, "32", "1ms"},
+		"db-crypto32":    {128 << 20, 512 << 20, 32, "32", "1ms"},
+		"db-meta2g":      {2 << 30, 512 << 20, 8, "32", "1ms"},
+		"db-block8g":     {128 << 20, 8 << 30, 8, "32", "1ms"},
+		"db-batch5ms":    {128 << 20, 512 << 20, 8, "32", "5ms"},
+		"db-rpc64":       {128 << 20, 512 << 20, 8, "64", "1ms"},
+	} {
+		t.Run(profile, func(t *testing.T) {
+			tuning, err := publicationDBProfile(profile)
+			rtest.OK(t, err)
+			if tuning.MetaCacheBytes != expected.meta || tuning.BlockCacheBytes != expected.block || tuning.CryptoThreads != expected.crypto ||
+				strings.Join(tuning.Flags, " ") != "--read-concurrency=64 --metadata-read-concurrency="+expected.rpc+" --metadata-batch-delay="+expected.delay {
+				t.Fatalf("unexpected DB settings: %+v", tuning)
+			}
+		})
+	}
+	for _, profile := range []string{"", "db-crypto128", "db-meta64g", "../db-control"} {
+		if _, err := publicationDBProfile(profile); err == nil {
+			t.Fatalf("unapproved DB profile accepted: %q", profile)
+		}
+	}
+}
+
+func publicationConcurrencyProfile(profile string) ([]string, error) {
+	readers, rpcs := 16, 8
+	switch profile {
+	case "baseline":
+	case "rpcs":
+		rpcs = 32
+	case "readers":
+		readers, rpcs = 64, 32
+	default:
+		return nil, fmt.Errorf("unsupported concurrency profile %q", profile)
+	}
+	return []string{fmt.Sprintf("--read-concurrency=%d", readers), fmt.Sprintf("--metadata-read-concurrency=%d", rpcs), "--metadata-batch-delay=1ms"}, nil
+}
+
+func TestPublicationConcurrencyProfile(t *testing.T) {
+	for profile, expected := range map[string]string{"baseline": "16/8", "rpcs": "16/32", "readers": "64/32"} {
+		flags, err := publicationConcurrencyProfile(profile)
+		rtest.OK(t, err)
+		actual := strings.TrimPrefix(flags[0], "--read-concurrency=") + "/" + strings.TrimPrefix(flags[1], "--metadata-read-concurrency=")
+		if actual != expected || flags[2] != "--metadata-batch-delay=1ms" {
+			t.Fatalf("profile %s: %v", profile, flags)
+		}
+	}
+	for _, profile := range []string{"", "callers", "128", "../rpcs"} {
+		if _, err := publicationConcurrencyProfile(profile); err == nil {
+			t.Fatalf("unapproved profile accepted: %q", profile)
+		}
+	}
+}
+
 func TestPublicationForceComparisonRetry(t *testing.T) {
 	if os.Getenv("VAULTIC_PHASE35_THROUGHPUT_FORCE_COMPARE_RETRY") != "1" {
 		t.Skip("qualified-parent force-comparison retry not selected")
 	}
-	const previous = "/volume2/NASDA2/vaultic-test-m6/force-compare-fme-cae1-20261103-10k"
+	previous := "/volume2/NASDA2/vaultic-test-m6/force-compare-fme-cae1-20261103-10k"
 	root := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT")
 	mode := os.Getenv("VAULTIC_PHASE35_METADATA_READ_COMPARE")
+	profile := os.Getenv("VAULTIC_PHASE35_METADATA_READ_CONCURRENCY_PROFILE")
+	entries, expectedRegular, expectedFiles, expectedBytes := 10000, uint64(9209), uint64(9218), uint64(2460946936)
+	expectedDigest := "2f76a6f4397effad64c9922cc6337a836b3c4ac21b870114942e02b63b996f80"
 	var extraFlags []string
+	var dbTuning *publicationDBTuning
 	switch mode {
 	case "":
 	case "parallel":
@@ -1684,7 +1828,31 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 	default:
 		t.Fatal("unknown metadata-read qualification mode")
 	}
-	if (mode == "" && root != previous+"/retry") || (mode != "" && root != "/volume2/NASDA2/vaultic-test-m6/metadata-read-fme-cae1-20261103-10k-"+mode) {
+	if profile != "" {
+		previous = "/volume2/NASDA2/vaultic-test-m6/metadata-read-fme-cae1-20261103-50k-coalesced"
+		expectedRoot := previous + "-forced-concurrency-" + profile
+		if strings.HasPrefix(profile, "db-") {
+			expectedRoot = previous + "-forced-db-" + strings.TrimPrefix(profile, "db-")
+		}
+		if mode != "coalesced" || os.Getenv("VAULTIC_PHASE35_METADATA_READ_INODE_LIMIT") != "50000" ||
+			os.Getenv("VAULTIC_PHASE35_METADATA_READ_FORCE_ONLY") != "1" || root != expectedRoot {
+			t.Fatal("concurrency screen requires a fresh allowlisted forced-only 50k coalesced cell")
+		}
+		var err error
+		if strings.HasPrefix(profile, "db-") {
+			tuning, tuningErr := publicationDBProfile(profile)
+			rtest.OK(t, tuningErr)
+			if os.Getenv("VAULTICDB_CRYPTO_THREADS") != fmt.Sprint(tuning.CryptoThreads) {
+				t.Fatal("DB screen crypto environment differs from the selected profile")
+			}
+			dbTuning, extraFlags = &tuning, tuning.Flags
+		} else {
+			extraFlags, err = publicationConcurrencyProfile(profile)
+		}
+		rtest.OK(t, err)
+		entries, expectedRegular, expectedFiles, expectedBytes = 50000, 41347, 41372, 19493496103
+		expectedDigest = "8f32883b02c37ae550a0375fa6abfe79ec52d830ef0d9cff1053522687a41e87"
+	} else if (mode == "" && root != previous+"/retry") || (mode != "" && root != "/volume2/NASDA2/vaultic-test-m6/metadata-read-fme-cae1-20261103-10k-"+mode) {
 		t.Fatal("retry requires the new private child of the retained failed capture")
 	}
 	rtest.OK(t, validatePublicationQualificationRoot(root, "/volume2/NASDA2/vaultic-test-m6"))
@@ -1700,16 +1868,16 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 	encoded, err := os.ReadFile(filepath.Join(parentCell, "result.json"))
 	rtest.OK(t, err)
 	rtest.OK(t, json.Unmarshal(encoded, &receipt))
-	if !receipt.RestoreVerified || !receipt.ReopenVerified || receipt.Files != 9218 || receipt.Bytes != 2460946936 ||
-		receipt.InputSHA256 != "2f76a6f4397effad64c9922cc6337a836b3c4ac21b870114942e02b63b996f80" {
+	if !receipt.RestoreVerified || !receipt.ReopenVerified || receipt.Files != expectedFiles || receipt.Bytes != expectedBytes ||
+		receipt.InputSHA256 != expectedDigest {
 		t.Fatal("retry parent lacks qualified source and reopen evidence")
 	}
 	parent, err := vaultic.ParseID(receipt.Snapshot)
 	rtest.OK(t, err)
 	source := filepath.Join(previous, "input")
-	selected, err := boundedLiveSourcePaths(source, 10001)
+	selected, err := boundedLiveSourcePaths(source, uint64(entries+1))
 	rtest.OK(t, err)
-	if len(selected) != 10000 {
+	if len(selected) != entries {
 		t.Fatal("qualified retry source scope changed")
 	}
 	paths := make(map[string]bool, len(selected))
@@ -1718,7 +1886,7 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 	}
 	digest, files, size := m5FilesSelected(t, source, false, paths)
 	regularFiles := publicationQualificationRegularFiles(t, source, selected)
-	if digest != receipt.InputSHA256 || files != receipt.Files || size != receipt.Bytes || regularFiles != 9209 {
+	if digest != receipt.InputSHA256 || files != receipt.Files || size != receipt.Bytes || regularFiles != expectedRegular {
 		t.Fatal("qualified retry source content changed")
 	}
 	candidate := "/root/proj/vaultic/bin/phase35-force-10k/linux-amd64/vaultic"
@@ -1751,6 +1919,9 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 		ObjectStore: "local", WALStore: "local", WALFlushInterval: 100 * time.Millisecond, MetaCacheBytes: 128 << 20, BlockCacheBytes: 512 << 20,
 		EncryptionMode: "required", PassphraseFile: "/volume2/NASDA2/rustic/etc/metadata-recovery", StartTimeout: 90 * time.Second}
 	current.EngineMultiGet = mode == "coalesced"
+	if dbTuning != nil {
+		current.MetaCacheBytes, current.BlockCacheBytes = dbTuning.MetaCacheBytes, dbTuning.BlockCacheBytes
+	}
 	options := publicationQualificationOptions(filepath.Join(parentCell, "repo"), current.Socket, current.PassphraseFile)
 	rtest.OK(t, publicationQualificationLoadPassword(&options))
 	cell := filepath.Join(root, "group-64")
@@ -1774,8 +1945,8 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 	regularFiles, files, size uint64, extraFlags ...string,
 ) {
 	t.Helper()
-	if len(paths) != 10000 {
-		t.Fatal("force comparison requires exactly 10000 entries")
+	if len(paths) != 10000 && len(paths) != 50000 {
+		t.Fatal("force comparison requires exactly 10000 or 50000 entries")
 	}
 	parentOutput, err := os.ReadFile(filepath.Join(filepath.Dir(daemonOptions.DataDir), "backup.stdout.log"))
 	rtest.OK(t, err)
@@ -1794,7 +1965,14 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 		*owner = nil
 	}
 	repositoryHash := fmt.Sprintf("%x", sha256.Sum256([]byte(daemonOptions.RepositoryID)))
-	for _, forced := range []bool{false, true} {
+	modes := []bool{false, true}
+	if forceOnly := os.Getenv("VAULTIC_PHASE35_METADATA_READ_FORCE_ONLY"); forceOnly != "" {
+		if forceOnly != "1" || len(paths) != 50000 || os.Getenv("VAULTIC_PHASE35_METADATA_READ_CONCURRENCY_PROFILE") == "" {
+			t.Fatal("forced-only measurement requires the guarded concurrency screen")
+		}
+		modes = []bool{true}
+	}
+	for _, forced := range modes {
 		name := "unforced"
 		if forced {
 			name = "forced"
@@ -1900,7 +2078,8 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 			t.Fatal("comparison encrypted reopen differs")
 		}
 		result, err := json.MarshalIndent(map[string]any{"forced": forced, "main_seconds": measurement.SecondsElapsed, "command_seconds": wall.Seconds(),
-			"candidate": candidate, "metadata_read_flags": extraFlags, "engine_multi_get": current.EngineMultiGet,
+			"crypto_threads_requested": os.Getenv("VAULTICDB_CRYPTO_THREADS"),
+			"candidate":                candidate, "metadata_read_flags": extraFlags, "engine_multi_get": current.EngineMultiGet,
 			"metadata_cache_bytes": current.MetaCacheBytes, "block_cache_bytes": current.BlockCacheBytes,
 			"entries": len(paths), "regular_files": regularFiles, "bytes": size, "input_sha256": digest, "entries_per_second": float64(len(paths)) / measurement.SecondsElapsed,
 			"cli_cpu_seconds": cpu, "summary": summary, "critical_path": critical, "writer_before": before, "writer_after": after,

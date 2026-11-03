@@ -222,6 +222,253 @@ remains sealed and unchanged. Representative separate-variable cache/caller
 screens, catalog loading cost and naturally ten-minute repeated full-crawl gates
 remain open; correctness fixtures do not substitute for those measurements.
 
+### Forced DB Resource Screen
+
+The next forced-only screen holds content readers at 64 and metadata RPCs at 32,
+except for one explicitly isolated 64-RPC probe. It uses the same frozen 50k
+source, verified parent and measurement-pinned CLI/native binaries. No production
+or NFS configuration changes are permitted.
+
+| Profile | Crypto Workers | Metadata / Block Cache | Batch Delay | RPC Limit |
+| --- | ---: | --- | ---: | ---: |
+| control | 8 | 128 MiB / 512 MiB | 1ms | 32 |
+| crypto32 | 32 | 128 MiB / 512 MiB | 1ms | 32 |
+| meta2g | 8 | 2 GiB / 512 MiB | 1ms | 32 |
+| block8g | 8 | 128 MiB / 8 GiB | 1ms | 32 |
+| batch5ms | 8 | 128 MiB / 512 MiB | 5ms | 32 |
+| rpc64 | 8 | 128 MiB / 512 MiB | 1ms | 64 |
+| control-end | 8 | 128 MiB / 512 MiB | 1ms | 32 |
+
+The beginning/end controls bracket run-order drift; the sequence is not a
+replacement for repeated mirrored comparisons. Every non-control changes one
+variable. The crypto setting is explicit rather than inferred from CPU count.
+The authenticated launcher forwards it, and the supervisor requires observed
+crypto-thread count plus cache/crypto environment from the owned native process.
+Only those nonsecret settings are retained; credentials are not logged.
+
+Each cell runs one forced full crawl from an independent checksum-verified
+clone, then verifies exact restore, encrypted reopen, unchanged source, idle
+writer and zero new data blobs. Existing private/read-only, 200 GB RSS,
+350 GiB fixture, disk-floor, timeout and SIGINT-first cleanup guards remain.
+Evidence roots append `-forced-db-{profile}` to the accepted 50k root.
+Status: completed; all seven correctness captures and live-setting checks passed.
+The analyzer sealed 27 files for the start control and 25 for each other cell;
+all 177 checksums independently verified from their respective roots. There were
+no candidate daemon survivors. Peak combined owned RSS stayed at 40.178--42.460
+GB, well below the unchanged 200 GB ceiling.
+
+| Profile | Main / Command Seconds | Entries/Second | Logical Metadata GB | Paired Storage Mean ms |
+| --- | ---: | ---: | ---: | ---: |
+| control | 74.573 / 93.896 | 670.484 | 451.079 | 39.491 |
+| crypto32 | 78.982 / 100.099 | 633.057 | 458.435 | 36.490 |
+| meta2g | 49.630 / 70.142 | 1007.446 | 1.132 | 1.772 |
+| block8g | 74.450 / 92.569 | 671.592 | 452.873 | 38.889 |
+| batch5ms | 85.599 / 105.013 | 584.117 | 439.509 | 40.177 |
+| rpc64 | 76.941 / 96.727 | 649.847 | 451.629 | 39.343 |
+| control-end | 76.589 / 97.261 | 652.838 | 463.024 | 40.666 |
+
+The end control was 2.6% slower in throughput than the start control. The 2 GiB
+metadata cache exceeded both controls by 50.3--54.3%, reduced main time by about
+one third, and reduced logical metadata work by 99.75%. Native CPU fell from
+1300--1344 seconds to 86.81 seconds; crypto queue/service work fell from about
+1004--1061 / 261--262 worker-seconds to 1.621 / 6.688. This is strong evidence that
+repeated hot metadata fetch/decrypt work controlled the read cost at 128 MiB.
+`SlateDbTuning::cache` installs separate Foyer metadata/block caches through
+`SplitCache`, so enlarging the 8 GiB block cache does not enlarge this metadata
+cache. Direct metadata hit/eviction counters were not available in attribution;
+the minimum cache capacity that fits this working set remains unmeasured.
+
+The other screens distinguish symptoms from controlling causes. Crypto32 cut
+queue time to 57.350 worker-seconds but increased service work to 435.449 and
+native CPU to 1778.62 seconds; total throughput was 3.0--5.6% below controls.
+Queue elimination alone was not a win. Batch5ms increased handles/RPC from
+5.524--5.767 to 15.888 but reduced throughput 10.5--12.9%; fewer calls did not
+justify the added wait. Block8g remained within the control range. Rpc64 peaked
+at only 27 active size RPCs, with negligible admission wait and no throughput
+gain. Do not combine these losing knobs into a presumed faster configuration.
+
+For the next forced-only experiments, retain 64 readers / 32 RPCs, 8 crypto
+workers, 2 GiB metadata / 512 MiB block cache and 1ms batching. This is a tested
+diagnostic setting, not a changed default or production approval. At meta2g,
+writer publication was 28.968 seconds (58.4% of main) and prepared-work waiting
+14.780 seconds (29.8%). Publication batching is now the largest measured stage;
+confirm the cache result and then vary publication group size independently.
+None of these main intervals reached ten minutes or establishes repeated
+sustained full-crawl qualification.
+
+The immutable control `verified-db-screen.json` and each cell's
+`DB-SCREEN-SHA256SUMS` retain complete measurements and live-setting evidence.
+Do not rerun the create-only analyzer or overwrite sealed receipts.
+
+Compare main/command throughput, metadata bytes/entry, batch density, RPC peak
+and admission wait, paired storage latency, crypto queue/service, origin work,
+daemon CPU and publication time. A faster result with unchanged work identifies
+useful overlap; less work suggests batching/cache reuse, but does not establish
+physical NFS savings. Cache-served origin work, overlapping worker-second sums
+and unavailable full-SST decode attribution retain their existing limitations.
+Neither resource headroom nor one short capture qualifies production defaults.
+Unforced optimization remains deferred.
+
+### Forced-Only Concurrency Screen
+
+The follow-up optimization scope is forced backups only; unchanged-path work is
+deferred. The initial mixed-mode concurrency sequence was interrupted via its
+owned supervisor before any measured backup began. Its failed/aborted evidence
+is preserved and is not a performance result.
+
+The new screen reuses the exact frozen 50k input and verified parent from the
+fivefold observation, rather than selecting a different source or rebuilding
+the comparison binaries. Each cell gets an independent checksum-verified
+repository/database clone, a fresh encrypted daemon and one forced full crawl.
+
+| Profile | Content Readers | Metadata RPC Limit |
+| --- | ---: | ---: |
+| baseline | 16 | 8 |
+| rpcs | 16 | 32 |
+| readers | 64 | 32 |
+
+Caches remain 128 MiB metadata / 512 MiB block, engine MultiGet stays enabled,
+batch delay stays 1ms, and publication stays at group size 64. Unchanged
+validator settings are not varied: forced files use the content-reader pool.
+Fresh evidence roots append `-forced-concurrency-{profile}` to the 50k root.
+The supervisor requires a forced-only schedule and rejects an unforced leg.
+Existing ownership, read-only protected mounts, RSS, disk-floor, fixture,
+timeout, SIGINT-first cleanup and exact restore/reopen/source checks remain.
+
+Status: completed; all three forced-only correctness captures accepted. The
+create-only analyzer verified the launch pins, fixed settings, source/parent and
+force semantics, then sealed 27/25/25 files. All 77 root-relative checksums were
+independently verified, and no candidate daemon survivors remained. Every cell
+passed exact restore, encrypted reopen, source identity, idle-writer checks and
+zero new data blobs. Peak combined owned RSS was 41.200/42.618/44.207 GB.
+
+| Measurement | baseline 16/8 | rpcs 16/32 | readers 64/32 |
+| --- | ---: | ---: | ---: |
+| Main / command seconds | 105.077 / 125.392 | 96.424 / 116.856 | 79.823 / 98.967 |
+| Entries/second | 475.841 | 518.542 | 626.388 |
+| Throughput relative to baseline | 1.000 | 1.090 | 1.316 |
+| Paired storage mean ms | 49.954 | 58.403 | 45.349 |
+| Actual size RPC peak / limit | 8 / 8 | 32 / 32 | 26 / 32 |
+| Handles/size RPC | 4.317 | 3.740 | 4.932 |
+| Size slot wait worker-seconds | 371.534 | 0.633 | 0.032 |
+| Crypto queue / service worker-seconds | 505.310 / 269.878 | 1094.242 / 314.205 | 1019.778 / 280.205 |
+| Ciphertext-origin worker-seconds | 1223.814 | 1209.456 | 623.511 |
+| Logical metadata GB | 547.026 | 532.757 | 488.931 |
+| Prepared-work wait seconds / main share | 66.051 / 62.9% | 56.247 / 58.3% | 41.643 / 52.2% |
+| Writer batch seconds | 33.195 | 34.454 | 32.175 |
+
+Raising the RPC cap alone improved throughput 9.0% and removed admission waiting,
+but increased mean storage latency and more than doubled crypto queue work.
+More RPC overlap therefore helped while exposing an inner queue, not eliminating
+latency. Raising content readers at the same 32-RPC cap improved throughput a
+further 20.8%, improved batching and reduced measured logical metadata work.
+The best cell was 31.6% faster in throughput than baseline, with 24.0% less main
+time and 10.6% less logical metadata work. These are observations from one
+sequential screen; host/NFS warming and timing-dependent grouping remain
+confounders, so they do not qualify a causal amplification or physical-I/O gain.
+
+At 64 readers the RPC peak was only 26 of 32 and admission waiting was negligible.
+There is no evidence here to raise that cap further. The writer still waits for
+prepared work for 52.2% of main time, while publication occupies 32.175 seconds,
+about 40.3%. The next forced-path discriminating screens should hold readers/RPCs
+fixed at 64/32 and separately vary effective engine caches and crypto workers.
+`CryptoExecutor` uses a bounded dedicated pool with a matching semaphore;
+`VAULTICDB_CRYPTO_THREADS` is its existing startup control. Its queue timer
+includes permit waiting and pool scheduling, so this evidence suggests testing
+worker capacity, not asserting that decrypt service alone is the bottleneck.
+Batching/cache reuse can instead reduce the repeated work submitted to that pool.
+
+The immutable baseline `verified-concurrency.json` and each cell's
+`CONCURRENCY-SHA256SUMS` retain the measurements. Do not rerun the create-only
+analyzer or overwrite sealed receipts. Worker-second sums overlap and cannot be
+added as wall-time shares; logical/origin bytes are not physical NFS/HDD traffic,
+and full SST decoding is not isolated. No main interval reached 600 seconds.
+This screen is diagnostic, not repeated mirrored/sustained qualification or a
+default/deployment change. Unforced optimization remains deferred.
+
+### Fivefold Inode Observation
+
+At the user's request, the next coalesced observation selects exactly 50,000
+entries, five times the 10k diagnostic scope, from the accepted 100k restore.
+It creates a fresh stable source and a complete verified parent before cloning
+independent unchanged and forced legs. This is not permission to modify the
+production source, repository, daemon, or earlier sealed captures.
+
+The comparison CLI and native binaries remain byte-identical to the 10k
+candidate. Validators 16, metadata RPCs 8, batch delay 1ms, engine MultiGet on,
+metadata/block caches 128/512 MiB, content readers 16 and publication groups 64
+remain fixed. The source mix and inode paths are a larger fresh selection, not
+an interleaved same-input performance comparison. Report per-entry work as well
+as totals, and do not assume total runtime must increase exactly fivefold.
+
+The expanded supervisor uses `--mode coalesced --inode-limit 50000`. Its fresh
+evidence root is
+`/volume2/NASDA2/vaultic-test-m6/metadata-read-fme-cae1-20261103-50k-coalesced`;
+runtime state is private under `/run`. Durable fixture storage is explicitly
+bounded at 350 GiB, allowing the verified parent and cloned packs/databases plus
+three verified restores. RSS, managed RAM, 2 GiB scratch, shared free-space and
+time ceilings remain unchanged. Parent setup, clones and verification stay
+outside measured main intervals. A main interval shorter than ten minutes must
+still be labelled a short screen, without padding or extrapolation.
+
+Status: completed and correctness accepted. Both measured legs covered exactly
+50,000 entries, with 41,347 regular files and 19,493,496,103 payload bytes. The
+source hash was
+`8f32883b02c37ae550a0375fa6abfe79ec52d830ef0d9cff1053522687a41e87`.
+Both stored zero new data blobs and passed exact restore, encrypted reopen,
+source identity, expected force/parent semantics and idle-writer checks. Outer
+cleanup passed; a subsequent check found no candidate daemon survivors. All
+11 launch pins and 46 root-relative evidence checksums independently verified.
+
+| Measurement | Unforced 50k | Forced 50k |
+| --- | ---: | ---: |
+| Main / command seconds | 316.380 / 335.310 | 105.016 / 122.747 |
+| Entries/second | 158.038 | 476.119 |
+| Prepared-work wait seconds / main share | 264.427 / 83.6% | 64.737 / 61.6% |
+| Writer batch seconds | 46.203 | 34.560 |
+| Size RPCs / handles | 32936 / 41372 | 9857 / 41372 |
+| Handles/size RPC | 1.256 | 4.197 |
+| Paired blob-read client / storage mean ms | 19.454 / 18.749 | 48.448 / 47.559 |
+| Size slot / result wait worker-seconds | 0.220 / 749.318 | 390.108 / 3337.359 |
+| Ciphertext-origin worker-seconds | 642.349 | 1115.296 |
+| Crypto queue / service worker-seconds | 78.906 / 379.820 | 525.201 / 267.601 |
+| Logical metadata GB | 932.811 | 545.185 |
+| Logical metadata MB/entry | 18.656 | 10.904 |
+
+The dependency remains writer waiting for prepared nodes, with the unchanged
+availability lookup mostly waiting for the database response rather than RPC
+admission. Its paired mean is 96.4% inside storage, not transport alone. Size
+RPCs peaked at eight in both legs; a peak is not evidence of continuous
+saturation or an engine concurrency knee. Unchanged batches remain close to
+singletons despite 16 validators and the 1ms coalescing window.
+
+The forced pipeline exposes a different pressure pattern: RPC-slot waiting is
+substantial, paired reads are 98.2% inside storage, and origin fetching plus
+crypto queueing dominate the measured encrypted-read work. Writer publication
+also costs 34.560 seconds, but prepared-work waiting remains larger. These
+worker-second totals overlap across concurrent requests; they cannot be added
+as exclusive wall-time shares. Origin work can be encrypted-cache-served, and
+neither its bytes nor logical wrapper bytes measure physical NFS/HDD traffic.
+CLI size-cache and encryption-header-cache evictions were zero; this does not
+establish that decoded engine metadata or block caches fit the working set.
+
+Relative to the 10k coalesced screen, unforced main time grew 4.555-fold while
+throughput rose 9.8%; forced main time grew 5.784-fold while throughput fell
+13.5%. Logical metadata work per entry fell 9.1% unforced and rose 3.1% forced.
+These are descriptive scope contrasts, not isolated optimization gains: payload
+grew 7.9-fold and source mix/private paths differ. Weak unchanged batching and
+continued amplified metadata work are still the controlling issues; no higher
+defaults or production activation follow from this observation. Separate-variable
+decoded-cache and batching screens remain the next amplification experiments.
+
+Peak combined owned RSS was 42,161,598,464 bytes. Outer capture time was
+5,682.491 seconds, including source preparation, parent setup, clones and
+verification. **Neither measured main interval naturally lasted ten minutes**;
+the larger observation still does not satisfy repeated sustained qualification.
+The immutable `verified-observation.json` and `METADATA-READ-SHA256SUMS` in the
+50k evidence root retain the measurements and explicit limits. Do not rerun the
+create-only analyzer or rewrite the sealed receipt.
+
 ## Correctness Contract
 
 1. Size/mtime and normally ctime/inode describe source changes, not repository
