@@ -698,6 +698,7 @@ impl Service {
                     .multi_get_projected_read_bytes_gap_128,
                 engine_multi_get_metrics_available: true,
                 encryption_read_metrics_json: storage.encryption_read_metrics_json(),
+                cache_read_metrics_json: storage.cache_read_metrics_json(),
             }
         });
         let process = process_metrics();

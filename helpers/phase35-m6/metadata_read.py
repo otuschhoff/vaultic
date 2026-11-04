@@ -16,6 +16,9 @@ import pilot
 WORKSPACE = Path('/root/proj/vaultic')
 PREVIOUS = Path('/volume2/NASDA2/vaultic-test-m6/force-compare-fme-cae1-20261103-10k')
 FIFTY = Path('/volume2/NASDA2/vaultic-test-m6/metadata-read-fme-cae1-20261103-50k-coalesced')
+SCALE_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/forced-scale-fme-cae1-20261103-200k')
+SCALE_RUNTIME = Path('/run/vaultic-unchanged-scale200k-20261103')
+SCALE_SOURCE = Path('/ncl1-1-vs-50/fme_cae1')
 ACCEPTED = Path('/volume2/NASDA2/vaultic-test-m6/critical-path-fme_cae1-20261102-production-cap100k/group-64')
 SEED = Path('/ncl1-1-vs-50/fme_dump/amakura/db.begin-readiness-20261001-fuU56R')
 CANDIDATE = WORKSPACE / 'bin/phase35-metadata-read/linux-amd64/vaultic'
@@ -33,12 +36,49 @@ DB_OVERRIDES = {
     'db-rpc64': {'rpc_limit': 64},
     'db-control-end': {},
 }
+FOLLOWUP_OVERRIDES = {
+    'db-scale200k': {'meta_cache_bytes': 2 << 30, 'readers': 128, 'publication_group_size': 16},
+    'db-cache2g-start': {'meta_cache_bytes': 2 << 30},
+    'db-cache2g-end': {'meta_cache_bytes': 2 << 30},
+    'db-cache128': {},
+    'db-cache256': {'meta_cache_bytes': 256 << 20},
+    'db-cache512': {'meta_cache_bytes': 512 << 20},
+    'db-cache1g': {'meta_cache_bytes': 1 << 30},
+    'db-cache4g': {'meta_cache_bytes': 4 << 30},
+    'db-group64': {'meta_cache_bytes': 2 << 30},
+    'db-group64-end': {'meta_cache_bytes': 2 << 30},
+    'db-group16': {'meta_cache_bytes': 2 << 30, 'publication_group_size': 16},
+    'db-group32': {'meta_cache_bytes': 2 << 30, 'publication_group_size': 32},
+    'db-hot-control': {'meta_cache_bytes': 2 << 30},
+    'db-hot-control-end': {'meta_cache_bytes': 2 << 30},
+    'db-hot-crypto16': {'meta_cache_bytes': 2 << 30, 'crypto_threads': 16},
+    'db-hot-crypto32': {'meta_cache_bytes': 2 << 30, 'crypto_threads': 32},
+    'db-hot-batch0ms': {'meta_cache_bytes': 2 << 30, 'batch_delay_ns': 0},
+    'db-hot-batch2ms': {'meta_cache_bytes': 2 << 30, 'batch_delay_ns': 2000000},
+    'db-hot-batch3ms': {'meta_cache_bytes': 2 << 30, 'batch_delay_ns': 3000000},
+    'db-hot-batch5ms': {'meta_cache_bytes': 2 << 30, 'batch_delay_ns': 5000000},
+    'db-read64-end': {'meta_cache_bytes': 2 << 30},
+}
+for readers in (64, 96, 128):
+    for group in (16, 32, 64):
+        FOLLOWUP_OVERRIDES[f'db-read{readers}-g{group}'] = {
+            'meta_cache_bytes': 2 << 30, 'readers': readers, 'publication_group_size': group}
+        if readers == 64:
+            FOLLOWUP_OVERRIDES[f'db-read64-g{group}-end'] = dict(FOLLOWUP_OVERRIDES[f'db-read64-g{group}'])
+DB_OVERRIDES.update(FOLLOWUP_OVERRIDES)
+
+
+def binaries(profile):
+    candidate = (WORKSPACE / 'bin/phase35-forced-followup/linux-amd64/vaultic'
+                 if profile in FOLLOWUP_OVERRIDES else CANDIDATE)
+    return candidate, candidate.with_name('vaulticdb')
 
 
 def profile_settings(profile):
     if profile in DB_OVERRIDES:
         settings = {'readers': 64, 'rpc_limit': 32, 'meta_cache_bytes': 128 << 20,
-                    'block_cache_bytes': 512 << 20, 'crypto_threads': 8, 'batch_delay_ns': 1000000}
+                    'block_cache_bytes': 512 << 20, 'crypto_threads': 8, 'batch_delay_ns': 1000000,
+                    'publication_group_size': 64}
         settings.update(DB_OVERRIDES[profile])
         return settings
     if profile not in ('baseline', 'rpcs', 'readers'):
@@ -47,13 +87,13 @@ def profile_settings(profile):
             'rpc_limit': 32 if profile in ('rpcs', 'readers') else 8}
 
 
-def observe_db_settings(group, settings):
+def observe_db_settings(group, settings, native=NATIVE):
     observed = []
     for entry in Path('/proc').iterdir():
         if not entry.name.isdigit():
             continue
         try:
-            if os.getpgid(int(entry.name)) != group or os.readlink(entry / 'exe') != str(NATIVE):
+            if os.getpgid(int(entry.name)) != group or os.readlink(entry / 'exe') != str(native):
                 continue
             values = dict(item.split(b'=', 1) for item in (entry / 'environ').read_bytes().split(b'\0') if b'=' in item)
             expected = {'VAULTICDB_CRYPTO_THREADS': settings['crypto_threads'],
@@ -73,6 +113,12 @@ def observe_db_settings(group, settings):
 def paths(mode, inode_limit=10000, profile=None):
     if mode not in ('parallel', 'coalesced', 'catalog'):
         raise ValueError('unknown metadata-read mode')
+    if inode_limit == 200000:
+        if mode != 'coalesced' or profile != 'db-scale200k':
+            raise ValueError('200k requires its explicit forced-only scale profile')
+        return SCALE_ROOT, SCALE_RUNTIME
+    if profile == 'db-scale200k':
+        raise ValueError('scale profile requires exactly 200000 entries')
     if inode_limit not in (10000, 50000) or (inode_limit == 50000 and mode != 'coalesced'):
         raise ValueError('expanded capture requires exactly 50000 coalesced entries')
     if profile is not None and (profile not in ('baseline', 'rpcs', 'readers', *DB_OVERRIDES) or inode_limit != 50000):
@@ -121,6 +167,8 @@ def protect(profile=None):
     protected = [SEED, ACCEPTED, Path('/volume2/NASDA2/rustic'), WORKSPACE, PREVIOUS / 'group-64', PREVIOUS / 'input']
     if profile is not None:
         protected.append(FIFTY)
+    if profile == 'db-scale200k':
+        protected.append(SCALE_SOURCE)
     for path in protected:
         encoded = os.fsencode(path)
         if library.mount(encoded, encoded, None, 4096, None) != 0 or library.mount(None, encoded, None, 4096 | 32 | 1, None) != 0:
@@ -178,6 +226,7 @@ def storage_bytes(root):
 
 def execute(mode, inode_limit=10000, profile=None):
     root, runtime = paths(mode, inode_limit, profile)
+    candidate, native = binaries(profile)
     settings = profile_settings(profile) if profile is not None else None
     db_screen = profile in DB_OVERRIDES
     ceiling = fixture_ceiling(inode_limit)
@@ -194,7 +243,7 @@ def execute(mode, inode_limit=10000, profile=None):
         if any(pilot.digest(path) != expected[str(path)] for path in (CANDIDATE, NATIVE)):
             raise ValueError('concurrency screen comparison binaries differ from accepted 50k capture')
     pins = [{'path': str(path), 'sha256': pilot.digest(path)} for path in
-            (Path(__file__), root / '.nobackup', root / 'qualifier.test', root / 'source.patch', CANDIDATE, NATIVE,
+            (Path(__file__), root / '.nobackup', root / 'qualifier.test', root / 'source.patch', candidate, native,
              ACCEPTED / 'result.json', PREVIOUS / 'group-64/result.json', WORKSPACE / 'cmd/vaultic/working_benchmark_test.go',
              WORKSPACE / 'helpers/phase35-m6/observe.py', Path(pilot.__file__))]
     if profile is not None:
@@ -208,8 +257,8 @@ def execute(mode, inode_limit=10000, profile=None):
                      'metadata_read_concurrency': settings['rpc_limit'] if settings is not None else None,
                      'rss_ceiling_bytes': RSS_CEILING, 'disk_floor_bytes': FLOOR, 'fixture_ceiling_bytes': ceiling,
                      'managed_ram_limit': '160GiB', 'scratch_limit': '2GiB', 'total_timeout_seconds': 28800,
-                     'schedule': (['forced'] if profile is not None else (['unforced', 'forced'] if inode_limit == 10000 else ['parent-setup', 'unforced', 'forced'])), 'production_repository_writable': False,
-                     'source': str(FIFTY / 'input') if profile is not None else (str(PREVIOUS / 'input') if inode_limit == 10000 else str(ACCEPTED / 'restore/ncl1-1-vs-50/fme_cae1')), 'toolchains': {
+                     'schedule': (['source-freeze', 'parent-setup', 'forced'] if inode_limit == 200000 else (['forced'] if profile is not None else (['unforced', 'forced'] if inode_limit == 10000 else ['parent-setup', 'unforced', 'forced']))), 'production_repository_writable': False,
+                     'source': str(root / 'input') if inode_limit == 200000 else (str(FIFTY / 'input') if profile is not None else (str(PREVIOUS / 'input') if inode_limit == 10000 else str(ACCEPTED / 'restore/ncl1-1-vs-50/fme_cae1'))), 'toolchains': {
                          name: subprocess.check_output(command, text=True).strip() for name, command in
                          [('go', ['go', 'version']), ('rust', ['rustc', '--version']), ('cargo', ['cargo', '--version'])]}})
     environment = {key: value for key, value in os.environ.items()
@@ -219,8 +268,8 @@ def execute(mode, inode_limit=10000, profile=None):
                         'VAULTIC_FEATURES': 'slatedb-authoritative=true', 'VAULTIC_PHASE35_METADATA_READ_COMPARE': mode,
                         'VAULTIC_PHASE35_THROUGHPUT_ROOT': str(root), 'VAULTIC_PHASE35_THROUGHPUT_FORCE_COMPARE_RETRY': '1',
                         'VAULTIC_PHASE35_THROUGHPUT_CONTROL_ROOT': str(runtime),
-                        'VAULTIC_PHASE35_THROUGHPUT_CANDIDATE_SHA256': pilot.digest(CANDIDATE),
-                        'VAULTIC_PHASE35_THROUGHPUT_NATIVE_SHA256': pilot.digest(NATIVE)})
+                        'VAULTIC_PHASE35_THROUGHPUT_CANDIDATE_SHA256': pilot.digest(candidate),
+                        'VAULTIC_PHASE35_THROUGHPUT_NATIVE_SHA256': pilot.digest(native)})
     test_name = 'TestPublicationForceComparisonRetry'
     if profile is not None:
         environment.update({'VAULTIC_PHASE35_METADATA_READ_INODE_LIMIT': '50000',
@@ -228,6 +277,16 @@ def execute(mode, inode_limit=10000, profile=None):
                             'VAULTIC_PHASE35_METADATA_READ_CONCURRENCY_PROFILE': profile})
         if db_screen:
             environment['VAULTICDB_CRYPTO_THREADS'] = str(settings['crypto_threads'])
+        if inode_limit == 200000:
+            test_name = 'TestPublicationScale200kQualification'
+            environment.pop('VAULTIC_PHASE35_METADATA_READ_INODE_LIMIT')
+            environment.pop('VAULTIC_PHASE35_THROUGHPUT_FORCE_COMPARE_RETRY')
+            environment.update({'VAULTIC_PHASE35_SCALE_INODE_LIMIT': '200000',
+                                'VAULTIC_PHASE35_THROUGHPUT_ON_DEMAND': '1',
+                                'VAULTIC_PHASE35_THROUGHPUT_ORDER': '64',
+                                'VAULTIC_PHASE35_THROUGHPUT_SOURCE': str(root / 'input'),
+                                'VAULTIC_PHASE35_THROUGHPUT_CANDIDATE': str(candidate),
+                                'VAULTIC_PHASE35_THROUGHPUT_NATIVE': str(native)})
     elif inode_limit == 50000:
         test_name = 'TestPublicationBackupQualification'
         environment.pop('VAULTIC_PHASE35_THROUGHPUT_FORCE_COMPARE_RETRY')
@@ -259,7 +318,7 @@ def execute(mode, inode_limit=10000, profile=None):
                 last_storage = 0
                 while True:
                     rss, count = pilot.process_group_rss(process.pid)
-                    actual_settings = observe_db_settings(process.pid, settings) if db_screen else []
+                    actual_settings = observe_db_settings(process.pid, settings, native) if db_screen else []
                     if actual_settings:
                         result['db_settings_verified'] = True
                     elapsed = time.monotonic() - started
@@ -311,15 +370,194 @@ def execute(mode, inode_limit=10000, profile=None):
     return 0 if result['accepted'] else 1
 
 
+def summarize_followup(root, profile, inode_limit=50000):
+    outcome = json.loads((root / 'outcome.json').read_text())
+    measured = json.loads((root / 'group-64/forced/result.json').read_text())
+    settings = profile_settings(profile)
+    if not outcome['accepted'] or not outcome['db_settings_verified'] or outcome['exit_code'] != 0:
+        raise ValueError('follow-up capture or live settings were not accepted')
+    expected_entries, expected_regular, expected_bytes = 50000, 41347, 19493496103
+    expected_digest = '8f32883b02c37ae550a0375fa6abfe79ec52d830ef0d9cff1053522687a41e87'
+    expected_parent = '60dfb46069fb4e18b603d69caf61dc3ca1db76099089ab18396985aa8c9f8e2b'
+    if inode_limit == 200000:
+        if profile != 'db-scale200k':
+            raise ValueError('200k receipt requires its explicit scale profile')
+        source = json.loads((root / 'source-observation.json').read_text())
+        parent = json.loads((root / 'group-64/result.json').read_text())
+        expected_entries, expected_regular, expected_bytes = source['entries'], source['regular_files'], source['bytes']
+        expected_digest, expected_parent = source['sha256'], parent['snapshot']
+        if expected_entries != 200000 or expected_bytes > 64 << 30 or not parent['restore_verified'] or not parent['reopen_verified']:
+            raise ValueError('200k source dimensions or parent acceptance incomplete')
+        if parent['input_sha256'] != expected_digest or parent['files'] != source['files'] or parent['bytes'] != expected_bytes:
+            raise ValueError('200k parent source identity differs from the frozen source')
+    elif inode_limit != 50000 or profile == 'db-scale200k':
+        raise ValueError('unapproved follow-up receipt size')
+    if measured['entries'] != expected_entries or measured['regular_files'] != expected_regular or measured['bytes'] != expected_bytes:
+        raise ValueError('follow-up source dimensions differ')
+    if measured['input_sha256'] != expected_digest:
+        raise ValueError('follow-up source digest differs')
+    if measured['baseline_parent'] != expected_parent:
+        raise ValueError('follow-up parent differs')
+    if measured['forced'] is not True or measured['summary']['data_blobs'] != 0 or (root / 'group-64/unforced').exists():
+        raise ValueError('follow-up force or unchanged-content semantics differ')
+    if not all(measured[name] is True for name in ('restore_verified', 'reopen_verified', 'source_unchanged')):
+        raise ValueError('follow-up correctness incomplete')
+    if measured['metadata_cache_bytes'] != settings['meta_cache_bytes'] or measured['block_cache_bytes'] != settings['block_cache_bytes']:
+        raise ValueError('follow-up actual cache settings differ')
+    if measured['crypto_threads_requested'] != str(settings['crypto_threads']):
+        raise ValueError('follow-up actual crypto settings differ')
+    expected_flags = [f"--read-concurrency={settings['readers']}",
+                      f"--metadata-read-concurrency={settings['rpc_limit']}",
+                      f"--metadata-batch-delay={settings['batch_delay_ns'] // 1000000}ms",
+                      f"--metadata-publication-group-size={settings['publication_group_size']}"]
+    if measured['metadata_read_flags'] != expected_flags or measured['candidate'] != str(binaries(profile)[0]) or measured['engine_multi_get'] is not True:
+        raise ValueError('follow-up binary, batching, concurrency or engine settings differ')
+    before, after = measured['writer_before'], measured['writer_after']
+    if before['process_started_unix_ms'] != after['process_started_unix_ms']:
+        raise ValueError('follow-up native process changed during measurement')
+    deltas = {}
+    for field in ('cache_reads', 'encryption_reads'):
+        first, last = before['attribution'][field], after['attribution'][field]
+        if field == 'cache_reads':
+            deltas[field] = {}
+            for kind in ('block', 'index', 'filter', 'stats'):
+                deltas[field][kind] = {}
+                for name in ('hits', 'misses'):
+                    if last[kind][name] < first[kind][name]:
+                        raise ValueError('follow-up cache counter reset')
+                    deltas[field][kind][name] = last[kind][name] - first[kind][name]
+        else:
+            if any(last[name] < first[name] for name in first):
+                raise ValueError('follow-up encryption counter reset')
+            deltas[field] = {name: last[name] - first[name] for name in first}
+    critical = measured['critical_path']
+    stages = critical['reconciliation']['publication_stages']
+    if not isinstance(stages, dict) or set(stages) != {'planning', 'commit'}:
+        raise ValueError('follow-up publication stage export missing')
+    main = measured['main_seconds']
+    if not main > 0:
+        raise ValueError('follow-up main interval invalid')
+    return {'profile': profile, 'settings': settings, 'main_seconds': main,
+            'command_seconds': measured['command_seconds'], 'entries': expected_entries, 'entries_per_second': expected_entries / main,
+            'cli_cpu_seconds': measured['cli_cpu_seconds'], 'publication_stages': stages,
+            'reconciliation': critical['reconciliation'], 'deltas': deltas,
+            'peak_combined_rss_bytes': outcome['peak_combined_rss_bytes'],
+            'physical_nfs_traffic_measured': False, 'cache_evictions_measured': False,
+            'single_pass_sustained_qualified': main >= 600, 'deployment_qualified': False}
+
+
+def seal_followup(root, row):
+    pilot.write_json(root / 'verified-followup.json', row)
+    artifacts = sorted(path for directory in (root, root / 'driver', root / 'group-64', root / 'group-64/forced')
+                       for path in directory.glob('*') if path.is_file())
+    manifest = root / 'FOLLOWUP-SHA256SUMS'
+    with private_output(manifest, text=True) as output:
+        for path in artifacts:
+            output.write(pilot.digest(path) + '  ' + str(path.relative_to(root)) + '\n')
+    subprocess.run(['sha256sum', '-c', manifest.name], cwd=root, check=True)
+
+
+def execute_series():
+    series = Path('/volume2/NASDA2/vaultic-test-m6/forced-followup-fme-cae1-20261103')
+    if series.exists() or series.parent.resolve() != series.parent:
+        raise ValueError('refuse existing or noncanonical follow-up series')
+    pilot.private_directory(series)
+    driver = WORKSPACE / 'bin/phase35-forced-followup/linux-amd64/qualifier.test'
+    pinned = {str(path): pilot.digest(path) for path in (driver, *binaries('db-cache2g-start'), Path(__file__))}
+    pilot.write_json(series / 'launch-pins.json', {'pins': pinned, 'production_modified': False,
+                     'source_entries': 50000, 'single_pass_sustained_required_seconds': 600})
+    rows = []
+
+    def cell(profile):
+        if any(pilot.digest(Path(path)) != digest for path, digest in pinned.items()):
+            raise ValueError('follow-up series binary or supervisor pin changed')
+        prepare('coalesced', 50000, profile)
+        root, runtime = paths('coalesced', 50000, profile)
+        shutil.copyfile(driver, root / 'qualifier.test')
+        os.chmod(root / 'qualifier.test', 0o500)
+        command = ['unshare', '--mount', '--propagation', 'private', sys.executable, str(Path(__file__)),
+                   '--mode=coalesced', '--inode-limit=50000', '--concurrency-profile=' + profile]
+        with private_output(series / (profile + '.stdout.log')) as output, private_output(series / (profile + '.stderr.log')) as errors:
+            process = subprocess.Popen(command, stdout=output, stderr=errors, start_new_session=True)
+            try:
+                status = process.wait()
+                if status:
+                    raise subprocess.CalledProcessError(status, command)
+            except BaseException:
+                if process.poll() is None:
+                    process.send_signal(signal.SIGINT)
+                    try:
+                        process.wait(timeout=150)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=30)
+                        raise ValueError('series supervisor required kill fallback; preserve rejected capture')
+                raise
+        row = summarize_followup(root, profile)
+        seal_followup(root, row)
+        rows.append(row)
+        pilot.write_json(series / (profile + '.json'), row)
+        shutil.rmtree(runtime)
+        print(json.dumps({'profile': profile, 'accepted': True, 'main_seconds': row['main_seconds'],
+                          'entries_per_second': row['entries_per_second']}), flush=True)
+        return row
+
+    try:
+        for profile in ('db-cache2g-start', 'db-cache128', 'db-cache256', 'db-cache512', 'db-cache1g', 'db-cache4g', 'db-cache2g-end'):
+            cell(profile)
+        groups = {}
+        for profile in ('db-group64', 'db-group16', 'db-group32', 'db-group64-end'):
+            groups[profile] = cell(profile)
+        control = (groups['db-group64']['main_seconds'] + groups['db-group64-end']['main_seconds']) / 2
+        candidates = {64: control, 16: groups['db-group16']['main_seconds'], 32: groups['db-group32']['main_seconds']}
+        best_group = min(candidates, key=candidates.get)
+        if candidates[best_group] >= control * 0.95:
+            best_group = 64
+        pilot.write_json(series / 'publication-selection.json', {'selected_group': best_group,
+                         'main_seconds': candidates, 'minimum_screen_improvement': 0.05, 'causally_qualified': False})
+        for profile in ('db-hot-control', 'db-hot-crypto16', 'db-hot-crypto32', 'db-hot-batch0ms',
+                        'db-hot-batch2ms', 'db-hot-batch3ms', 'db-hot-batch5ms', 'db-hot-control-end'):
+            cell(profile)
+        for profile in (f'db-read64-g{best_group}', f'db-read96-g{best_group}',
+                        f'db-read128-g{best_group}', f'db-read64-g{best_group}-end'):
+            cell(profile)
+        pilot.write_json(series / 'verified-series.json', {'accepted': True, 'rows': rows,
+                         'selected_publication_group': best_group, 'deployment_qualified': False,
+                         'single_pass_sustained_qualified': any(row['single_pass_sustained_qualified'] for row in rows),
+                         'causally_qualified': False, 'schedule': [row['profile'] for row in rows]})
+    except BaseException as error:
+        pilot.write_json(series / 'failed-series.json', {'accepted': False, 'completed_profiles': [row['profile'] for row in rows],
+                         'failure': type(error).__name__ + ': ' + str(error)})
+        raise
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', required=True, choices=('parallel', 'coalesced', 'catalog'))
-    parser.add_argument('--inode-limit', type=int, choices=(10000, 50000), default=10000)
+    parser.add_argument('--inode-limit', type=int, choices=(10000, 50000, 200000), default=10000)
     parser.add_argument('--concurrency-profile', choices=('baseline', 'rpcs', 'readers', *DB_OVERRIDES))
     parser.add_argument('--prepare', action='store_true')
+    parser.add_argument('--series', action='store_true')
     arguments = parser.parse_args()
     os.umask(0o077)
-    if arguments.prepare:
+    if arguments.series:
+        if arguments.mode != 'coalesced' or arguments.inode_limit != 50000 or arguments.prepare or arguments.concurrency_profile is not None:
+            raise ValueError('series requires forced-only 50000-entry coalesced routing')
+        execute_series()
+    elif arguments.prepare:
         prepare(arguments.mode, arguments.inode_limit, arguments.concurrency_profile)
     else:
-        raise SystemExit(execute(arguments.mode, arguments.inode_limit, arguments.concurrency_profile))
+        status = execute(arguments.mode, arguments.inode_limit, arguments.concurrency_profile)
+        if status == 0 and arguments.inode_limit == 200000:
+            root, runtime = paths(arguments.mode, arguments.inode_limit, arguments.concurrency_profile)
+            try:
+                row = summarize_followup(root, arguments.concurrency_profile, arguments.inode_limit)
+                seal_followup(root, row)
+                shutil.rmtree(runtime)
+                print(json.dumps({'accepted': True, 'entries': 200000, 'main_seconds': row['main_seconds'],
+                                  'entries_per_second': row['entries_per_second'],
+                                  'single_pass_sustained_qualified': row['single_pass_sustained_qualified']}), flush=True)
+            except BaseException as error:
+                pilot.write_json(root / 'analysis-failure.json', {'accepted': False, 'failure': type(error).__name__ + ': ' + str(error)})
+                raise
+        raise SystemExit(status)

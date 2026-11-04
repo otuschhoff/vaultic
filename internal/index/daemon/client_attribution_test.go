@@ -28,6 +28,23 @@ func TestEncryptionReadMetricsCompatibility(test *testing.T) {
 	}
 }
 
+func TestCacheReadMetricsCompatibility(test *testing.T) {
+	valid := `{"block":{"hits":2,"misses":3},"index":{"hits":4,"misses":5},"filter":{"hits":6,"misses":7},"stats":{"hits":8,"misses":9}}`
+	for _, encoded := range []string{"", "null", "[]", "{", "{}", strings.Repeat(" ", 4097), strings.Replace(valid, `"hits":2`, `"hits":null`, 1), strings.Replace(valid, `"hits":2`, `"hits":-1`, 1), strings.Replace(valid, `"hits":2`, `"hits":18446744073709551616`, 1), strings.Replace(valid, `{"hits":2,"misses":3}`, `null`, 1)} {
+		if metrics := cacheReadMetrics([]byte(encoded)); metrics != nil {
+			test.Fatalf("invalid optional cache telemetry accepted: %q", encoded)
+		}
+	}
+	status := writerStatus(&vaulticdbv1.WriterStatusResponse{Attribution: &vaulticdbv1.AttributionSnapshot{CacheReadMetricsJson: []byte(valid)}})
+	if status.Attribution.CacheReads == nil || (*status.Attribution.CacheReads)["block"] != (CacheLookupMetrics{Hits: 2, Misses: 3}) || (*status.Attribution.CacheReads)["stats"] != (CacheLookupMetrics{Hits: 8, Misses: 9}) {
+		test.Fatalf("optional cache telemetry lost: %+v", status.Attribution.CacheReads)
+	}
+	older := writerStatus(&vaulticdbv1.WriterStatusResponse{Attribution: &vaulticdbv1.AttributionSnapshot{}})
+	if older.Attribution.CacheReads != nil {
+		test.Fatal("older daemon became an available zero")
+	}
+}
+
 func TestWriterStatusAttributionMapping(t *testing.T) {
 	status := writerStatus(&vaulticdbv1.WriterStatusResponse{
 		ProcessStartedUnixMs: 100,

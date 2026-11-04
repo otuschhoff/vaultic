@@ -99,6 +99,7 @@ type Metrics struct {
 	WriterHardlinksNS                         uint64                                          `json:"writer_hardlinks_ns"`
 	WriterDirectoriesNS                       uint64                                          `json:"writer_directories_ns"`
 	WriterRootNS                              uint64                                          `json:"writer_root_ns"`
+	PublicationStages                         *daemon.PublicationMetrics                      `json:"publication_stages,omitempty"`
 	Scanned                                   uint64                                          `json:"scanned"`
 	Reused                                    uint64                                          `json:"reused"`
 	Changed                                   uint64                                          `json:"changed"`
@@ -404,6 +405,10 @@ func (reconciler *Reconciler) Metrics() Metrics {
 	}
 	for index := range metrics.PublicationGroups {
 		metrics.PublicationGroups[index] = reconciler.publicationGroups[index].Load()
+	}
+	if store, ok := reconciler.store.(interface{ PublicationMetrics() daemon.PublicationMetrics }); ok {
+		stages := store.PublicationMetrics()
+		metrics.PublicationStages = &stages
 	}
 	if phase := reconciler.writerPhase.Load(); phase != nil {
 		metrics.WriterPhase = phase.name

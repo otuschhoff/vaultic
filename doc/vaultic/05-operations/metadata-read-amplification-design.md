@@ -309,6 +309,74 @@ and unavailable full-SST decode attribution retain their existing limitations.
 Neither resource headroom nor one short capture qualifies production defaults.
 Unforced optimization remains deferred.
 
+### Completed Forced Follow-Up Screen and 200k Scaling
+
+The 23-cell forced-only follow-up completed with exact source, restore, encrypted
+reopen, idle-writer, live-setting and cleanup acceptance in every cell. All 598
+root-relative checksums and launch pins were independently verified before
+changing the diagnostic driver. The create-only series evidence is under
+`/volume2/NASDA2/vaultic-test-m6/forced-followup-fme-cae1-20261103`; each capture
+has `verified-followup.json` and `FOLLOWUP-SHA256SUMS`.
+
+Direct SlateDB cache counters are now available through the existing recorder:
+`slatedb.db_cache.access_count`, with entry-kind and hit/miss labels. Concurrent
+cache fetches retain SlateDB's own hit classification; errors are not misses.
+These are cache-access counters, not physical NFS traffic or eviction counts.
+
+| Metadata Cache | Entries/s | Metadata Hits | Metadata Misses |
+| --- | ---: | ---: | ---: |
+| 128 MiB | 640.4 | 1,661,516 | 188,758 |
+| 256 MiB | 709.9 | 1,681,119 | 159,753 |
+| 512 MiB | 818.4 | 1,732,727 | 83,413 |
+| 1 GiB | 887.0 | 1,876,641 | 13,934 |
+| 2 GiB, start | 975.3 | 1,926,836 | 327 |
+| 4 GiB | 655.9 | 1,931,128 | 327 |
+| 2 GiB, end | 754.1 | 1,941,228 | 327 |
+
+The cache-fit boundary is between the tested 1 and 2 GiB settings for this
+fixture. Two and four GiB had the same 327 metadata misses; 4 GiB showed no
+additional work reduction. Throughput is not a causal cache-size ranking:
+identical 2 GiB controls drifted from 51.268 to 66.305 main seconds.
+
+Group-64 controls drifted from 75.093 to 51.349 seconds, while group-16 and
+group-32 took 53.073 and 68.479 seconds. The automatic screen selected group 16
+against the averaged controls, but it did not beat the ending group-64 control.
+Do not call group 16 a qualified improvement. Hot-cache crypto and batch cases
+took 50.629--53.304 seconds, while their identical controls took 57.717 and
+49.732 seconds; these small apparent gains do not establish a winning setting.
+
+The fixed-group-16 reader screen was more stable: 64-reader controls took
+51.893 and 52.489 seconds; 96 and 128 readers took 50.562 and 49.003 seconds
+(988.9 and 1,020.3 entries/s). The 128-reader result is a provisional scaling
+candidate, not a repeated causal or production qualification.
+
+Publication histogram export also has a population limitation: every forced
+cell reported planning Count=0 and commit Count=5, totaling only
+0.311--0.410 seconds. It does not account for the whole writer publication
+stage; do not interpret it as proof that publication planning is free.
+
+The user authorized a direct jump to 200,000 entries, explicitly skipping a
+100k run. The guarded scale workflow freezes a new verified source subset,
+creates a complete nonselective parent, then independently clones it for one
+forced full traversal. Candidate settings are 128 readers, 32 RPCs, group 16,
+2 GiB metadata cache, 512 MiB block cache, 8 crypto workers and 1ms batching.
+The existing 200 GB RSS, 350 GiB fixture, 64 GiB source-byte and free-space
+guards remain in force. The first attempt froze 200,000 entries and restored
+23,520,039,140 source bytes, then failed a harness assertion that mistook its
+source-freeze manifest for a bounded backup selection. No accepted parent
+receipt or forced 200k measurement was produced. Its failed evidence is
+preserved under
+`/volume2/NASDA2/vaultic-test-m6/forced-scale-fme-cae1-20261103-200k`, with 23
+artifacts verified by `FAILED-SHA256SUMS`.
+
+The saved correction distinguishes a full frozen-source parent from a bounded
+selection; all six crawl-mode regression cases pass under the Go race detector.
+The end-to-end retry remains outstanding and requires fresh create-only paths
+and a newly pinned driver. Source freeze, parent setup and restores do not count
+toward the measured main interval. No short passes will be combined to claim
+ten-minute sustained qualification. Production, defaults and NFS configuration
+remain unchanged; unforced work stays deferred.
+
 ### Forced-Only Concurrency Screen
 
 The follow-up optimization scope is forced backups only; unchanged-path work is

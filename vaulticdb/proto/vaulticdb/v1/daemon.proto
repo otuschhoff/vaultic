@@ -445,6 +445,7 @@ message AttributionSnapshot {
   uint64 engine_multi_get_projected_read_bytes_gap_128 = 56;
   bool engine_multi_get_metrics_available = 57;
   bytes encryption_read_metrics_json = 58;
+  bytes cache_read_metrics_json = 59;
 }
 
 message DemoteWriterRequest {

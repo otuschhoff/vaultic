@@ -2123,6 +2123,27 @@ impl Storage {
             .unwrap_or_default()
     }
 
+    pub(crate) fn cache_read_metrics_json(&self) -> Vec<u8> {
+        let Some(recorder) = &self.engine_metrics else {
+            return Vec::new();
+        };
+        let metrics = recorder.snapshot();
+        let name = slatedb::db_cache::stats::ACCESS_COUNT;
+        if metrics.by_name(name).is_empty() {
+            return Vec::new();
+        }
+        let snapshot: serde_json::Map<String, serde_json::Value> = [("block", "data_block"), ("index", "index"), ("filter", "filter"), ("stats", "stats")]
+            .into_iter()
+            .map(|(field, kind)| {
+                (field.to_owned(), serde_json::json!({
+                    "hits": engine_metric_with_labels(&metrics, name, &[("entry_kind", kind), ("result", "hit")]),
+                    "misses": engine_metric_with_labels(&metrics, name, &[("entry_kind", kind), ("result", "miss")]),
+                }))
+            })
+            .collect();
+        serde_json::to_vec(&snapshot).unwrap_or_default()
+    }
+
     pub(crate) fn engine_metrics_snapshot(&self) -> EngineMetricsSnapshot {
         let settings = self.slatedb_tuning.settings();
         let configured = || EngineMetricsSnapshot {

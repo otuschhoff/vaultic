@@ -461,7 +461,37 @@ func encryptionReadMetrics(encoded []byte) *EncryptionReadMetrics {
 	return &result
 }
 
+type CacheLookupMetrics struct {
+	Hits   uint64 `json:"hits"`
+	Misses uint64 `json:"misses"`
+}
+
+type CacheReadMetrics map[string]CacheLookupMetrics
+
+func cacheReadMetrics(encoded []byte) *CacheReadMetrics {
+	if len(encoded) == 0 || len(encoded) > 4096 {
+		return nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		return nil
+	}
+	result := make(CacheReadMetrics, 4)
+	for _, name := range []string{"block", "index", "filter", "stats"} {
+		var lookup *struct {
+			Hits   *uint64 `json:"hits"`
+			Misses *uint64 `json:"misses"`
+		}
+		if err := json.Unmarshal(fields[name], &lookup); err != nil || lookup == nil || lookup.Hits == nil || lookup.Misses == nil {
+			return nil
+		}
+		result[name] = CacheLookupMetrics{Hits: *lookup.Hits, Misses: *lookup.Misses}
+	}
+	return &result
+}
+
 type AttributionSnapshot struct {
+	CacheReads                             *CacheReadMetrics       `json:"cache_reads,omitempty"`
 	EncryptionReads                        *EncryptionReadMetrics  `json:"encryption_reads,omitempty"`
 	AdmissionWait                          TimingSnapshot          `json:"admission_wait"`
 	AdmissionLockHold                      TimingSnapshot          `json:"admission_lock_hold"`
@@ -1957,6 +1987,7 @@ func attributionSnapshot(response *vaulticdbv1.AttributionSnapshot) AttributionS
 		EngineWALFlushBytes:                    response.GetEngineWalFlushBytes(),
 		EngineGetKeys:                          response.GetEngineGetKeys(),
 		EncryptionReads:                        encryptionReadMetrics(response.GetEncryptionReadMetricsJson()),
+		CacheReads:                             cacheReadMetrics(response.GetCacheReadMetricsJson()),
 		EngineFilterPointPositive:              response.GetEngineFilterPointPositives(),
 		EngineFilterPointNegative:              response.GetEngineFilterPointNegatives(),
 		EngineFilterPointFalsePositive:         response.GetEngineFilterPointFalsePositives(),

@@ -420,6 +420,7 @@ mod tests {
         }
         let engine = storage.engine_metrics_snapshot();
         assert_eq!(engine.write_batches, 0);
+        assert!(storage.cache_read_metrics_json().is_empty());
         assert_eq!(engine.write_ops, 0);
         assert_eq!(engine.batch_write_queue.completed, 0);
         assert_eq!(engine.batch_write_service.completed, 0);
@@ -823,7 +824,21 @@ mod tests {
             .set(now_unix_ms.saturating_add(60_000));
 
         let mut storage = transition_storage(Database::Writer(db), database, object_store, 1);
+        for (ordinal, kind) in ["data_block", "index", "filter", "stats"].into_iter().enumerate() {
+            for (result, base) in [("hit", 100_u64), ("miss", 7_u64)] {
+                engine_metrics.register_counter(
+                    slatedb::db_cache::stats::ACCESS_COUNT,
+                    "",
+                    &[("entry_kind", kind), ("result", result)],
+                ).increment(base + ordinal as u64);
+            }
+        }
         storage.engine_metrics = Some(engine_metrics);
+        let cache: serde_json::Value = serde_json::from_slice(&storage.cache_read_metrics_json()).unwrap();
+        for (ordinal, field) in ["block", "index", "filter", "stats"].into_iter().enumerate() {
+            assert_eq!(cache[field]["hits"], 100_u64 + ordinal as u64);
+            assert_eq!(cache[field]["misses"], 7_u64 + ordinal as u64);
+        }
         let engine = storage.engine_metrics_snapshot();
         assert_eq!(engine.write_batches, 1);
         assert_eq!(engine.write_ops, 1);

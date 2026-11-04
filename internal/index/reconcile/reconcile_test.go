@@ -31,6 +31,36 @@ import (
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 )
 
+func TestMetricsPublicationStages(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
+			reconciler := &Reconciler{store: newFakeStore()}
+			if enabled {
+				reconciler.store = daemon.NewSchemaStore(nil)
+			}
+			metrics := reconciler.Metrics()
+			if (metrics.PublicationStages != nil) != enabled {
+				t.Fatalf("unexpected publication stages: %+v", metrics.PublicationStages)
+			}
+			encoded, err := json.Marshal(metrics)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &fields); err != nil {
+				t.Fatal(err)
+			}
+			stages, found := fields["publication_stages"]
+			if found != enabled {
+				t.Fatalf("publication JSON capability differs: %s", encoded)
+			}
+			if enabled && (!bytes.Contains(stages, []byte(`"planning"`)) || !bytes.Contains(stages, []byte(`"commit"`))) {
+				t.Fatalf("missing stage distributions: %s", stages)
+			}
+		})
+	}
+}
+
 func TestDecodeDeferredObservationsStrict(t *testing.T) {
 	want := DeferredObservation{SnapshotPath: "/snapshot/file", SourcePath: "/source/file", ParentPath: "/source"}
 	payload, err := json.Marshal(want)

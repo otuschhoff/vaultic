@@ -133,8 +133,8 @@ type SchemaStore struct {
 }
 
 type PublicationMetrics struct {
-	Planning DurationDistribution
-	Commit   DurationDistribution
+	Planning DurationDistribution `json:"planning"`
+	Commit   DurationDistribution `json:"commit"`
 }
 
 func (store *SchemaStore) PublicationMetrics() PublicationMetrics {

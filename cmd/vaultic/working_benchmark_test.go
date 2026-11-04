@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -242,6 +243,14 @@ func TestPublicationQualificationOnDemandBackup(t *testing.T) {
 	testPublicationReadCandidate(t, "", nil, 0, false)
 }
 
+func TestPublicationFollowupTelemetryNative(t *testing.T) {
+	if os.Getenv("VAULTIC_METADATA_READ_QUALIFY") != "1" {
+		t.Skip("isolated follow-up telemetry qualification is opt-in")
+	}
+	testPublicationReadCandidate(t, "/root/proj/vaultic/bin/phase35-forced-followup/linux-amd64/vaultic",
+		[]string{"--read-concurrency=64", "--metadata-read-concurrency=32", "--metadata-batch-delay=1ms", "--metadata-publication-group-size=64"}, 2<<30, true)
+}
+
 func TestMetadataReadCandidatesNative(t *testing.T) {
 	const candidate = "/root/proj/vaultic/bin/phase35-metadata-read/linux-amd64/vaultic"
 	if os.Getenv("VAULTIC_METADATA_READ_QUALIFY") != "1" {
@@ -372,10 +381,11 @@ func testPublicationReadCandidate(t *testing.T, candidate string, extraFlags []s
 			Phase          string  `json:"phase"`
 			SecondsElapsed float64 `json:"seconds_elapsed"`
 			Reconciliation struct {
-				Observed uint64 `json:"observed"`
-				Scanned  uint64 `json:"scanned"`
-				Failed   uint64 `json:"failed"`
-				Deferred uint64 `json:"deferred"`
+				Observed          uint64                     `json:"observed"`
+				Scanned           uint64                     `json:"scanned"`
+				Failed            uint64                     `json:"failed"`
+				Deferred          uint64                     `json:"deferred"`
+				PublicationStages *daemon.PublicationMetrics `json:"publication_stages"`
 			} `json:"reconciliation"`
 		}
 		for _, line := range bytes.Split(output, []byte{'\n'}) {
@@ -432,6 +442,10 @@ func testPublicationReadCandidate(t *testing.T, candidate string, extraFlags []s
 		}
 		if candidate == "/root/proj/vaultic/bin/phase35-metadata-read/linux-amd64/vaultic" && status.Attribution.EncryptionReads == nil {
 			return fmt.Errorf("authenticated native transport omitted encryption read attribution")
+		}
+		if candidate == "/root/proj/vaultic/bin/phase35-forced-followup/linux-amd64/vaultic" &&
+			(status.Attribution.EncryptionReads == nil || status.Attribution.CacheReads == nil || main.Reconciliation.PublicationStages == nil) {
+			return fmt.Errorf("authenticated follow-up transport omitted cache, encryption or publication attribution")
 		}
 		return nil
 	}))
@@ -766,6 +780,65 @@ func publicationQualificationRegularFiles(t *testing.T, source string, paths []s
 	return count
 }
 
+const publicationScale200kRoot = "/volume2/NASDA2/vaultic-test-m6/forced-scale-fme-cae1-20261103-200k"
+
+func publicationScaleInodeLimit(selector, root string) (uint64, error) {
+	if selector == "" {
+		return 100_000, nil
+	}
+	if selector != "200000" || root != publicationScale200kRoot {
+		return 0, fmt.Errorf("200k scaling requires its explicit fresh private root")
+	}
+	return 200_000, nil
+}
+
+func validatePublicationCrawlMode(mode string, bounded bool) error {
+	expected := "full"
+	if bounded {
+		expected = "bounded"
+	}
+	if mode != expected {
+		return fmt.Errorf("snapshot crawl coverage %q differs from required %q", mode, expected)
+	}
+	return nil
+}
+
+func TestPublicationCrawlMode(t *testing.T) {
+	for _, item := range []struct {
+		mode           string
+		bounded, valid bool
+	}{
+		{"full", false, true},
+		{"bounded", true, true},
+		{"full", true, false},
+		{"bounded", false, false},
+		{"", false, false},
+		{"", true, false},
+	} {
+		if err := validatePublicationCrawlMode(item.mode, item.bounded); (err == nil) != item.valid {
+			t.Fatalf("crawl coverage (%q, bounded=%v): %v", item.mode, item.bounded, err)
+		}
+	}
+}
+
+func TestPublicationScaleInodeLimit(t *testing.T) {
+	for _, item := range []struct {
+		selector, root string
+		want           uint64
+	}{
+		{"", "legacy", 100_000},
+		{"200000", publicationScale200kRoot, 200_000},
+		{"100000", publicationScale200kRoot, 0},
+		{"200000", publicationScale200kRoot + "/retry", 0},
+		{"600000", publicationScale200kRoot, 0},
+	} {
+		got, err := publicationScaleInodeLimit(item.selector, item.root)
+		if (err != nil) != (item.want == 0) || got != item.want {
+			t.Fatalf("scale policy (%q, %q) = %d, %v", item.selector, item.root, got, err)
+		}
+	}
+}
+
 func TestPrepareFmeCAE1Qualification(t *testing.T) {
 	root := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT")
 	if root == "" {
@@ -776,11 +849,19 @@ func TestPrepareFmeCAE1Qualification(t *testing.T) {
 	if parent != "/volume2/NASDA2/vaultic-test-m6" || filepath.Clean(root) != root {
 		t.Fatal("bounded source evidence must be a fresh private child")
 	}
-	rtest.OK(t, os.Mkdir(root, 0700))
+	limit, err := publicationScaleInodeLimit(os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT"), root)
+	rtest.OK(t, err)
+	if limit == 200_000 {
+		rtest.OK(t, validatePublicationQualificationRoot(root, "/volume2/NASDA2/vaultic-test-m6"))
+	} else {
+		rtest.OK(t, os.Mkdir(root, 0700))
+	}
 	rtest.OK(t, os.Chmod(root, 0700))
-	rtest.OK(t, os.WriteFile(filepath.Join(root, ".nobackup"), []byte("Disposable Phase 35 throughput qualification.\n"), 0600))
+	if limit != 200_000 {
+		rtest.OK(t, os.WriteFile(filepath.Join(root, ".nobackup"), []byte("Disposable Phase 35 throughput qualification.\n"), 0600))
+	}
 	rtest.OK(t, os.Chmod(filepath.Join(root, ".nobackup"), 0600))
-	manifest := backupcmd.BoundedInodeManifest{Version: 1, Source: "/ncl1-1-vs-50/fme_cae1", InodeLimit: 100_000}
+	manifest := backupcmd.BoundedInodeManifest{Version: 1, Source: "/ncl1-1-vs-50/fme_cae1", InodeLimit: limit}
 	manifest.Paths, err = boundedLiveSourcePaths(manifest.Source, manifest.InodeLimit)
 	rtest.OK(t, err)
 	if uint64(len(manifest.Paths)) != manifest.InodeLimit {
@@ -794,6 +875,27 @@ func TestPrepareFmeCAE1Qualification(t *testing.T) {
 	regularFiles := publicationQualificationRegularFiles(t, manifest.Source, manifest.Paths)
 	if files == 0 || size > 64<<30 {
 		t.Fatal("selected source is empty or exceeds the 64 GiB logical-byte safety ceiling")
+	}
+	if limit == 200_000 {
+		original := manifest.Source
+		manifest.Source = filepath.Join(root, "input")
+		rtest.OK(t, os.Mkdir(manifest.Source, 0700))
+		rtest.OK(t, os.Chmod(manifest.Source, 0700))
+		selection := filepath.Join(root, "selected-paths.nul")
+		rtest.OK(t, os.WriteFile(selection, []byte(strings.Join(manifest.Paths[1:], "\x00")+"\x00"), 0600))
+		rtest.OK(t, os.Chmod(selection, 0600))
+		publicationQualificationCommand(t, root, "freeze", "rsync", "-a", "--no-recursive", "--dirs", "--from0", "--files-from="+selection, original+"/", manifest.Source+"/")
+		rtest.OK(t, os.Chmod(manifest.Source, 0700))
+		paths, err := boundedLiveSourcePaths(manifest.Source, limit+1)
+		rtest.OK(t, err)
+		if !slices.Equal(paths, manifest.Paths) {
+			t.Fatal("200k frozen traversal differs from the exact selected source")
+		}
+		frozenDigest, frozenFiles, frozenBytes := m5FilesSelected(t, manifest.Source, false, selected)
+		retainedDigest, retainedFiles, retainedBytes := m5FilesSelected(t, original, false, selected)
+		if frozenDigest != digest || retainedDigest != digest || frozenFiles != files || retainedFiles != files || frozenBytes != size || retainedBytes != size || publicationQualificationRegularFiles(t, manifest.Source, paths) != regularFiles {
+			t.Fatal("200k frozen source or original changed during preparation")
+		}
 	}
 	for name, value := range map[string]any{
 		"inode-manifest.json":     manifest,
@@ -851,11 +953,12 @@ func TestBoundedSourceRoundTrip(t *testing.T) {
 type unchangedCrawlMeasurement struct {
 	SecondsElapsed float64 `json:"seconds_elapsed"`
 	Reconciliation struct {
-		Observed    uint64 `json:"observed"`
-		Scanned     uint64 `json:"scanned"`
-		Failed      uint64 `json:"failed"`
-		Deferred    uint64 `json:"deferred"`
-		WriterPhase string `json:"writer_phase"`
+		Observed          uint64                     `json:"observed"`
+		Scanned           uint64                     `json:"scanned"`
+		Failed            uint64                     `json:"failed"`
+		Deferred          uint64                     `json:"deferred"`
+		WriterPhase       string                     `json:"writer_phase"`
+		PublicationStages *daemon.PublicationMetrics `json:"publication_stages"`
 	} `json:"reconciliation"`
 }
 
@@ -891,7 +994,7 @@ func validateForceComparisonMeasurement(summary m5BackupSummary, measurement unc
 }
 
 func TestForceComparisonMeasurement(t *testing.T) {
-	for _, entries := range []uint64{10000, 50000} {
+	for _, entries := range []uint64{10000, 50000, 200000} {
 		t.Run(fmt.Sprint(entries), func(t *testing.T) { testForceComparisonMeasurement(t, entries) })
 	}
 }
@@ -993,6 +1096,16 @@ func TestPublicationForceInodeLimit(t *testing.T) {
 	}
 }
 
+func TestPublicationScale200kQualification(t *testing.T) {
+	if os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT") != "200000" {
+		t.Skip("200k scaling qualification not selected")
+	}
+	if !t.Run("prepare", TestPrepareFmeCAE1Qualification) {
+		return
+	}
+	t.Run("backup", TestPublicationBackupQualification)
+}
+
 func TestPublicationBackupQualification(t *testing.T) {
 	root := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT")
 	if root == "" {
@@ -1009,10 +1122,23 @@ func TestPublicationBackupQualification(t *testing.T) {
 	}
 	unchanged := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_UNCHANGED")
 	forceCompare := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_FORCE_COMPARE")
+	scaleLimit, err := publicationScaleInodeLimit(os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT"), root)
+	rtest.OK(t, err)
+	scale200k := scaleLimit == 200_000
+	if scale200k && (onDemand != "1" || unchanged != "" || forceCompare != "" || resumeVerification != "" ||
+		os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ORDER") != "64" || os.Getenv("VAULTIC_PHASE35_METADATA_READ_FORCE_ONLY") != "1" ||
+		os.Getenv("VAULTIC_PHASE35_METADATA_READ_CONCURRENCY_PROFILE") != "db-scale200k" || os.Getenv("VAULTICDB_CRYPTO_THREADS") != "8") {
+		t.Fatal("200k scaling requires a fresh forced-only single-cell profile")
+	}
 	expanded := os.Getenv("VAULTIC_PHASE35_METADATA_READ_INODE_LIMIT")
 	forceCompareLimit, err := publicationForceInodeLimit(expanded)
 	rtest.OK(t, err)
 	var metadataReadFlags []string
+	if scale200k {
+		tuning, err := publicationDBProfile("db-scale200k")
+		rtest.OK(t, err)
+		metadataReadFlags = tuning.Flags
+	}
 	if expanded != "" {
 		if forceCompare != "1" || os.Getenv("VAULTIC_PHASE35_METADATA_READ_COMPARE") != "coalesced" || root != "/volume2/NASDA2/vaultic-test-m6/metadata-read-fme-cae1-20261103-50k-coalesced" {
 			t.Fatal("expanded scope requires the fresh 50k coalesced capture")
@@ -1039,7 +1165,8 @@ func TestPublicationBackupQualification(t *testing.T) {
 			selected != "/root/proj/vaultic/bin/phase35-critical-path-fill/linux-amd64/vaultic" &&
 			selected != "/root/proj/vaultic/bin/phase35-critical-path-paired-reads/linux-amd64/vaultic" &&
 			!(forceCompare == "1" && selected == "/root/proj/vaultic/bin/phase35-force-10k/linux-amd64/vaultic") &&
-			!(expanded == "50000" && selected == "/root/proj/vaultic/bin/phase35-metadata-read/linux-amd64/vaultic") {
+			!(expanded == "50000" && selected == "/root/proj/vaultic/bin/phase35-metadata-read/linux-amd64/vaultic") &&
+			!(scale200k && selected == "/root/proj/vaultic/bin/phase35-forced-followup/linux-amd64/vaultic") {
 			t.Fatal("candidate is not the separate critical-path build")
 		}
 		encoded, err := os.ReadFile(selected)
@@ -1051,8 +1178,9 @@ func TestPublicationBackupQualification(t *testing.T) {
 	}
 	binary := "/root/proj/vaultic/bin/profile/linux-amd64/vaulticdb"
 	if selected := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_NATIVE"); selected != "" {
-		if forceCompare != "1" || (selected != "/root/proj/vaultic/bin/phase35-force-10k/linux-amd64/vaulticdb" &&
-			!(expanded == "50000" && selected == "/root/proj/vaultic/bin/phase35-metadata-read/linux-amd64/vaulticdb")) {
+		if (forceCompare != "1" && !scale200k) || (selected != "/root/proj/vaultic/bin/phase35-force-10k/linux-amd64/vaulticdb" &&
+			!(expanded == "50000" && selected == "/root/proj/vaultic/bin/phase35-metadata-read/linux-amd64/vaulticdb") &&
+			!(scale200k && selected == "/root/proj/vaultic/bin/phase35-forced-followup/linux-amd64/vaulticdb")) {
 			t.Fatal("native override requires the private force-comparison build")
 		}
 		encoded, err := os.ReadFile(selected)
@@ -1064,6 +1192,9 @@ func TestPublicationBackupQualification(t *testing.T) {
 	}
 	if expanded != "" && (candidate != "/root/proj/vaultic/bin/phase35-metadata-read/linux-amd64/vaultic" || binary != "/root/proj/vaultic/bin/phase35-metadata-read/linux-amd64/vaulticdb") {
 		t.Fatal("expanded scope requires the measurement-pinned metadata-read binaries")
+	}
+	if scale200k && (candidate != "/root/proj/vaultic/bin/phase35-forced-followup/linux-amd64/vaultic" || binary != "/root/proj/vaultic/bin/phase35-forced-followup/linux-amd64/vaulticdb") {
+		t.Fatal("200k scaling requires the separately pinned telemetry builds")
 	}
 	var marker struct {
 		Clone                                                  string
@@ -1148,13 +1279,17 @@ func TestPublicationBackupQualification(t *testing.T) {
 		}
 		t.Logf("unchanged_fixture entries=%d regular_files=%d bytes=%d sha256=%s", len(paths), regularFiles, size, digest)
 	} else if os.Getenv("VAULTIC_PHASE35_THROUGHPUT_SOURCE") != "" {
-		if os.Getenv("VAULTIC_PHASE35_THROUGHPUT_SOURCE") != "/ncl1-1-vs-50/fme_cae1" || onDemand != "1" || resumeVerification != "" {
+		expectedSource := "/ncl1-1-vs-50/fme_cae1"
+		if scale200k {
+			expectedSource = filepath.Join(root, "input")
+		}
+		if os.Getenv("VAULTIC_PHASE35_THROUGHPUT_SOURCE") != expectedSource || onDemand != "1" || resumeVerification != "" {
 			t.Fatal("bounded source requires the selected fme_cae1 root, on-demand lookup, and a fresh run")
 		}
 		encoded, err := os.ReadFile(filepath.Join(root, "inode-manifest.json"))
 		rtest.OK(t, err)
 		rtest.OK(t, json.Unmarshal(encoded, &sourceManifest))
-		if sourceManifest.Source != os.Getenv("VAULTIC_PHASE35_THROUGHPUT_SOURCE") || sourceManifest.InodeLimit != 100_000 || len(sourceManifest.Paths) != 100_000 {
+		if sourceManifest.Source != expectedSource || sourceManifest.InodeLimit != scaleLimit || uint64(len(sourceManifest.Paths)) != scaleLimit {
 			t.Fatal("bounded source manifest scope differs")
 		}
 		source = sourceManifest.Source
@@ -1171,6 +1306,21 @@ func TestPublicationBackupQualification(t *testing.T) {
 		regularFiles = observation.RegularFiles
 		if regularFiles == 0 || regularFiles > files || regularFiles != publicationQualificationRegularFiles(t, source, sourceManifest.Paths) {
 			t.Fatal("sealed regular-file count is missing or changed")
+		}
+		if scale200k {
+			paths, err := boundedLiveSourcePaths(source, scaleLimit+1)
+			rtest.OK(t, err)
+			if !slices.Equal(paths, sourceManifest.Paths) || size > 64<<30 {
+				t.Fatal("200k frozen traversal or byte ceiling differs")
+			}
+			frozenPaths = make(map[string]bool, len(paths))
+			for _, path := range paths {
+				frozenPaths[path] = true
+			}
+			actualDigest, actualFiles, actualBytes := m5FilesSelected(t, source, false, frozenPaths)
+			if actualDigest != digest || actualFiles != files || actualBytes != size {
+				t.Fatal("200k source changed after preparation")
+			}
 		}
 	} else if frozen := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_INPUT"); frozen != "" {
 		if filepath.Base(frozen) != "input" {
@@ -1309,7 +1459,7 @@ func TestPublicationBackupQualification(t *testing.T) {
 				}
 			}
 			controlRoot := "/run"
-			if unchanged != "" {
+			if unchanged != "" || scale200k {
 				controlRoot = os.Getenv("VAULTIC_PHASE35_THROUGHPUT_CONTROL_ROOT")
 				resolved, err := filepath.EvalSymlinks(controlRoot)
 				rtest.OK(t, err)
@@ -1321,12 +1471,17 @@ func TestPublicationBackupQualification(t *testing.T) {
 			}
 			control, err := os.MkdirTemp(controlRoot, "v-ab-")
 			rtest.OK(t, err)
+			rtest.OK(t, os.Chmod(control, 0700))
 			t.Cleanup(func() { _ = os.RemoveAll(control) })
 			daemonOptions := daemon.Options{Socket: filepath.Join(control, "db.sock"), RepositoryID: repositoryID, DaemonPath: binary,
 				DataDir: database, WALDataDir: filepath.Join(database, "wal"), ObjectStore: "local", WALStore: "local",
 				WALFlushInterval: 100 * time.Millisecond, MetaCacheBytes: 128 << 20, BlockCacheBytes: 512 << 20,
 				EncryptionMode: "required", PassphraseFile: "/volume2/NASDA2/rustic/etc/metadata-recovery", StartTimeout: 90 * time.Second}
 			daemonOptions.EngineMultiGet = expanded == "50000"
+			if scale200k {
+				daemonOptions.EngineMultiGet = true
+				daemonOptions.MetaCacheBytes = 2 << 30
+			}
 			started := time.Now()
 			client, err := daemon.Ensure(t.Context(), daemonOptions)
 			rtest.OK(t, err)
@@ -1385,11 +1540,15 @@ func TestPublicationBackupQualification(t *testing.T) {
 					backupArgs = append(backupArgs, "--read-concurrency=16", "--metadata-reconciliation-queue-depth=256")
 					t.Log("creating complete nonselective parent; this backup is outside the unchanged measurement")
 				}
-				if sourceManifest.Source != "" {
+				if scale200k {
+					backupArgs = append(backupArgs, metadataReadFlags...)
+					backupArgs = append(backupArgs, "--metadata-reconciliation-queue-depth=256", "--force")
+				}
+				if sourceManifest.Source != "" && !scale200k {
 					backupArgs = append(backupArgs, "--bounded-inode-manifest="+filepath.Join(root, "inode-manifest.json"), "--metadata-reconciliation-queue-depth=256", "--force")
 				}
 				backupArgs = append(backupArgs, source)
-				if sourceManifest.Source != "" {
+				if sourceManifest.Source != "" && !scale200k {
 					preflightArgs := make([]string, 0, len(backupArgs)+1)
 					for _, argument := range backupArgs {
 						if argument != "--metadata-on-demand" {
@@ -1581,9 +1740,11 @@ func TestPublicationBackupQualification(t *testing.T) {
 			restoredSource := filepath.Join(restored, strings.TrimPrefix(source, "/"))
 			selected := frozenPaths
 			if sourceManifest.Source != "" {
-				if snapshot.CrawlPlan == nil || snapshot.CrawlPlan.Mode != "bounded" {
-					t.Fatal("bounded snapshot falsely claims full source coverage")
+				mode := ""
+				if snapshot.CrawlPlan != nil {
+					mode = snapshot.CrawlPlan.Mode
 				}
+				rtest.OK(t, validatePublicationCrawlMode(mode, !scale200k))
 				selected = make(map[string]bool, len(sourceManifest.Paths))
 				for _, path := range sourceManifest.Paths {
 					selected[path] = true
@@ -1616,11 +1777,11 @@ func TestPublicationBackupQualification(t *testing.T) {
 			_, err = resultFile.Write(append(encoded, '\n'))
 			rtest.OK(t, errors.Join(err, resultFile.Close()))
 			t.Logf("qualified_backup group=%d files=%d seconds=%.3f files_per_second=%.3f tree=%s", groupSize, files, wall.Seconds(), float64(files)/wall.Seconds(), snapshot.Tree)
-			if unchanged != "" {
+			if unchanged != "" || scale200k {
 				if snapshot.CrawlPlan == nil || snapshot.CrawlPlan.Mode != "full" || snapshot.CrawlPlan.ReusedSubtrees != 0 {
 					t.Fatal("unchanged benchmark parent is not a complete full traversal")
 				}
-				if forceCompare == "1" {
+				if forceCompare == "1" || scale200k {
 					publicationQualificationForceComparison(t, cell, source, candidate, options, daemonOptions, &client, id,
 						frozenPaths, digest, regularFiles, files, size, metadataReadFlags...)
 				} else {
@@ -1726,13 +1887,48 @@ type publicationDBTuning struct {
 
 func publicationDBProfile(profile string) (publicationDBTuning, error) {
 	tuning := publicationDBTuning{MetaCacheBytes: 128 << 20, BlockCacheBytes: 512 << 20, CryptoThreads: 8,
-		Flags: []string{"--read-concurrency=64", "--metadata-read-concurrency=32", "--metadata-batch-delay=1ms"}}
+		Flags: []string{"--read-concurrency=64", "--metadata-read-concurrency=32", "--metadata-batch-delay=1ms", "--metadata-publication-group-size=64"}}
 	switch profile {
 	case "db-control", "db-control-end":
 	case "db-crypto32":
 		tuning.CryptoThreads = 32
 	case "db-meta2g":
 		tuning.MetaCacheBytes = 2 << 30
+	case "db-cache2g-start", "db-cache2g-end":
+		tuning.MetaCacheBytes = 2 << 30
+	case "db-cache128":
+	case "db-cache256":
+		tuning.MetaCacheBytes = 256 << 20
+	case "db-cache512":
+		tuning.MetaCacheBytes = 512 << 20
+	case "db-cache1g":
+		tuning.MetaCacheBytes = 1 << 30
+	case "db-cache4g":
+		tuning.MetaCacheBytes = 4 << 30
+	case "db-scale200k":
+		tuning.MetaCacheBytes = 2 << 30
+		tuning.Flags[0] = "--read-concurrency=128"
+		tuning.Flags[3] = "--metadata-publication-group-size=16"
+	case "db-group64", "db-group64-end", "db-hot-control", "db-hot-control-end", "db-read64-end":
+		tuning.MetaCacheBytes = 2 << 30
+	case "db-group16", "db-group32":
+		tuning.MetaCacheBytes = 2 << 30
+		tuning.Flags[3] = "--metadata-publication-group-size=" + strings.TrimPrefix(profile, "db-group")
+	case "db-hot-crypto16", "db-hot-crypto32":
+		tuning.MetaCacheBytes = 2 << 30
+		tuning.CryptoThreads = 16
+		if profile == "db-hot-crypto32" {
+			tuning.CryptoThreads = 32
+		}
+	case "db-hot-batch0ms", "db-hot-batch2ms", "db-hot-batch3ms", "db-hot-batch5ms":
+		tuning.MetaCacheBytes = 2 << 30
+		tuning.Flags[2] = "--metadata-batch-delay=" + strings.TrimPrefix(profile, "db-hot-batch")
+	case "db-read64-g16", "db-read64-g32", "db-read64-g64", "db-read64-g16-end", "db-read64-g32-end", "db-read64-g64-end",
+		"db-read96-g16", "db-read96-g32", "db-read96-g64", "db-read128-g16", "db-read128-g32", "db-read128-g64":
+		tuning.MetaCacheBytes = 2 << 30
+		parts := strings.Split(strings.TrimSuffix(strings.TrimPrefix(profile, "db-read"), "-end"), "-g")
+		tuning.Flags[0] = "--read-concurrency=" + parts[0]
+		tuning.Flags[3] = "--metadata-publication-group-size=" + parts[1]
 	case "db-block8g":
 		tuning.BlockCacheBytes = 8 << 30
 	case "db-batch5ms":
@@ -1751,28 +1947,93 @@ func TestPublicationDBProfile(t *testing.T) {
 		crypto      int
 		rpc, delay  string
 	}{
-		"db-control":     {128 << 20, 512 << 20, 8, "32", "1ms"},
-		"db-control-end": {128 << 20, 512 << 20, 8, "32", "1ms"},
-		"db-crypto32":    {128 << 20, 512 << 20, 32, "32", "1ms"},
-		"db-meta2g":      {2 << 30, 512 << 20, 8, "32", "1ms"},
-		"db-block8g":     {128 << 20, 8 << 30, 8, "32", "1ms"},
-		"db-batch5ms":    {128 << 20, 512 << 20, 8, "32", "5ms"},
-		"db-rpc64":       {128 << 20, 512 << 20, 8, "64", "1ms"},
+		"db-control":       {128 << 20, 512 << 20, 8, "32", "1ms"},
+		"db-control-end":   {128 << 20, 512 << 20, 8, "32", "1ms"},
+		"db-crypto32":      {128 << 20, 512 << 20, 32, "32", "1ms"},
+		"db-meta2g":        {2 << 30, 512 << 20, 8, "32", "1ms"},
+		"db-block8g":       {128 << 20, 8 << 30, 8, "32", "1ms"},
+		"db-batch5ms":      {128 << 20, 512 << 20, 8, "32", "5ms"},
+		"db-rpc64":         {128 << 20, 512 << 20, 8, "64", "1ms"},
+		"db-cache2g-start": {2 << 30, 512 << 20, 8, "32", "1ms"},
+		"db-cache2g-end":   {2 << 30, 512 << 20, 8, "32", "1ms"},
+		"db-cache128":      {128 << 20, 512 << 20, 8, "32", "1ms"},
+		"db-cache256":      {256 << 20, 512 << 20, 8, "32", "1ms"},
+		"db-cache512":      {512 << 20, 512 << 20, 8, "32", "1ms"},
+		"db-cache1g":       {1 << 30, 512 << 20, 8, "32", "1ms"},
+		"db-cache4g":       {4 << 30, 512 << 20, 8, "32", "1ms"},
 	} {
 		t.Run(profile, func(t *testing.T) {
 			tuning, err := publicationDBProfile(profile)
 			rtest.OK(t, err)
 			if tuning.MetaCacheBytes != expected.meta || tuning.BlockCacheBytes != expected.block || tuning.CryptoThreads != expected.crypto ||
-				strings.Join(tuning.Flags, " ") != "--read-concurrency=64 --metadata-read-concurrency="+expected.rpc+" --metadata-batch-delay="+expected.delay {
+				strings.Join(tuning.Flags, " ") != "--read-concurrency=64 --metadata-read-concurrency="+expected.rpc+" --metadata-batch-delay="+expected.delay+" --metadata-publication-group-size=64" {
 				t.Fatalf("unexpected DB settings: %+v", tuning)
 			}
 		})
 	}
-	for _, profile := range []string{"", "db-crypto128", "db-meta64g", "../db-control"} {
+	for profile, expected := range map[string]struct {
+		readers, group, delay string
+		crypto                int
+	}{
+		"db-group64":         {"64", "64", "1ms", 8},
+		"db-group64-end":     {"64", "64", "1ms", 8},
+		"db-group16":         {"64", "16", "1ms", 8},
+		"db-group32":         {"64", "32", "1ms", 8},
+		"db-hot-control":     {"64", "64", "1ms", 8},
+		"db-hot-control-end": {"64", "64", "1ms", 8},
+		"db-hot-crypto16":    {"64", "64", "1ms", 16},
+		"db-hot-crypto32":    {"64", "64", "1ms", 32},
+		"db-hot-batch0ms":    {"64", "64", "0ms", 8},
+		"db-hot-batch2ms":    {"64", "64", "2ms", 8},
+		"db-hot-batch3ms":    {"64", "64", "3ms", 8},
+		"db-hot-batch5ms":    {"64", "64", "5ms", 8},
+		"db-read96-g16":      {"96", "16", "1ms", 8},
+		"db-read96-g32":      {"96", "32", "1ms", 8},
+		"db-read96-g64":      {"96", "64", "1ms", 8},
+		"db-read128-g16":     {"128", "16", "1ms", 8},
+		"db-read128-g32":     {"128", "32", "1ms", 8},
+		"db-read128-g64":     {"128", "64", "1ms", 8},
+		"db-read64-end":      {"64", "64", "1ms", 8},
+	} {
+		t.Run(profile, func(t *testing.T) {
+			tuning, err := publicationDBProfile(profile)
+			rtest.OK(t, err)
+			flags := "--read-concurrency=" + expected.readers + " --metadata-read-concurrency=32 --metadata-batch-delay=" + expected.delay + " --metadata-publication-group-size=" + expected.group
+			if tuning.MetaCacheBytes != 2<<30 || tuning.BlockCacheBytes != 512<<20 || tuning.CryptoThreads != expected.crypto || strings.Join(tuning.Flags, " ") != flags {
+				t.Fatalf("unexpected hot-cache settings: %+v", tuning)
+			}
+		})
+	}
+	for group, profiles := range map[string][]string{
+		"16-scale": {"db-scale200k"},
+		"16":       {"db-read64-g16", "db-read64-g16-end"},
+		"32":       {"db-read64-g32", "db-read64-g32-end"},
+		"64":       {"db-read64-g64", "db-read64-g64-end"},
+	} {
+		for _, profile := range profiles {
+			t.Run(profile, func(t *testing.T) {
+				tuning, err := publicationDBProfile(profile)
+				rtest.OK(t, err)
+				readers := "64"
+				actualGroup := group
+				if group == "16-scale" {
+					readers, actualGroup = "128", "16"
+				}
+				if tuning.MetaCacheBytes != 2<<30 || tuning.CryptoThreads != 8 || strings.Join(tuning.Flags, " ") != "--read-concurrency="+readers+" --metadata-read-concurrency=32 --metadata-batch-delay=1ms --metadata-publication-group-size="+actualGroup {
+					t.Fatalf("reader control differs from fixed-group candidate: %+v", tuning)
+				}
+			})
+		}
+	}
+	for _, profile := range []string{"", "db-crypto128", "db-meta64g", "../db-control", "db-group128", "db-read256-g64"} {
 		if _, err := publicationDBProfile(profile); err == nil {
 			t.Fatalf("unapproved DB profile accepted: %q", profile)
 		}
 	}
+}
+
+func publicationDBFollowupProfile(profile string) bool {
+	return strings.HasPrefix(profile, "db-cache") || strings.HasPrefix(profile, "db-group") || strings.HasPrefix(profile, "db-hot") || strings.HasPrefix(profile, "db-read")
 }
 
 func publicationConcurrencyProfile(profile string) ([]string, error) {
@@ -1895,6 +2156,10 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 		candidate = "/root/proj/vaultic/bin/phase35-metadata-read/linux-amd64/vaultic"
 		binary = "/root/proj/vaultic/bin/phase35-metadata-read/linux-amd64/vaulticdb"
 	}
+	if publicationDBFollowupProfile(profile) {
+		candidate = "/root/proj/vaultic/bin/phase35-forced-followup/linux-amd64/vaultic"
+		binary = "/root/proj/vaultic/bin/phase35-forced-followup/linux-amd64/vaulticdb"
+	}
 	for path, expected := range map[string]string{candidate: os.Getenv("VAULTIC_PHASE35_THROUGHPUT_CANDIDATE_SHA256"), binary: os.Getenv("VAULTIC_PHASE35_THROUGHPUT_NATIVE_SHA256")} {
 		contents, err := os.ReadFile(path)
 		rtest.OK(t, err)
@@ -1945,7 +2210,8 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 	regularFiles, files, size uint64, extraFlags ...string,
 ) {
 	t.Helper()
-	if len(paths) != 10000 && len(paths) != 50000 {
+	scale200k := len(paths) == 200_000 && os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT") == "200000" && os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT") == publicationScale200kRoot
+	if len(paths) != 10000 && len(paths) != 50000 && !scale200k {
 		t.Fatal("force comparison requires exactly 10000 or 50000 entries")
 	}
 	parentOutput, err := os.ReadFile(filepath.Join(filepath.Dir(daemonOptions.DataDir), "backup.stdout.log"))
@@ -1967,7 +2233,7 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 	repositoryHash := fmt.Sprintf("%x", sha256.Sum256([]byte(daemonOptions.RepositoryID)))
 	modes := []bool{false, true}
 	if forceOnly := os.Getenv("VAULTIC_PHASE35_METADATA_READ_FORCE_ONLY"); forceOnly != "" {
-		if forceOnly != "1" || len(paths) != 50000 || os.Getenv("VAULTIC_PHASE35_METADATA_READ_CONCURRENCY_PROFILE") == "" {
+		if forceOnly != "1" || (len(paths) != 50000 && !scale200k) || os.Getenv("VAULTIC_PHASE35_METADATA_READ_CONCURRENCY_PROFILE") == "" {
 			t.Fatal("forced-only measurement requires the guarded concurrency screen")
 		}
 		modes = []bool{true}
@@ -2016,10 +2282,19 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 		}
 		args := []string{"--repo=" + legOptions.Repo, "--password-file=" + legOptions.PasswordFile, "--metadata-daemon-socket=" + current.Socket,
 			"--metadata-encryption-mode=required", "--metadata-passphrase-file=" + current.PassphraseFile, "--no-cache", "--json",
-			"backup", "--no-scan", "--one-file-system", "--read-concurrency=16", "--metadata-publication-group-size=64",
+			"backup", "--no-scan", "--one-file-system", "--read-concurrency=16",
 			"--metadata-reconciliation-queue-depth=256", "--metadata-on-demand", "--metadata-cache-mib=64",
 			"--working-memory-mode=ram", "--working-memory-ram-limit=160GiB", "--working-memory-scratch=" + filepath.Join(legOptions.Repo, "working"), "--working-memory-disk-budget=2GiB"}
 		args = append(args, extraFlags...)
+		hasPublicationGroup := false
+		for _, flag := range extraFlags {
+			if strings.HasPrefix(flag, "--metadata-publication-group-size=") {
+				hasPublicationGroup = true
+			}
+		}
+		if !hasPublicationGroup {
+			args = append(args, "--metadata-publication-group-size=64")
+		}
 		if forced {
 			args = append(args, "--force")
 		} else {
@@ -2064,6 +2339,17 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 		rtest.OK(t, err)
 		if after.ActiveTransactions != 0 || after.ActiveWriteIntents != 0 {
 			t.Fatal("comparison left active writer work")
+		}
+		if candidate == "/root/proj/vaultic/bin/phase35-forced-followup/linux-amd64/vaultic" {
+			if before.Attribution.CacheReads == nil || after.Attribution.CacheReads == nil || measurement.Reconciliation.PublicationStages == nil {
+				t.Fatal("authenticated follow-up omitted direct cache or publication attribution")
+			}
+			for name, current := range *after.Attribution.CacheReads {
+				previous := (*before.Attribution.CacheReads)[name]
+				if current.Hits < previous.Hits || current.Misses < previous.Misses {
+					t.Fatal("follow-up cache counters reset across the measured backup")
+				}
+			}
 		}
 		restored := filepath.Join(leg, "restore")
 		rtest.OK(t, testRunRestoreAssumeFailure(t, id.String(), restoreOptions{Target: restored, Verify: true}, legOptions))
