@@ -436,6 +436,12 @@ type EncryptionReadMetrics struct {
 	HeadReads                   uint64 `json:"head_reads"`
 	FullReads                   uint64 `json:"full_reads"`
 	RangeReads                  uint64 `json:"range_reads"`
+	HeaderValidationCalls       uint64 `json:"header_validation_calls"`
+	HeaderValidationNanoseconds uint64 `json:"header_validation_ns"`
+	ChunkCacheHits              uint64 `json:"chunk_cache_hits"`
+	ChunkCacheMisses            uint64 `json:"chunk_cache_misses"`
+	ChunkCacheEvictions         uint64 `json:"chunk_cache_evictions"`
+	ChunkCoalescedReads         uint64 `json:"chunk_coalesced_reads"`
 }
 
 func encryptionReadMetrics(encoded []byte) *EncryptionReadMetrics {
@@ -455,6 +461,12 @@ func encryptionReadMetrics(encoded []byte) *EncryptionReadMetrics {
 		"header_cache_hits", "header_cache_misses", "header_cache_evictions", "crypto_jobs", "crypto_queue_ns",
 		"crypto_service_ns", "head_reads", "full_reads", "range_reads"} {
 		if value, found := fields[name]; !found || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return nil
+		}
+	}
+	for _, name := range []string{"header_validation_calls", "header_validation_ns", "chunk_cache_hits",
+		"chunk_cache_misses", "chunk_cache_evictions", "chunk_coalesced_reads"} {
+		if value, found := fields[name]; found && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 			return nil
 		}
 	}

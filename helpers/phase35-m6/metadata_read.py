@@ -16,8 +16,8 @@ import pilot
 WORKSPACE = Path('/root/proj/vaultic')
 PREVIOUS = Path('/volume2/NASDA2/vaultic-test-m6/force-compare-fme-cae1-20261103-10k')
 FIFTY = Path('/volume2/NASDA2/vaultic-test-m6/metadata-read-fme-cae1-20261103-50k-coalesced')
-SCALE_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/forced-scale-fme-cae1-20261103-200k')
-SCALE_RUNTIME = Path('/run/vaultic-unchanged-scale200k-20261103')
+SCALE_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/forced-scale-fme-cae1-20261104-200k-retry2')
+SCALE_RUNTIME = Path('/run/vaultic-unchanged-scale200k-20261104-retry2')
 SCALE_SOURCE = Path('/ncl1-1-vs-50/fme_cae1')
 ACCEPTED = Path('/volume2/NASDA2/vaultic-test-m6/critical-path-fme_cae1-20261102-production-cap100k/group-64')
 SEED = Path('/ncl1-1-vs-50/fme_dump/amakura/db.begin-readiness-20261001-fuU56R')
@@ -116,6 +116,8 @@ def paths(mode, inode_limit=10000, profile=None):
     if inode_limit == 200000:
         if mode != 'coalesced' or profile != 'db-scale200k':
             raise ValueError('200k requires its explicit forced-only scale profile')
+        if SCALE_RUNTIME.parent != Path('/run') or not SCALE_RUNTIME.name.startswith('vaultic-unchanged-'):
+            raise ValueError('200k requires the canonical private qualification runtime prefix')
         return SCALE_ROOT, SCALE_RUNTIME
     if profile == 'db-scale200k':
         raise ValueError('scale profile requires exactly 200000 entries')

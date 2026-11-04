@@ -4,6 +4,7 @@ use std::{
     collections::{HashMap, VecDeque},
     env,
     fmt::{Debug, Display, Formatter},
+    num::NonZeroUsize,
     ops::Range,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -23,7 +24,7 @@ use slatedb::object_store::{
     ListResult, MultipartUpload, ObjectMeta, ObjectStore, ObjectStoreExt, PutMode,
     PutMultipartOptions, PutOptions, PutPayload, PutResult, Result, UploadPart,
 };
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::ids::RepositoryId;
 
@@ -38,6 +39,14 @@ const DEFAULT_MAX_CRYPTO_THREADS: usize = 8;
 const MAX_CRYPTO_THREADS: usize = 64;
 const PARALLEL_CRYPTO_CHUNKS: usize = 4;
 const HEADER_CACHE_ENTRIES: usize = 16 * 1024;
+const DEFAULT_CHUNK_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CHUNK_CACHE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const MAX_CHUNK_CACHE_ENTRIES: usize = 16384;
+const MAX_CHUNK_FLIGHTS: usize = 256;
+const MAX_CHUNK_FLIGHT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CACHED_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+const MAX_CACHED_RANGE_CHUNKS: usize = 16;
+static NEXT_CHUNK_NAMESPACE: AtomicU64 = AtomicU64::new(1);
 
 pub mod envelope;
 pub mod recovery_capsule;
@@ -73,6 +82,8 @@ pub(crate) struct EncryptedObjectStore {
     keyring: Arc<RwLock<Keyring>>,
     crypto: Arc<CryptoExecutor>,
     headers: Arc<Mutex<HeaderCache>>,
+    chunks: Arc<ChunkCache>,
+    chunk_namespace: u64,
     chunk_size: usize,
 }
 
@@ -94,6 +105,14 @@ struct EncryptionReadMetrics {
     head_reads: AtomicU64,
     full_reads: AtomicU64,
     range_reads: AtomicU64,
+    header_validation_calls: AtomicU64,
+    header_validation_ns: AtomicU64,
+    chunk_cache_hits: AtomicU64,
+    chunk_cache_misses: AtomicU64,
+    chunk_cache_evictions: AtomicU64,
+    chunk_cache_bytes: AtomicU64,
+    chunk_coalesced_reads: AtomicU64,
+    chunk_inflight: AtomicU64,
 }
 
 struct ReadTiming<'counter> {
@@ -142,8 +161,298 @@ impl EncryptionReadMetrics {
             "head_reads": self.head_reads.load(Ordering::Relaxed),
             "full_reads": self.full_reads.load(Ordering::Relaxed),
             "range_reads": self.range_reads.load(Ordering::Relaxed),
+            "header_validation_calls": self.header_validation_calls.load(Ordering::Relaxed),
+            "header_validation_ns": self.header_validation_ns.load(Ordering::Relaxed),
+            "chunk_cache_hits": self.chunk_cache_hits.load(Ordering::Relaxed),
+            "chunk_cache_misses": self.chunk_cache_misses.load(Ordering::Relaxed),
+            "chunk_cache_evictions": self.chunk_cache_evictions.load(Ordering::Relaxed),
+            "chunk_cache_bytes": self.chunk_cache_bytes.load(Ordering::Relaxed),
+            "chunk_coalesced_reads": self.chunk_coalesced_reads.load(Ordering::Relaxed),
+            "chunk_inflight": self.chunk_inflight.load(Ordering::Relaxed),
         })
     }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct ChunkKey {
+    namespace: u64,
+    location: Path,
+    header: Header,
+    e_tag: Option<String>,
+    version: Option<String>,
+    modified_seconds: i64,
+    modified_nanos: u32,
+    index: usize,
+}
+
+struct AuthenticatedChunk {
+    plaintext: Zeroizing<Vec<u8>>,
+}
+
+type SharedChunkResult =
+    std::result::Result<Arc<AuthenticatedChunk>, Arc<slatedb::object_store::Error>>;
+
+struct ChunkFlight {
+    result: tokio::sync::watch::Receiver<Option<SharedChunkResult>>,
+}
+
+struct ChunkCacheState {
+    entries: lru::LruCache<ChunkKey, Arc<AuthenticatedChunk>>,
+    bytes: usize,
+    flights: HashMap<ChunkKey, Arc<ChunkFlight>>,
+    flight_bytes: usize,
+}
+
+struct ChunkCache {
+    state: Mutex<ChunkCacheState>,
+    changed: tokio::sync::Notify,
+    capacity: usize,
+    limits: ChunkCacheLimits,
+    metrics: Arc<EncryptionReadMetrics>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ChunkCacheLimits {
+    entries: usize,
+    flights: usize,
+    flight_bytes: usize,
+    chunk_bytes: usize,
+    range_chunks: usize,
+}
+
+impl Default for ChunkCacheLimits {
+    fn default() -> Self {
+        Self {
+            entries: 4096,
+            flights: 64,
+            flight_bytes: 16 * 1024 * 1024,
+            chunk_bytes: 1024 * 1024,
+            range_chunks: 4,
+        }
+    }
+}
+
+impl ChunkCacheLimits {
+    fn configured() -> anyhow::Result<Self> {
+        let defaults = Self::default();
+        Self {
+            entries: configured_chunk_limit(
+                "VAULTICDB_CHUNK_CACHE_ENTRIES",
+                defaults.entries,
+                MAX_CHUNK_CACHE_ENTRIES,
+            )?,
+            flights: configured_chunk_limit(
+                "VAULTICDB_CHUNK_FETCH_LIMIT",
+                defaults.flights,
+                MAX_CHUNK_FLIGHTS,
+            )?,
+            flight_bytes: configured_chunk_limit(
+                "VAULTICDB_CHUNK_FETCH_BYTES",
+                defaults.flight_bytes,
+                MAX_CHUNK_FLIGHT_BYTES,
+            )?,
+            chunk_bytes: configured_chunk_limit(
+                "VAULTICDB_CHUNK_MAX_BYTES",
+                defaults.chunk_bytes,
+                MAX_CACHED_CHUNK_BYTES,
+            )?,
+            range_chunks: configured_chunk_limit(
+                "VAULTICDB_CHUNK_RANGE_LIMIT",
+                defaults.range_chunks,
+                MAX_CACHED_RANGE_CHUNKS,
+            )?,
+        }
+        .validate()
+    }
+
+    fn validate(self) -> anyhow::Result<Self> {
+        if self.flight_bytes < self.chunk_bytes {
+            anyhow::bail!("VAULTICDB_CHUNK_FETCH_BYTES must be at least VAULTICDB_CHUNK_MAX_BYTES");
+        }
+        Ok(self)
+    }
+}
+
+impl ChunkCache {
+    #[cfg(test)]
+    fn new(capacity: usize, metrics: Arc<EncryptionReadMetrics>) -> Self {
+        Self::with_limits(capacity, ChunkCacheLimits::default(), metrics)
+    }
+
+    fn with_limits(
+        capacity: usize,
+        limits: ChunkCacheLimits,
+        metrics: Arc<EncryptionReadMetrics>,
+    ) -> Self {
+        Self {
+            state: Mutex::new(ChunkCacheState {
+                entries: lru::LruCache::new(NonZeroUsize::new(limits.entries).unwrap()),
+                bytes: 0,
+                flights: HashMap::new(),
+                flight_bytes: 0,
+            }),
+            changed: tokio::sync::Notify::new(),
+            capacity,
+            limits,
+            metrics,
+        }
+    }
+
+    fn insert(&self, key: ChunkKey, chunk: Arc<AuthenticatedChunk>) {
+        let length = chunk.plaintext.len();
+        if length > self.capacity {
+            return;
+        }
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        while state.bytes + length > self.capacity || state.entries.len() == self.limits.entries {
+            if let Some((_, expired)) = state.entries.pop_lru() {
+                state.bytes -= expired.plaintext.len();
+                self.metrics
+                    .chunk_cache_evictions
+                    .fetch_add(1, Ordering::Relaxed);
+            } else {
+                break;
+            }
+        }
+        if let Some(previous) = state.entries.put(key, chunk) {
+            state.bytes -= previous.plaintext.len();
+        }
+        state.bytes += length;
+        self.metrics
+            .chunk_cache_bytes
+            .store(state.bytes as u64, Ordering::Relaxed);
+    }
+
+    fn invalidate(&self, namespace: u64, location: &Path) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let keys = state
+            .entries
+            .iter()
+            .filter(|(key, _)| key.namespace == namespace && key.location == *location)
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in keys {
+            if let Some(expired) = state.entries.pop(&key) {
+                state.bytes -= expired.plaintext.len();
+            }
+        }
+        self.metrics
+            .chunk_cache_bytes
+            .store(state.bytes as u64, Ordering::Relaxed);
+    }
+
+    fn retire_keys_before(&self, version: u32) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let keys = state
+            .entries
+            .iter()
+            .filter(|(key, _)| key.header.key_version < version)
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in keys {
+            if let Some(expired) = state.entries.pop(&key) {
+                state.bytes -= expired.plaintext.len();
+            }
+        }
+        self.metrics
+            .chunk_cache_bytes
+            .store(state.bytes as u64, Ordering::Relaxed);
+    }
+}
+
+struct ChunkFlightGuard {
+    cache: Arc<ChunkCache>,
+    key: ChunkKey,
+    bytes: usize,
+}
+
+impl Drop for ChunkFlightGuard {
+    fn drop(&mut self) {
+        let mut state = self
+            .cache
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.flights.remove(&self.key);
+        state.flight_bytes -= self.bytes;
+        self.cache
+            .metrics
+            .chunk_inflight
+            .fetch_sub(1, Ordering::Relaxed);
+        drop(state);
+        self.cache.changed.notify_waiters();
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct SharedChunkError(#[source] Arc<slatedb::object_store::Error>);
+
+fn shared_chunk_error(error: Arc<slatedb::object_store::Error>) -> slatedb::object_store::Error {
+    let source = Box::new(SharedChunkError(error.clone()));
+    match error.as_ref() {
+        slatedb::object_store::Error::NotFound { path, .. } => {
+            slatedb::object_store::Error::NotFound {
+                path: path.clone(),
+                source,
+            }
+        }
+        slatedb::object_store::Error::Precondition { path, .. } => {
+            slatedb::object_store::Error::Precondition {
+                path: path.clone(),
+                source,
+            }
+        }
+        slatedb::object_store::Error::NotModified { path, .. } => {
+            slatedb::object_store::Error::NotModified {
+                path: path.clone(),
+                source,
+            }
+        }
+        _ => slatedb::object_store::Error::Generic {
+            store: "vaulticdb encrypted chunk cache",
+            source,
+        },
+    }
+}
+
+fn configured_chunk_cache_bytes() -> anyhow::Result<usize> {
+    match env::var("VAULTICDB_CHUNK_CACHE_BYTES") {
+        Ok(value) => parse_chunk_cache_bytes(&value),
+        Err(env::VarError::NotPresent) => Ok(DEFAULT_CHUNK_CACHE_BYTES),
+        Err(error) => Err(anyhow::anyhow!(
+            "invalid VAULTICDB_CHUNK_CACHE_BYTES: {error}"
+        )),
+    }
+}
+
+fn parse_chunk_cache_bytes(value: &str) -> anyhow::Result<usize> {
+    let bytes = value.parse::<u64>()?;
+    if bytes > MAX_CHUNK_CACHE_BYTES
+        || value.is_empty()
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        anyhow::bail!(
+            "VAULTICDB_CHUNK_CACHE_BYTES must be an integer from 0 to {MAX_CHUNK_CACHE_BYTES}"
+        );
+    }
+    Ok(usize::try_from(bytes)?)
+}
+
+fn configured_chunk_limit(name: &str, default: usize, maximum: usize) -> anyhow::Result<usize> {
+    match env::var(name) {
+        Ok(value) => parse_chunk_limit(name, &value, maximum),
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(anyhow::anyhow!("invalid {name}: {error}")),
+    }
+}
+
+fn parse_chunk_limit(name: &str, value: &str, maximum: usize) -> anyhow::Result<usize> {
+    let limit = value.parse::<usize>()?;
+    if limit == 0 || limit > maximum || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        anyhow::bail!("{name} must be an integer from 1 to {maximum}");
+    }
+    Ok(limit)
 }
 
 #[derive(Default)]
@@ -181,6 +490,7 @@ impl HeaderCache {
 
     fn remove(&mut self, location: &Path) {
         self.entries.remove(location);
+        self.order.retain(|entry| entry != location);
     }
 }
 
@@ -317,7 +627,7 @@ impl CipherKey {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct Header {
     key_version: u32,
     chunk_size: usize,
@@ -341,6 +651,8 @@ impl Debug for EncryptedObjectStore {
                 &self.headers.lock().map(|headers| headers.entries.len()),
             )
             .field("chunk_size", &self.chunk_size)
+            .field("chunk_cache_capacity_bytes", &self.chunks.capacity)
+            .field("chunk_cache_limits", &self.chunks.limits)
             .finish_non_exhaustive()
     }
 }
@@ -375,9 +687,15 @@ impl EncryptedObjectStore {
             .map(CipherKey::new)
             .collect::<anyhow::Result<Vec<_>>>()?;
         let crypto = Arc::new(CryptoExecutor::new(configured_crypto_threads()?)?);
+        let read_metrics = Arc::new(EncryptionReadMetrics::default());
+        let chunks = Arc::new(ChunkCache::with_limits(
+            configured_chunk_cache_bytes()?,
+            ChunkCacheLimits::configured()?,
+            read_metrics.clone(),
+        ));
         Ok(Self {
             inner,
-            read_metrics: Arc::new(EncryptionReadMetrics::default()),
+            read_metrics,
             repository_id: repository_id.into(),
             keyring: Arc::new(RwLock::new(Keyring {
                 keys,
@@ -385,6 +703,8 @@ impl EncryptedObjectStore {
             })),
             crypto,
             headers: Arc::new(Mutex::new(HeaderCache::default())),
+            chunks,
+            chunk_namespace: NEXT_CHUNK_NAMESPACE.fetch_add(1, Ordering::Relaxed),
             chunk_size: DEFAULT_CHUNK_SIZE,
         })
     }
@@ -396,7 +716,9 @@ impl EncryptedObjectStore {
             repository_id: self.repository_id.clone(),
             keyring: self.keyring.clone(),
             crypto: self.crypto.clone(),
-            headers: self.headers.clone(),
+            headers: Arc::new(Mutex::new(HeaderCache::default())),
+            chunks: self.chunks.clone(),
+            chunk_namespace: NEXT_CHUNK_NAMESPACE.fetch_add(1, Ordering::Relaxed),
             chunk_size: self.chunk_size,
         }
     }
@@ -457,6 +779,7 @@ impl EncryptedObjectStore {
     }
 
     fn invalidate_header(&self, location: &Path) {
+        self.chunks.invalidate(self.chunk_namespace, location);
         if let Ok(mut headers) = self.headers.lock() {
             headers.remove(location);
         }
@@ -491,6 +814,7 @@ impl EncryptedObjectStore {
             anyhow::bail!("only metadata DEKs older than the active write key can be retired");
         }
         keyring.keys.retain(|key| key.key.version >= version);
+        self.chunks.retire_keys_before(version);
         Ok(())
     }
 
@@ -712,6 +1036,195 @@ impl EncryptedObjectStore {
         Err(encryption_error(EncryptionError::Length))
     }
 
+    async fn validated_cached_header(
+        &self,
+        location: &Path,
+        options: &GetOptions,
+    ) -> Result<
+        Option<(
+            CachedHeader,
+            slatedb::object_store::Attributes,
+            slatedb::object_store::Extensions,
+        )>,
+    > {
+        let Some(cached) = self.cached_header(location) else {
+            return Ok(None);
+        };
+        let mut validation = options.clone();
+        validation.head = true;
+        validation.range = None;
+        self.read_metrics
+            .header_validation_calls
+            .fetch_add(1, Ordering::Relaxed);
+        let _validation = ReadTiming::new(&self.read_metrics.header_validation_ns);
+        let observed = self.inner.get_opts(location, validation).await?;
+        if observed.meta == cached.meta
+            && (observed.meta.e_tag.is_some() || observed.meta.version.is_some())
+        {
+            Ok(Some((cached, observed.attributes, observed.extensions)))
+        } else {
+            self.invalidate_header(location);
+            Ok(None)
+        }
+    }
+
+    async fn fetch_chunk(
+        &self,
+        location: &Path,
+        header: Header,
+        index: usize,
+        expected: ObjectMeta,
+        mut options: GetOptions,
+    ) -> Result<Arc<AuthenticatedChunk>> {
+        let start = encrypted_chunk_offset(header, index)?;
+        let end = start
+            .checked_add(plaintext_chunk_len(header, index) + TAG_SIZE)
+            .ok_or_else(|| encryption_error(EncryptionError::Length))?;
+        options.range = Some(GetRange::Bounded(start as u64..end as u64));
+        options.head = false;
+        self.read_metrics
+            .rounded_ciphertext_bytes
+            .fetch_add((end - start) as u64, Ordering::Relaxed);
+        self.read_metrics
+            .ciphertext_origin_calls
+            .fetch_add(1, Ordering::Relaxed);
+        let timing = ReadTiming::new(&self.read_metrics.ciphertext_origin_ns);
+        let encrypted = self.inner.get_opts(location, options).await?;
+        if encrypted.meta != expected {
+            self.invalidate_header(location);
+            return Err(encryption_error(EncryptionError::Authentication));
+        }
+        let ciphertext = encrypted.bytes().await?;
+        self.read_metrics
+            .ciphertext_origin_bytes
+            .fetch_add(ciphertext.len() as u64, Ordering::Relaxed);
+        drop(timing);
+        let plaintext = self
+            .decrypt_chunks(location, header, index, ciphertext)
+            .await?;
+        if plaintext.len() != plaintext_chunk_len(header, index) {
+            return Err(encryption_error(EncryptionError::Length));
+        }
+        Ok(Arc::new(AuthenticatedChunk {
+            plaintext: Zeroizing::new(plaintext.to_vec()),
+        }))
+    }
+
+    async fn cached_chunk(
+        &self,
+        location: &Path,
+        header: Header,
+        index: usize,
+        expected: ObjectMeta,
+        options: GetOptions,
+    ) -> Result<Arc<AuthenticatedChunk>> {
+        let key = ChunkKey {
+            namespace: self.chunk_namespace,
+            location: location.clone(),
+            header,
+            e_tag: expected.e_tag.clone(),
+            version: expected.version.clone(),
+            modified_seconds: expected.last_modified.timestamp(),
+            modified_nanos: expected.last_modified.timestamp_subsec_nanos(),
+            index,
+        };
+        let length = plaintext_chunk_len(header, index);
+        loop {
+            let notified = self.chunks.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let mut launch = None;
+            let flight = {
+                let mut state = self
+                    .chunks
+                    .state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if let Some(chunk) = state.entries.get(&key) {
+                    self.read_metrics
+                        .chunk_cache_hits
+                        .fetch_add(1, Ordering::Relaxed);
+                    return Ok(chunk.clone());
+                }
+                if let Some(flight) = state.flights.get(&key) {
+                    self.read_metrics
+                        .chunk_coalesced_reads
+                        .fetch_add(1, Ordering::Relaxed);
+                    Some(flight.clone())
+                } else if state.flights.len() < self.chunks.limits.flights
+                    && state.flight_bytes + length <= self.chunks.limits.flight_bytes
+                {
+                    let (sender, receiver) = tokio::sync::watch::channel(None);
+                    let flight = Arc::new(ChunkFlight { result: receiver });
+                    state.flights.insert(key.clone(), flight.clone());
+                    state.flight_bytes += length;
+                    self.read_metrics
+                        .chunk_cache_misses
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.read_metrics
+                        .chunk_inflight
+                        .fetch_add(1, Ordering::Relaxed);
+                    launch = Some((
+                        sender,
+                        ChunkFlightGuard {
+                            cache: self.chunks.clone(),
+                            key: key.clone(),
+                            bytes: length,
+                        },
+                    ));
+                    Some(flight)
+                } else {
+                    None
+                }
+            };
+            let Some(flight) = flight else {
+                notified.await;
+                continue;
+            };
+            if let Some((sender, guard)) = launch {
+                let store = self.clone();
+                let location = location.clone();
+                let expected = expected.clone();
+                let options = options.clone();
+                tokio::spawn(async move {
+                    let result = store
+                        .fetch_chunk(&location, header, index, expected, options)
+                        .await
+                        .map_err(Arc::new);
+                    if let Ok(chunk) = &result {
+                        if let Ok(keyring) = store.keyring.read() {
+                            if keyring
+                                .keys
+                                .iter()
+                                .any(|key| key.key.version == header.key_version)
+                            {
+                                guard.cache.insert(guard.key.clone(), chunk.clone());
+                            }
+                        }
+                    }
+                    sender.send_replace(Some(result));
+                    drop(guard);
+                });
+            }
+            let mut result = flight.result.clone();
+            loop {
+                let completed = result.borrow_and_update().clone();
+                if let Some(completed) = completed {
+                    return completed.map_err(shared_chunk_error);
+                }
+                result
+                    .changed()
+                    .await
+                    .map_err(|_| slatedb::object_store::Error::Generic {
+                        store: "vaulticdb encrypted chunk cache",
+                        source: Box::new(std::io::Error::other(
+                            "encrypted chunk worker terminated",
+                        )),
+                    })?;
+            }
+        }
+    }
+
     async fn header(
         &self,
         location: &Path,
@@ -791,6 +1304,7 @@ impl ObjectStore for EncryptedObjectStore {
     async fn get_opts(&self, location: &Path, mut options: GetOptions) -> Result<GetResult> {
         self.read_metrics.reads.fetch_add(1, Ordering::Relaxed);
         let requested_range = options.range.take();
+        let cache_range = requested_range.is_some();
         let head = options.head;
         if head {
             self.read_metrics.head_reads.fetch_add(1, Ordering::Relaxed);
@@ -801,14 +1315,17 @@ impl ObjectStore for EncryptedObjectStore {
         } else {
             self.read_metrics.full_reads.fetch_add(1, Ordering::Relaxed);
         }
-        let mut header_response = None;
+        let mut header_response;
         let mut cached_meta = None;
         let mut header = if head {
             let response = self.header(location, options.clone()).await?;
             self.cache_header(location, response.0, &response.1);
             header_response = Some((response.1, response.2, response.3));
             response.0
-        } else if let Some(cached) = self.cached_header(location) {
+        } else if let Some((cached, attributes, extensions)) =
+            self.validated_cached_header(location, &options).await?
+        {
+            header_response = Some((cached.meta.clone(), attributes, extensions));
             cached_meta = Some(cached.meta);
             cached.header
         } else {
@@ -841,6 +1358,44 @@ impl ObjectStore for EncryptedObjectStore {
                 .fetch_add(range.len() as u64, Ordering::Relaxed);
             let first_chunk = range.start / header.chunk_size;
             let last_chunk = (range.end - 1) / header.chunk_size;
+            if cache_range
+                && last_chunk - first_chunk < self.chunks.limits.range_chunks
+                && header.chunk_size <= self.chunks.limits.chunk_bytes
+            {
+                let (meta, attributes, extensions) = header_response.as_ref().unwrap();
+                if meta.e_tag.is_some() || meta.version.is_some() {
+                    self.cipher(header.key_version)?;
+                    let chunks = futures_util::future::try_join_all(
+                        (first_chunk..=last_chunk).map(|index| {
+                            self.cached_chunk(
+                                location,
+                                header,
+                                index,
+                                meta.clone(),
+                                options.clone(),
+                            )
+                        }),
+                    )
+                    .await?;
+                    let mut payload = BytesMut::with_capacity(range.len());
+                    for (offset, chunk) in chunks.iter().enumerate() {
+                        let chunk_start = (first_chunk + offset) * header.chunk_size;
+                        let start = range.start.saturating_sub(chunk_start);
+                        let end = (range.end - chunk_start).min(chunk.plaintext.len());
+                        payload.extend_from_slice(&chunk.plaintext[start..end]);
+                    }
+                    let payload = payload.freeze();
+                    return Ok(GetResult {
+                        payload: GetResultPayload::Stream(
+                            stream::once(async { Ok(payload) }).boxed(),
+                        ),
+                        meta: plaintext_meta_from_header(meta.clone(), header)?,
+                        range: range.start as u64..range.end as u64,
+                        attributes: attributes.clone(),
+                        extensions: extensions.clone(),
+                    });
+                }
+            }
             let ciphertext_start = encrypted_chunk_offset(header, first_chunk)?;
             let ciphertext_end = encrypted_chunk_offset(header, last_chunk)?
                 .checked_add(plaintext_chunk_len(header, last_chunk) + TAG_SIZE)

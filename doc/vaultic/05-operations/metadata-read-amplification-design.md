@@ -371,11 +371,114 @@ artifacts verified by `FAILED-SHA256SUMS`.
 
 The saved correction distinguishes a full frozen-source parent from a bounded
 selection; all six crawl-mode regression cases pass under the Go race detector.
-The end-to-end retry remains outstanding and requires fresh create-only paths
-and a newly pinned driver. Source freeze, parent setup and restores do not count
+The end-to-end retry required fresh create-only paths and a newly pinned driver.
+Source freeze, parent setup and restores do not count
 toward the measured main interval. No short passes will be combined to claim
 ten-minute sustained qualification. Production, defaults and NFS configuration
 remain unchanged; unforced work stays deferred.
+
+#### Accepted 200k Retry
+
+The November 4 `retry1` froze the same verified source but failed before daemon
+startup because its runtime name lacked the required `vaultic-unchanged-`
+prefix. Its 21-file failed seal is preserved. The Python routing preflight now
+rejects an incompatible runtime prefix or a runtime outside `/run`; Go scale
+tests reject both failed capture roots. No safety guard was relaxed.
+
+The fresh `retry2` completed forced-only acceptance with 200,000 entries,
+178,208 regular files and 23,520,039,140 source bytes. Its measured main interval
+was **218.203942960 seconds**, or **916.573721 entries/s**; the complete command
+interval was 236.071219291 seconds. Exact restore, encrypted reopen, unchanged
+source, zero added content blobs, live native settings and owned cleanup passed.
+Peak combined RSS was 44,279,136,256 bytes, below the 200 GB ceiling.
+
+Evidence is under
+`/volume2/NASDA2/vaultic-test-m6/forced-scale-fme-cae1-20261104-200k-retry2`.
+All 37 `FOLLOWUP-SHA256SUMS` entries and every launch pin were independently
+verified after completion; the private runtime was removed and no owned
+processes remained. The separate corrected driver has SHA-256
+`4c8cd0339494f6a7ca4076c80f85248bb93223ee7573669742cd4b0fd5fb1f3c`.
+Measured CLI/native binaries and the 128-reader, 32-RPC, group-16, 2 GiB metadata
+cache, 512 MiB block cache, 8-crypto-worker, 1ms settings remained unchanged.
+
+Metadata-cache misses stayed low: index 166, filter 157, stats 0. Block-cache
+misses were 164,779. Encryption attribution reported 147,783 origin calls and
+39,987,969,753 logical ciphertext-origin bytes for 1,482,193,190 requested
+plaintext bytes, a 26.98x ratio. Origin calls accumulated 1,376.273 worker-seconds
+(9.313ms per call), compared with 22.917 crypto-service and 3.128 crypto-queue
+worker-seconds. The writer reported 107.148 seconds waiting for prepared work.
+These overlapping counters must not be added as wall time; logical origin bytes
+are not measured physical NFS traffic. They point toward investigating encrypted
+range/block fetch amplification rather than increasing crypto workers or metadata
+cache capacity, without establishing a causal optimization result.
+
+The rate is 10.2% below the earlier 50k candidate, an unpaired scaling comparison
+rather than a regression attribution. Publication histograms still cover only
+five commits (0.429 seconds) and zero planning samples, not the whole publication
+stage. The 218-second main interval does **not** satisfy the 600-second sustained
+gate. Repeated causal and deployment qualification remain open; no 600k run,
+production change or default activation is implied.
+
+### Bounded Authenticated Chunk Reuse
+
+The encrypted object store now coalesces overlapping range reads at authenticated
+chunk granularity and retains complete authenticated plaintext chunks in a
+byte-bounded LRU. A cancelled caller does not cancel a load needed by other
+callers. Errors are shared, never retained as cache entries, and failed or
+panicking loads release admission so later reads can retry.
+
+Experimental maxima are four times the original caps; all operational defaults
+are unchanged. Byte settings accept exact decimal byte counts, not unit suffixes.
+
+| Environment Variable | Default | Maximum |
+| --- | ---: | ---: |
+| `VAULTICDB_CHUNK_CACHE_BYTES` | 67,108,864 (64 MiB) | 4,294,967,296 (4 GiB) |
+| `VAULTICDB_CHUNK_CACHE_ENTRIES` | 4,096 | 16,384 |
+| `VAULTICDB_CHUNK_FETCH_LIMIT` | 64 | 256 |
+| `VAULTICDB_CHUNK_FETCH_BYTES` | 16,777,216 (16 MiB) | 67,108,864 (64 MiB) |
+| `VAULTICDB_CHUNK_MAX_BYTES` | 1,048,576 (1 MiB) | 4,194,304 (4 MiB) |
+| `VAULTICDB_CHUNK_RANGE_LIMIT` | 4 | 16 |
+
+Zero cache bytes disables retention while preserving concurrent-fetch
+coalescing; other settings must be positive. The fetch-byte reservation must be
+at least the configured maximum chunk bytes. Invalid settings fail startup.
+The retention budget is shared by backing-store wrappers derived from one
+encryption template, with separate identities for each backing store. Both
+entry and byte budgets apply. Ciphertext, transient buffers and cache
+bookkeeping are additional bounded overhead, not included in retained bytes.
+
+By default the chunk path handles ranges spanning at most four chunks, with
+each chunk at most 1 MiB; the eligibility settings above permit experiments
+without changing the on-disk encryption chunk size. Full-object and larger
+reads retain the contiguous fetch path rather
+than allocating a flight per chunk. No speculative next-chunk read-ahead is
+performed. Returned slices own their requested bytes and do not pin entire
+cached chunks. Retained plaintext is zeroized when its final owner releases it.
+
+Cache hits require current object metadata validation, matching object identity
+and encryption header, and an available read key. Conditional/versioned reads
+retain their object-store preconditions. Identityless objects bypass chunk
+reuse; payload metadata changes fail closed. Writes/deletes invalidate retained
+chunks, and read-key retirement purges plaintext for retired keys and prevents
+older flights from retaining it afterward. The additional HEAD/stat validation
+is deliberate freshness work; it must be measured independently of payload I/O.
+
+Read attribution adds `chunk_cache_hits`, `chunk_cache_misses`,
+`chunk_cache_evictions`, `chunk_coalesced_reads`, `header_validation_calls` and
+`header_validation_ns`. These monotonic counters pass through Go writer status
+and reset-checked backup interval deltas; older daemons may omit them. Native
+snapshots additionally expose current residency and in-flight gauges, which are
+not treated as monotonic interval counters.
+
+Validation covers 35 encryption tests, including persisted encrypted SST reads,
+bounded admission, cancellation, shared authentication failures, replacement
+races, key retirement, conditional reads and backing-store isolation. A
+concurrent/nearby-range regression reduced payload fetches from 33 to one. The
+warm persisted-SST fixture performed zero SST payload reads with SlateDB's block
+cache disabled, while still performing metadata validations. Native storage
+attribution and an authenticated encrypted backup/restore fixture also passed.
+These are correctness and fixture results, not a new 200k performance screen or
+production deployment qualification.
 
 ### Forced-Only Concurrency Screen
 

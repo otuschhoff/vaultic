@@ -118,6 +118,30 @@ func TestBackupEncryptionReadDelta(test *testing.T) {
 	if backupEncryptionReadDelta(current, baseline) != nil {
 		test.Fatal("counter reset must not expose a partial interval")
 	}
+	current.CryptoQueueNanoseconds = 30
+	for _, field := range []struct {
+		baseline *uint64
+		current  *uint64
+		read     func(*daemon.EncryptionReadMetrics) uint64
+	}{
+		{&baseline.HeaderValidationCalls, &current.HeaderValidationCalls, func(value *daemon.EncryptionReadMetrics) uint64 { return value.HeaderValidationCalls }},
+		{&baseline.HeaderValidationNanoseconds, &current.HeaderValidationNanoseconds, func(value *daemon.EncryptionReadMetrics) uint64 { return value.HeaderValidationNanoseconds }},
+		{&baseline.ChunkCacheHits, &current.ChunkCacheHits, func(value *daemon.EncryptionReadMetrics) uint64 { return value.ChunkCacheHits }},
+		{&baseline.ChunkCacheMisses, &current.ChunkCacheMisses, func(value *daemon.EncryptionReadMetrics) uint64 { return value.ChunkCacheMisses }},
+		{&baseline.ChunkCacheEvictions, &current.ChunkCacheEvictions, func(value *daemon.EncryptionReadMetrics) uint64 { return value.ChunkCacheEvictions }},
+		{&baseline.ChunkCoalescedReads, &current.ChunkCoalescedReads, func(value *daemon.EncryptionReadMetrics) uint64 { return value.ChunkCoalescedReads }},
+	} {
+		*field.baseline, *field.current = 5, 9
+		actual := backupEncryptionReadDelta(current, baseline)
+		if actual == nil || field.read(actual) != 4 {
+			test.Fatal("chunk counter was not differenced")
+		}
+		*field.current = 1
+		if backupEncryptionReadDelta(current, baseline) != nil {
+			test.Fatal("chunk counter reset became a valid interval")
+		}
+		*field.baseline, *field.current = 0, 0
+	}
 }
 
 func TestBackupRPCWaitDelta(test *testing.T) {

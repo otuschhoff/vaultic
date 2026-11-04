@@ -22,6 +22,9 @@ mod tests {
         inner: InMemory,
         reads: Mutex<Vec<(String, u64, u64)>>,
         delay: Option<std::time::Duration>,
+        payload_gate: Option<Arc<tokio::sync::Semaphore>>,
+        panic_payload: std::sync::atomic::AtomicBool,
+        omit_identity: bool,
     }
 
     impl Display for CountingStore {
@@ -50,15 +53,35 @@ mod tests {
         }
 
         async fn get_opts(&self, location: &Path, options: GetOptions) -> Result<GetResult> {
+            if !options.head
+                && matches!(&options.range, Some(GetRange::Bounded(range)) if range.start >= HEADER_SIZE as u64)
+            {
+                if let Some(gate) = &self.payload_gate {
+                    gate.acquire().await.unwrap().forget();
+                }
+                assert!(
+                    !self.panic_payload.swap(false, Ordering::Relaxed),
+                    "injected chunk worker panic"
+                );
+            }
             if let Some(delay) = self.delay {
                 tokio::time::sleep(delay).await;
             }
+            let head = options.head;
             let result = self.inner.get_opts(location, options).await?;
-            let meta = result.meta.clone();
+            let mut meta = result.meta.clone();
+            if self.omit_identity {
+                meta.e_tag = None;
+                meta.version = None;
+            }
             let range = result.range.clone();
             let attributes = result.attributes.clone();
             let extensions = result.extensions.clone();
-            let bytes = result.bytes().await?;
+            let bytes = if head {
+                Bytes::new()
+            } else {
+                result.bytes().await?
+            };
             self.reads.lock().unwrap().push((
                 location.to_string(),
                 range.start,
@@ -126,17 +149,780 @@ mod tests {
         assert_eq!(metrics["reads"], 2);
         assert_eq!(metrics["range_reads"], 2);
         assert_eq!(metrics["requested_plaintext_bytes"], 8);
-        assert_eq!(metrics["rounded_ciphertext_bytes"], 64);
-        assert_eq!(metrics["ciphertext_origin_calls"], 3);
+        assert_eq!(metrics["rounded_ciphertext_bytes"], 32);
+        assert_eq!(metrics["ciphertext_origin_calls"], 2);
         assert_eq!(
             metrics["ciphertext_origin_bytes"],
-            (HEADER_SIZE + 64) as u64
+            (HEADER_SIZE + 32) as u64
         );
         assert_eq!(metrics["header_cache_misses"], 1);
         assert_eq!(metrics["header_cache_hits"], 1);
-        assert_eq!(metrics["crypto_jobs"], 2);
-        assert!(metrics["ciphertext_origin_ns"].as_u64().unwrap() >= 15_000_000);
+        assert_eq!(metrics["crypto_jobs"], 1);
+        assert_eq!(metrics["chunk_cache_hits"], 1);
+        assert_eq!(metrics["chunk_cache_misses"], 1);
+        assert_eq!(metrics["chunk_cache_bytes"], 16);
+        assert_eq!(metrics["header_validation_calls"], 1);
+        assert!(metrics["header_validation_ns"].as_u64().unwrap() >= 5_000_000);
+        assert!(metrics["ciphertext_origin_ns"].as_u64().unwrap() >= 10_000_000);
         assert!(metrics["crypto_service_ns"].as_u64().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn concurrent_ranges_share_and_cache_authenticated_chunks() {
+        let inner = Arc::new(CountingStore {
+            delay: Some(std::time::Duration::from_millis(20)),
+            ..Default::default()
+        });
+        let encrypted = store(inner.clone(), "coalesced");
+        let location = Path::from("compacted/shared.sst");
+        let plaintext = Bytes::from_static(b"0123456789abcdef0123456789abcdef");
+        encrypted
+            .put(&location, plaintext.clone().into())
+            .await
+            .unwrap();
+        encrypted.head(&location).await.unwrap();
+        inner.reads.lock().unwrap().clear();
+        let barrier = Arc::new(tokio::sync::Barrier::new(32));
+        let readers = (0..32)
+            .map(|index| {
+                let encrypted = encrypted.clone();
+                let location = location.clone();
+                let barrier = barrier.clone();
+                let plaintext = plaintext.clone();
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    let start = index % 8;
+                    assert_eq!(
+                        encrypted
+                            .get_range(&location, start..start + 4)
+                            .await
+                            .unwrap(),
+                        plaintext.slice(start as usize..start as usize + 4)
+                    );
+                })
+            })
+            .collect::<Vec<_>>();
+        for reader in readers {
+            reader.await.unwrap();
+        }
+        assert_eq!(
+            encrypted.get_range(&location, 10..14).await.unwrap(),
+            plaintext.slice(10..14)
+        );
+        let reads = inner.reads.lock().unwrap();
+        assert_eq!(
+            reads
+                .iter()
+                .filter(|(_, start, _)| *start >= HEADER_SIZE as u64)
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_chunk_leader_does_not_cancel_followers() {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let inner = Arc::new(CountingStore {
+            payload_gate: Some(gate.clone()),
+            ..Default::default()
+        });
+        let encrypted = store(inner.clone(), "cancelled-leader");
+        let location = Path::from("compacted/cancel.sst");
+        encrypted
+            .put(&location, Bytes::from_static(b"0123456789abcdef").into())
+            .await
+            .unwrap();
+        encrypted.head(&location).await.unwrap();
+        let leader = {
+            let encrypted = encrypted.clone();
+            let location = location.clone();
+            tokio::spawn(async move { encrypted.get_range(&location, 0..4).await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while encrypted
+                .read_metrics
+                .chunk_inflight
+                .load(Ordering::Relaxed)
+                == 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let follower = {
+            let encrypted = encrypted.clone();
+            let location = location.clone();
+            tokio::spawn(async move { encrypted.get_range(&location, 4..8).await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while encrypted
+                .read_metrics
+                .chunk_coalesced_reads
+                .load(Ordering::Relaxed)
+                == 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        leader.abort();
+        gate.add_permits(1);
+        assert_eq!(
+            follower.await.unwrap().unwrap(),
+            Bytes::from_static(b"4567")
+        );
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .chunk_cache_misses
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .chunk_inflight
+                .load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn chunk_authentication_failure_is_shared_and_not_cached() {
+        let inner = Arc::new(CountingStore {
+            delay: Some(std::time::Duration::from_millis(30)),
+            ..Default::default()
+        });
+        let encrypted = store(inner.clone(), "shared-error");
+        let location = Path::from("compacted/error.sst");
+        encrypted
+            .put(&location, Bytes::from_static(b"0123456789abcdef").into())
+            .await
+            .unwrap();
+        let original = inner
+            .inner
+            .get(&location)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        let mut corrupt = original.to_vec();
+        corrupt[HEADER_SIZE] ^= 1;
+        inner.inner.put(&location, corrupt.into()).await.unwrap();
+        encrypted.head(&location).await.unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(16));
+        let mut readers = Vec::new();
+        for _ in 0..16 {
+            let encrypted = encrypted.clone();
+            let location = location.clone();
+            let barrier = barrier.clone();
+            readers.push(tokio::spawn(async move {
+                barrier.wait().await;
+                let error = encrypted.get_range(&location, 0..4).await.unwrap_err();
+                assert!(is_integrity_error(&error));
+            }));
+        }
+        for reader in readers {
+            reader.await.unwrap();
+        }
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .chunk_cache_misses
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .chunk_coalesced_reads
+                .load(Ordering::Relaxed),
+            15
+        );
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .chunk_cache_bytes
+                .load(Ordering::Relaxed),
+            0
+        );
+        inner.inner.put(&location, original.into()).await.unwrap();
+        assert_eq!(
+            encrypted.get_range(&location, 0..4).await.unwrap(),
+            Bytes::from_static(b"0123")
+        );
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .chunk_cache_misses
+                .load(Ordering::Relaxed),
+            2
+        );
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .chunk_inflight
+                .load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn chunk_cache_validates_overwrites_deletes_and_conditions() {
+        let inner = Arc::new(InMemory::new());
+        let encrypted = store(inner.clone(), "versions");
+        let location = Path::from("compacted/versions.sst");
+        encrypted
+            .put(&location, Bytes::from_static(b"0123456789abcdef").into())
+            .await
+            .unwrap();
+        assert_eq!(
+            encrypted.get_range(&location, 0..4).await.unwrap(),
+            Bytes::from_static(b"0123")
+        );
+        let previous = inner.head(&location).await.unwrap();
+        let replacement = encrypted
+            .encrypt(&location, Bytes::from_static(b"fedcba9876543210"))
+            .await
+            .unwrap();
+        inner.put(&location, replacement.into()).await.unwrap();
+        assert_eq!(
+            encrypted.get_range(&location, 0..4).await.unwrap(),
+            Bytes::from_static(b"fedc")
+        );
+        let options = GetOptions {
+            range: Some(GetRange::Bounded(0..4)),
+            if_match: previous.e_tag,
+            ..Default::default()
+        };
+        assert!(matches!(
+            encrypted.get_opts(&location, options).await.unwrap_err(),
+            slatedb::object_store::Error::Precondition { .. }
+        ));
+        let current = inner.head(&location).await.unwrap();
+        let options = GetOptions {
+            range: Some(GetRange::Bounded(0..4)),
+            if_none_match: current.e_tag,
+            ..Default::default()
+        };
+        assert!(matches!(
+            encrypted.get_opts(&location, options).await.unwrap_err(),
+            slatedb::object_store::Error::NotModified { .. }
+        ));
+        inner.delete(&location).await.unwrap();
+        assert!(matches!(
+            encrypted.get_range(&location, 0..4).await.unwrap_err(),
+            slatedb::object_store::Error::NotFound { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn chunk_cache_bypasses_objects_without_stable_identity() {
+        let inner = Arc::new(CountingStore {
+            omit_identity: true,
+            ..Default::default()
+        });
+        let encrypted = store(inner, "identityless");
+        let location = Path::from("compacted/no-identity.sst");
+        encrypted
+            .put(&location, Bytes::from_static(b"0123456789abcdef").into())
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                encrypted.get_range(&location, 0..4).await.unwrap(),
+                Bytes::from_static(b"0123")
+            );
+        }
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .chunk_cache_misses
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .chunk_cache_bytes
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            encrypted.read_metrics.crypto_jobs.load(Ordering::Relaxed),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn chunk_cache_rejects_replacement_during_fetch() {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let inner = Arc::new(CountingStore {
+            payload_gate: Some(gate.clone()),
+            ..Default::default()
+        });
+        let encrypted = store(inner.clone(), "replacement-race");
+        let location = Path::from("compacted/race.sst");
+        encrypted
+            .put(&location, Bytes::from_static(b"0123456789abcdef").into())
+            .await
+            .unwrap();
+        let reader = {
+            let encrypted = encrypted.clone();
+            let location = location.clone();
+            tokio::spawn(async move { encrypted.get_range(&location, 0..4).await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while encrypted
+                .read_metrics
+                .chunk_inflight
+                .load(Ordering::Relaxed)
+                == 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let replacement = encrypted
+            .encrypt(&location, Bytes::from_static(b"fedcba9876543210"))
+            .await
+            .unwrap();
+        inner
+            .inner
+            .put(&location, replacement.into())
+            .await
+            .unwrap();
+        gate.add_permits(1);
+        assert!(is_integrity_error(&reader.await.unwrap().unwrap_err()));
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .chunk_cache_bytes
+                .load(Ordering::Relaxed),
+            0
+        );
+        gate.add_permits(1);
+        assert_eq!(
+            encrypted.get_range(&location, 0..4).await.unwrap(),
+            Bytes::from_static(b"fedc")
+        );
+    }
+
+    #[tokio::test]
+    async fn chunk_cache_is_byte_bounded_and_lru() {
+        let inner = Arc::new(CountingStore::default());
+        let mut encrypted = store(inner, "bounded");
+        encrypted.chunks = Arc::new(ChunkCache::new(32, encrypted.read_metrics.clone()));
+        let location = Path::from("compacted/lru.sst");
+        encrypted
+            .put(&location, Bytes::from(vec![9; 64]).into())
+            .await
+            .unwrap();
+        for start in [0, 16, 0, 32, 0] {
+            assert_eq!(
+                encrypted
+                    .get_range(&location, start..start + 1)
+                    .await
+                    .unwrap(),
+                Bytes::from_static(&[9])
+            );
+            let state = encrypted.chunks.state.lock().unwrap();
+            assert!(state.bytes <= 32);
+            assert!(state.entries.len() <= 2);
+        }
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .chunk_cache_hits
+                .load(Ordering::Relaxed),
+            2
+        );
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .chunk_cache_evictions
+                .load(Ordering::Relaxed),
+            1
+        );
+        encrypted.get_range(&location, 16..17).await.unwrap();
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .chunk_cache_misses
+                .load(Ordering::Relaxed),
+            4
+        );
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .chunk_cache_bytes
+                .load(Ordering::Relaxed),
+            32
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_chunk_retention_still_coalesces() {
+        let inner = Arc::new(CountingStore {
+            delay: Some(std::time::Duration::from_millis(20)),
+            ..Default::default()
+        });
+        let mut encrypted = store(inner, "no-retention");
+        encrypted.chunks = Arc::new(ChunkCache::new(0, encrypted.read_metrics.clone()));
+        let location = Path::from("compacted/zero.sst");
+        encrypted
+            .put(&location, Bytes::from_static(b"0123456789abcdef").into())
+            .await
+            .unwrap();
+        encrypted.head(&location).await.unwrap();
+        let (first, second) = tokio::join!(
+            encrypted.get_range(&location, 0..4),
+            encrypted.get_range(&location, 4..8)
+        );
+        assert_eq!(first.unwrap(), Bytes::from_static(b"0123"));
+        assert_eq!(second.unwrap(), Bytes::from_static(b"4567"));
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .chunk_cache_misses
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .chunk_coalesced_reads
+                .load(Ordering::Relaxed),
+            1
+        );
+        encrypted.get_range(&location, 0..4).await.unwrap();
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .chunk_cache_misses
+                .load(Ordering::Relaxed),
+            2
+        );
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .chunk_cache_bytes
+                .load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn chunk_cache_budget_is_shared_but_backing_stores_are_isolated() {
+        let first = Arc::new(InMemory::new());
+        let second = Arc::new(InMemory::new());
+        let encrypted = store(first.clone(), "separate-stores");
+        let other = encrypted.with_inner(second.clone());
+        assert!(Arc::ptr_eq(&encrypted.chunks, &other.chunks));
+        let location = Path::from("same-path.sst");
+        encrypted
+            .put(&location, Bytes::from_static(b"0123456789abcdef").into())
+            .await
+            .unwrap();
+        let bytes = first.get(&location).await.unwrap().bytes().await.unwrap();
+        second.put(&location, bytes.clone().into()).await.unwrap();
+        assert_eq!(
+            encrypted.get_range(&location, 0..4).await.unwrap(),
+            Bytes::from_static(b"0123")
+        );
+        assert_eq!(
+            other.get_range(&location, 0..4).await.unwrap(),
+            Bytes::from_static(b"0123")
+        );
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .chunk_cache_misses
+                .load(Ordering::Relaxed),
+            2
+        );
+        let mut corrupt = bytes.to_vec();
+        corrupt[HEADER_SIZE] ^= 1;
+        second.put(&location, corrupt.into()).await.unwrap();
+        assert!(is_integrity_error(
+            &other.get_range(&location, 0..4).await.unwrap_err()
+        ));
+        assert_eq!(
+            encrypted.get_range(&location, 0..4).await.unwrap(),
+            Bytes::from_static(b"0123")
+        );
+    }
+
+    #[test]
+    fn invalidated_headers_do_not_accumulate_order_entries() {
+        let mut headers = HeaderCache::default();
+        let location = Path::from("mutable");
+        for _ in 0..100 {
+            headers.insert(
+                location.clone(),
+                Header {
+                    key_version: 1,
+                    chunk_size: 16,
+                    plaintext_len: 16,
+                    nonce: [0; NONCE_SIZE],
+                },
+                ObjectMeta {
+                    location: location.clone(),
+                    last_modified: Default::default(),
+                    size: (HEADER_SIZE + 32) as u64,
+                    e_tag: None,
+                    version: None,
+                },
+            );
+            headers.remove(&location);
+        }
+        assert!(headers.order.is_empty());
+        assert!(headers.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn chunk_flights_bound_unique_loads_and_bytes() {
+        let limits = ChunkCacheLimits::default();
+        let maximums = ChunkCacheLimits {
+            entries: MAX_CHUNK_CACHE_ENTRIES,
+            flights: MAX_CHUNK_FLIGHTS,
+            flight_bytes: MAX_CHUNK_FLIGHT_BYTES,
+            chunk_bytes: MAX_CACHED_CHUNK_BYTES,
+            range_chunks: MAX_CACHED_RANGE_CHUNKS,
+        }
+        .validate()
+        .unwrap();
+        for (limits, chunk_size, readers, admitted) in [
+            (limits, 16, limits.flights + 1, limits.flights),
+            (limits, limits.chunk_bytes, 17, 16),
+            (maximums, 16, maximums.flights + 1, maximums.flights),
+            (maximums, maximums.chunk_bytes, 17, 16),
+        ] {
+            let gate = Arc::new(tokio::sync::Semaphore::new(0));
+            let inner = Arc::new(CountingStore {
+                payload_gate: Some(gate.clone()),
+                ..Default::default()
+            });
+            let mut encrypted = store(inner, "admission").with_chunk_size(chunk_size);
+            encrypted.chunks = Arc::new(ChunkCache::with_limits(
+                0,
+                limits,
+                encrypted.read_metrics.clone(),
+            ));
+            let location = Path::from("compacted/admission.sst");
+            encrypted
+                .put(&location, Bytes::from(vec![7; readers * chunk_size]).into())
+                .await
+                .unwrap();
+            encrypted.head(&location).await.unwrap();
+            let mut tasks = Vec::new();
+            for index in 0..readers {
+                let encrypted = encrypted.clone();
+                let location = location.clone();
+                tasks.push(tokio::spawn(async move {
+                    let start = (index * chunk_size) as u64;
+                    encrypted
+                        .get_range(&location, start..start + 1)
+                        .await
+                        .unwrap()
+                }));
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    {
+                        let state = encrypted.chunks.state.lock().unwrap();
+                        assert!(state.flights.len() <= limits.flights);
+                        assert!(state.flight_bytes <= limits.flight_bytes);
+                        if state.flights.len() == admitted {
+                            break;
+                        }
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            gate.add_permits(readers);
+            for task in tasks {
+                assert_eq!(task.await.unwrap(), Bytes::from_static(&[7]));
+            }
+            let state = encrypted.chunks.state.lock().unwrap();
+            assert!(state.flights.is_empty());
+            assert_eq!(state.flight_bytes, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn experimental_chunk_cache_entry_limit_is_enforced() {
+        let mut encrypted = store(Arc::new(InMemory::new()), "entries");
+        let limits = ChunkCacheLimits {
+            entries: 2,
+            ..Default::default()
+        };
+        encrypted.chunks = Arc::new(ChunkCache::with_limits(
+            4096,
+            limits,
+            encrypted.read_metrics.clone(),
+        ));
+        let location = Path::from("compacted/entries.sst");
+        encrypted
+            .put(&location, Bytes::from(vec![7; 48]).into())
+            .await
+            .unwrap();
+        for start in [0, 16, 32] {
+            encrypted
+                .get_range(&location, start..start + 1)
+                .await
+                .unwrap();
+        }
+        let state = encrypted.chunks.state.lock().unwrap();
+        assert_eq!(state.entries.len(), 2);
+        assert_eq!(state.bytes, 32);
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .chunk_cache_evictions
+                .load(Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn chunk_worker_panic_releases_admission_and_allows_retry() {
+        let inner = Arc::new(CountingStore::default());
+        let encrypted = store(inner.clone(), "panic");
+        let location = Path::from("compacted/panic.sst");
+        encrypted
+            .put(&location, Bytes::from_static(b"0123456789abcdef").into())
+            .await
+            .unwrap();
+        inner.panic_payload.store(true, Ordering::Relaxed);
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            encrypted.get_range(&location, 0..4)
+        )
+        .await
+        .unwrap()
+        .is_err());
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .chunk_inflight
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            encrypted.get_range(&location, 0..4).await.unwrap(),
+            Bytes::from_static(b"0123")
+        );
+    }
+
+    #[test]
+    fn chunk_cache_retirement_removes_old_plaintext() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let encrypted = store(Arc::new(InMemory::new()), "retirement");
+            let location = Path::from("compacted/retired.sst");
+            encrypted
+                .put(&location, Bytes::from_static(b"0123456789abcdef").into())
+                .await
+                .unwrap();
+            encrypted.get_range(&location, 0..4).await.unwrap();
+            assert_eq!(
+                encrypted
+                    .read_metrics
+                    .chunk_cache_bytes
+                    .load(Ordering::Relaxed),
+                16
+            );
+            encrypted
+                .install_write_key(EncryptionKey::new(2, [8; 32]))
+                .unwrap();
+            assert_eq!(
+                encrypted.get_range(&location, 0..4).await.unwrap(),
+                Bytes::from_static(b"0123")
+            );
+            encrypted.retire_read_keys_before(2).unwrap();
+            assert_eq!(
+                encrypted
+                    .read_metrics
+                    .chunk_cache_bytes
+                    .load(Ordering::Relaxed),
+                0
+            );
+            assert!(is_integrity_error(
+                &encrypted.get_range(&location, 0..4).await.unwrap_err()
+            ));
+        });
+    }
+
+    #[test]
+    fn chunk_cache_configuration_is_bounded() {
+        assert_eq!(parse_chunk_cache_bytes("0").unwrap(), 0);
+        assert_eq!(
+            parse_chunk_cache_bytes("67108864").unwrap(),
+            DEFAULT_CHUNK_CACHE_BYTES
+        );
+        assert_eq!(
+            parse_chunk_cache_bytes("4294967296").unwrap() as u64,
+            MAX_CHUNK_CACHE_BYTES
+        );
+        for value in [
+            "4294967297",
+            "-1",
+            "+1",
+            " 1",
+            "64MiB",
+            "",
+            "18446744073709551616",
+        ] {
+            assert!(
+                parse_chunk_cache_bytes(value).is_err(),
+                "accepted {value:?}"
+            );
+        }
+        let defaults = ChunkCacheLimits::default();
+        assert_eq!(
+            (
+                defaults.entries,
+                defaults.flights,
+                defaults.flight_bytes,
+                defaults.chunk_bytes,
+                defaults.range_chunks
+            ),
+            (4096, 64, 16 * 1024 * 1024, 1024 * 1024, 4)
+        );
+        for (maximum, expected) in [
+            (MAX_CHUNK_CACHE_ENTRIES, 16384),
+            (MAX_CHUNK_FLIGHTS, 256),
+            (MAX_CHUNK_FLIGHT_BYTES, 64 * 1024 * 1024),
+            (MAX_CACHED_CHUNK_BYTES, 4 * 1024 * 1024),
+            (MAX_CACHED_RANGE_CHUNKS, 16),
+        ] {
+            assert_eq!(maximum, expected);
+            assert_eq!(
+                parse_chunk_limit("limit", &maximum.to_string(), maximum).unwrap(),
+                maximum
+            );
+            assert!(parse_chunk_limit("limit", &(maximum + 1).to_string(), maximum).is_err());
+            for invalid in ["0", "-1", "+1", " 1", "1MiB", "", "18446744073709551616"] {
+                assert!(parse_chunk_limit("limit", invalid, maximum).is_err());
+            }
+        }
+        assert!(ChunkCacheLimits {
+            flight_bytes: 1,
+            ..defaults
+        }
+        .validate()
+        .is_err());
+        assert!(defaults.validate().is_ok());
     }
 
     #[tokio::test]
@@ -253,6 +1039,7 @@ mod tests {
             ["get_ranges", "manual", "individual"],
         ] {
             for mode in modes {
+                let before = encrypted.read_metrics.snapshot();
                 let started = std::time::Instant::now();
                 for _ in 0..groups {
                     match mode {
@@ -292,8 +1079,15 @@ mod tests {
                     } else {
                         1
                     };
-                eprintln!("mode={mode} groups={groups} requests={requests} ciphertext_bytes={} elapsed_ms={}",
-                    requests * (DEFAULT_CHUNK_SIZE + TAG_SIZE), started.elapsed().as_millis());
+                let after = encrypted.read_metrics.snapshot();
+                let origin_bytes = after["ciphertext_origin_bytes"].as_u64().unwrap()
+                    - before["ciphertext_origin_bytes"].as_u64().unwrap();
+                assert_eq!(
+                    origin_bytes, 0,
+                    "warm nearby ranges must reuse authenticated chunks"
+                );
+                eprintln!("mode={mode} groups={groups} requests={requests} ciphertext_bytes={origin_bytes} elapsed_ms={}",
+                    started.elapsed().as_millis());
             }
         }
     }
@@ -302,15 +1096,15 @@ mod tests {
     #[ignore = "offline persisted encrypted SST read attribution"]
     async fn encrypted_sst_nearby_gets_vs_multi_get_offline() {
         let raw = Arc::new(CountingStore::default());
-        let encrypted: Arc<dyn ObjectStore> = Arc::new(
-            EncryptedObjectStore::new(
-                raw.clone(),
-                "repo-a",
-                vec![EncryptionKey::new(1, [7; 32])],
-                1,
-            )
-            .unwrap(),
-        );
+        let mut template = EncryptedObjectStore::new(
+            raw.clone(),
+            "repo-a",
+            vec![EncryptionKey::new(1, [7; 32])],
+            1,
+        )
+        .unwrap();
+        template.chunks = Arc::new(ChunkCache::new(0, template.read_metrics.clone()));
+        let encrypted = Arc::new(template);
         let path = "encrypted-nearby-sst";
         let writer = Db::builder(path, encrypted.clone())
             .with_db_cache_disabled()
@@ -338,19 +1132,29 @@ mod tests {
             .collect::<Vec<_>>();
         let groups = 32;
         for modes in [
-            ["individual", "batch", "cached"],
-            ["cached", "batch", "individual"],
+            ["individual", "batch", "cached", "chunks"],
+            ["chunks", "cached", "batch", "individual"],
         ] {
             let mut individual = None;
             let mut batched = None;
             for mode in modes {
-                let builder = Db::builder(path, encrypted.clone());
+                let reader_store: Arc<dyn ObjectStore> = if mode == "chunks" {
+                    let mut store = encrypted.with_inner(raw.clone());
+                    store.chunks = Arc::new(ChunkCache::new(
+                        DEFAULT_CHUNK_CACHE_BYTES,
+                        store.read_metrics.clone(),
+                    ));
+                    Arc::new(store)
+                } else {
+                    encrypted.clone()
+                };
+                let builder = Db::builder(path, reader_store);
                 let reader = if mode == "cached" {
                     builder.build().await.unwrap()
                 } else {
                     builder.with_db_cache_disabled().build().await.unwrap()
                 };
-                if mode == "cached" {
+                if mode == "cached" || mode == "chunks" {
                     for key in &keys {
                         reader.get(key).await.unwrap();
                     }
@@ -404,6 +1208,8 @@ mod tests {
                         sst.0, 0,
                         "warm cached point reads must not reach encrypted SST storage"
                     );
+                } else if mode == "chunks" {
+                    assert_eq!(sst.1, 0, "warm authenticated chunks must eliminate SST payload reads even without the DB cache");
                 } else {
                     individual = Some(sst);
                 }

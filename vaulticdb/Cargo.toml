@@ -32,6 +32,7 @@ hmac = "0.12"
 hpke = "0.13"
 ipnet = "2.11"
 libc = "0.2"
+lru = "0.18"
 object_store = { version = "0.14", default-features = false, features = ["azure", "gcp"] }
 p256 = { version = "0.13", features = ["ecdh"] }
 prost = "0.14"

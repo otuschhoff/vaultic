@@ -404,6 +404,12 @@ func backupEncryptionReadDelta(current, baseline *daemon.EncryptionReadMetrics) 
 		{&result.HeadReads, &baseline.HeadReads},
 		{&result.FullReads, &baseline.FullReads},
 		{&result.RangeReads, &baseline.RangeReads},
+		{&result.HeaderValidationCalls, &baseline.HeaderValidationCalls},
+		{&result.HeaderValidationNanoseconds, &baseline.HeaderValidationNanoseconds},
+		{&result.ChunkCacheHits, &baseline.ChunkCacheHits},
+		{&result.ChunkCacheMisses, &baseline.ChunkCacheMisses},
+		{&result.ChunkCacheEvictions, &baseline.ChunkCacheEvictions},
+		{&result.ChunkCoalescedReads, &baseline.ChunkCoalescedReads},
 	}
 	for _, field := range fields {
 		if *field[0] < *field[1] {

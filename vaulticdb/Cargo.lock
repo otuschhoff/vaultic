@@ -5116,6 +5116,7 @@ dependencies = [
  "ipnet",
  "jsonwebtoken",
  "libc",
+ "lru",
  "object_store",
  "p256",
  "prost",

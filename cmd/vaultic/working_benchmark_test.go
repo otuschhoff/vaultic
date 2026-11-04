@@ -780,7 +780,7 @@ func publicationQualificationRegularFiles(t *testing.T, source string, paths []s
 	return count
 }
 
-const publicationScale200kRoot = "/volume2/NASDA2/vaultic-test-m6/forced-scale-fme-cae1-20261103-200k"
+const publicationScale200kRoot = "/volume2/NASDA2/vaultic-test-m6/forced-scale-fme-cae1-20261104-200k-retry2"
 
 func publicationScaleInodeLimit(selector, root string) (uint64, error) {
 	if selector == "" {
@@ -828,6 +828,8 @@ func TestPublicationScaleInodeLimit(t *testing.T) {
 	}{
 		{"", "legacy", 100_000},
 		{"200000", publicationScale200kRoot, 200_000},
+		{"200000", "/volume2/NASDA2/vaultic-test-m6/forced-scale-fme-cae1-20261103-200k", 0},
+		{"200000", "/volume2/NASDA2/vaultic-test-m6/forced-scale-fme-cae1-20261104-200k-retry1", 0},
 		{"100000", publicationScale200kRoot, 0},
 		{"200000", publicationScale200kRoot + "/retry", 0},
 		{"600000", publicationScale200kRoot, 0},
