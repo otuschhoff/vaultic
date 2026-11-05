@@ -19,8 +19,8 @@ use crate::storage::{
     cache::{
         CacheConfidentiality, CacheConfig, CacheTierConfig, CacheTierPolicy, DEFAULT_CACHE_TIMEOUT,
     },
-    BrokerLeaseConfig, ObjectStoreConfig, ReplicaConfig, ReplicaStoreConfig, SlateDbTuning,
-    StorageConfig, TopologySource, WalStoreConfig,
+    BackendAccessMode, BrokerLeaseConfig, ObjectStoreConfig, ReplicaConfig, ReplicaStoreConfig,
+    SlateDbTuning, StorageConfig, TopologySource, WalStoreConfig,
 };
 use vaulticdb::encryption::envelope::{EncryptionConfig, EncryptionMode, ProviderCredentials};
 use vaulticdb::ids::RepositoryId;
@@ -200,6 +200,14 @@ fn storage_from_env() -> Result<StorageConfig> {
         .context("VAULTICDB_TRANSACTION_IDLE_TIMEOUT_SECS is too large")?;
     Ok(StorageConfig {
         object_store,
+        backend_access_mode: match env::var_os("VAULTICDB_BACKEND_ACCESS_MODE") {
+            None => BackendAccessMode::default(),
+            Some(value) => BackendAccessMode::parse(
+                value
+                    .to_str()
+                    .context("VAULTICDB_BACKEND_ACCESS_MODE must be valid UTF-8")?,
+            )?,
+        },
         wal_store: wal_store_from_env()?,
         slatedb_tuning: slatedb_tuning_from_env()?,
         cache: cache_from_env()?,

@@ -406,6 +406,7 @@ func backupEncryptionReadDelta(current, baseline *daemon.EncryptionReadMetrics) 
 		{&result.RangeReads, &baseline.RangeReads},
 		{&result.HeaderValidationCalls, &baseline.HeaderValidationCalls},
 		{&result.HeaderValidationNanoseconds, &baseline.HeaderValidationNanoseconds},
+		{&result.HeaderValidationCoalescedReads, &baseline.HeaderValidationCoalescedReads},
 		{&result.ChunkCacheHits, &baseline.ChunkCacheHits},
 		{&result.ChunkCacheMisses, &baseline.ChunkCacheMisses},
 		{&result.ChunkCacheEvictions, &baseline.ChunkCacheEvictions},

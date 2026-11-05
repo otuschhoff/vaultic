@@ -30,14 +30,14 @@ func TestEncryptionReadMetricsCompatibility(test *testing.T) {
 	if err := json.Unmarshal(encoded, &fields); err != nil {
 		test.Fatal(err)
 	}
-	for _, name := range []string{"header_validation_calls", "header_validation_ns", "chunk_cache_hits", "chunk_cache_misses", "chunk_cache_evictions", "chunk_coalesced_reads"} {
+	for _, name := range []string{"header_validation_calls", "header_validation_ns", "header_validation_coalesced_reads", "chunk_cache_hits", "chunk_cache_misses", "chunk_cache_evictions", "chunk_coalesced_reads"} {
 		delete(fields, name)
 	}
 	older, err := json.Marshal(fields)
 	if err != nil || encryptionReadMetrics(older) == nil {
 		test.Fatal("older daemon without chunk counters became unavailable")
 	}
-	for _, name := range []string{"header_validation_calls", "header_validation_ns", "chunk_cache_hits", "chunk_cache_misses", "chunk_cache_evictions", "chunk_coalesced_reads"} {
+	for _, name := range []string{"header_validation_calls", "header_validation_ns", "header_validation_coalesced_reads", "chunk_cache_hits", "chunk_cache_misses", "chunk_cache_evictions", "chunk_coalesced_reads"} {
 		for _, invalid := range []string{"null", "-1", "18446744073709551616", `"invalid"`} {
 			fields[name] = json.RawMessage(invalid)
 			malformed, err := json.Marshal(fields)
@@ -52,7 +52,7 @@ func TestEncryptionReadMetricsCompatibility(test *testing.T) {
 		test.Fatal(err)
 	}
 	status = writerStatus(&vaulticdbv1.WriterStatusResponse{Attribution: &vaulticdbv1.AttributionSnapshot{EncryptionReadMetricsJson: extended}})
-	if status.Attribution.EncryptionReads == nil || status.Attribution.EncryptionReads.ChunkCacheHits != 7 || status.Attribution.EncryptionReads.ChunkCoalescedReads != 7 || status.Attribution.EncryptionReads.HeaderValidationNanoseconds != 7 {
+	if status.Attribution.EncryptionReads == nil || status.Attribution.EncryptionReads.ChunkCacheHits != 7 || status.Attribution.EncryptionReads.ChunkCoalescedReads != 7 || status.Attribution.EncryptionReads.HeaderValidationNanoseconds != 7 || status.Attribution.EncryptionReads.HeaderValidationCoalescedReads != 7 {
 		test.Fatalf("chunk metrics lost in writer status: %+v", status.Attribution.EncryptionReads)
 	}
 }

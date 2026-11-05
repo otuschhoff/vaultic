@@ -2,6 +2,7 @@ from pathlib import Path
 import argparse
 import ctypes
 import json
+import math
 import os
 import shutil
 import signal
@@ -9,6 +10,8 @@ import subprocess
 import sys
 import threading
 import time
+import statistics
+import unittest
 
 import pilot
 
@@ -19,6 +22,9 @@ FIFTY = Path('/volume2/NASDA2/vaultic-test-m6/metadata-read-fme-cae1-20261103-50
 SCALE_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/forced-scale-fme-cae1-20261104-200k-retry2')
 SCALE_RUNTIME = Path('/run/vaultic-unchanged-scale200k-20261104-retry2')
 SCALE_SOURCE = Path('/ncl1-1-vs-50/fme_cae1')
+CHUNK_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/chunk-compare-fme-cae1-20261104-200k')
+CHUNK_BIN = WORKSPACE / 'bin/phase35-chunk200k/linux-amd64'
+CHUNK_SCHEDULE = ('A', 'B', 'C', 'C', 'B', 'A', 'B', 'C', 'A', 'A', 'C', 'B', 'C', 'D', 'D', 'C')
 ACCEPTED = Path('/volume2/NASDA2/vaultic-test-m6/critical-path-fme_cae1-20261102-production-cap100k/group-64')
 SEED = Path('/ncl1-1-vs-50/fme_dump/amakura/db.begin-readiness-20261001-fuU56R')
 CANDIDATE = WORKSPACE / 'bin/phase35-metadata-read/linux-amd64/vaultic'
@@ -87,7 +93,25 @@ def profile_settings(profile):
             'rpc_limit': 32 if profile in ('rpcs', 'readers') else 8}
 
 
-def observe_db_settings(group, settings, native=NATIVE):
+def chunk_settings(variant):
+    if variant not in ('A', 'B', 'C', 'D'):
+        raise ValueError('unknown chunk variant')
+    if variant == 'A':
+        return {}
+    return {'VAULTICDB_CHUNK_CACHE_BYTES': {'B': 0, 'C': 64 << 20, 'D': 256 << 20}[variant],
+            'VAULTICDB_CHUNK_CACHE_ENTRIES': 4096, 'VAULTICDB_CHUNK_FETCH_LIMIT': 64,
+            'VAULTICDB_CHUNK_FETCH_BYTES': 16 << 20, 'VAULTICDB_CHUNK_MAX_BYTES': 1 << 20,
+            'VAULTICDB_CHUNK_RANGE_LIMIT': 4}
+
+
+def chunk_paths(label):
+    labels = [f'leg-{index:02d}-{variant}' for index, variant in enumerate(CHUNK_SCHEDULE, 1)]
+    if label not in labels:
+        raise ValueError('unknown scheduled chunk leg')
+    return CHUNK_ROOT / label, Path('/run/vaultic-unchanged-chunk200k-' + label)
+
+
+def observe_db_settings(group, settings, native=NATIVE, chunk_variant=None):
     observed = []
     for entry in Path('/proc').iterdir():
         if not entry.name.isdigit():
@@ -99,6 +123,10 @@ def observe_db_settings(group, settings, native=NATIVE):
             expected = {'VAULTICDB_CRYPTO_THREADS': settings['crypto_threads'],
                         'VAULTICDB_META_CACHE_BYTES': settings['meta_cache_bytes'],
                         'VAULTICDB_BLOCK_CACHE_BYTES': settings['block_cache_bytes']}
+            if chunk_variant is not None:
+                expected.update(chunk_settings(chunk_variant))
+                if chunk_variant == 'A' and any(name.encode() in values for name in chunk_settings('C')):
+                    raise ValueError('baseline unexpectedly inherited chunk configuration')
             if any(values.get(name.encode()) != str(value).encode() for name, value in expected.items()):
                 raise ValueError('owned daemon tuning environment differs')
             workers = sum(task.joinpath('comm').read_text().strip().startswith('vaulticdb-crypt')
@@ -164,13 +192,15 @@ def prepare(mode, inode_limit=10000, profile=None):
     print(json.dumps({'root': str(root), 'runtime': str(runtime), 'prepared': True}))
 
 
-def protect(profile=None):
+def protect(profile=None, chunk=False):
     library = ctypes.CDLL(None, use_errno=True)
     protected = [SEED, ACCEPTED, Path('/volume2/NASDA2/rustic'), WORKSPACE, PREVIOUS / 'group-64', PREVIOUS / 'input']
     if profile is not None:
         protected.append(FIFTY)
     if profile == 'db-scale200k':
         protected.append(SCALE_SOURCE)
+    if chunk:
+        protected.append(SCALE_ROOT)
     for path in protected:
         encoded = os.fsencode(path)
         if library.mount(encoded, encoded, None, 4096, None) != 0 or library.mount(None, encoded, None, 4096 | 32 | 1, None) != 0:
@@ -226,9 +256,19 @@ def storage_bytes(root):
     return total
 
 
-def execute(mode, inode_limit=10000, profile=None):
-    root, runtime = paths(mode, inode_limit, profile)
+def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
+    root, runtime = paths(mode, inode_limit, profile) if chunk_leg is None else chunk_paths(chunk_leg)
     candidate, native = binaries(profile)
+    chunk_variant = None
+    if chunk_leg is not None:
+        if (mode, inode_limit, profile) != ('coalesced', 200000, 'db-scale200k'):
+            raise ValueError('chunk comparison requires the fixed forced-only 200k profile')
+        parent_namespace = os.environ.get('VAULTIC_CHUNK_PARENT_MOUNT_NS')
+        if not parent_namespace or os.readlink('/proc/self/ns/mnt') == parent_namespace:
+            raise ValueError('chunk leg must run in a distinct private mount namespace')
+        chunk_variant = chunk_leg.rsplit('-', 1)[1]
+        candidate = CHUNK_BIN / 'vaultic'
+        native = CHUNK_BIN / ('old' if chunk_variant == 'A' else 'new') / 'vaulticdb'
     settings = profile_settings(profile) if profile is not None else None
     db_screen = profile in DB_OVERRIDES
     ceiling = fixture_ceiling(inode_limit)
@@ -237,7 +277,9 @@ def execute(mode, inode_limit=10000, profile=None):
             raise ValueError('unsafe capture root')
     if (root / '.nobackup').read_bytes() != MARKER:
         raise ValueError('ownership marker differs')
-    protect(profile)
+    protect(profile, chunk=chunk_leg is not None)
+    if chunk_leg is not None:
+        subprocess.run(['sha256sum', '-c', 'FOLLOWUP-SHA256SUMS'], cwd=SCALE_ROOT, check=True)
     if profile is not None:
         subprocess.run(['sha256sum', '-c', 'METADATA-READ-SHA256SUMS'], cwd=FIFTY, check=True)
         retained = json.loads((FIFTY / 'launch-pins.json').read_text())
@@ -253,14 +295,15 @@ def execute(mode, inode_limit=10000, profile=None):
                     (FIFTY / 'verified-observation.json', FIFTY / 'METADATA-READ-SHA256SUMS', FIFTY / 'group-64/result.json'))
     pilot.write_json(root / 'launch-pins.json', {'pins': pins, 'mode': mode, 'entries': inode_limit,
                      'concurrency_profile': profile,
+                     'chunk_variant': chunk_variant, 'chunk_settings': None if chunk_variant is None else chunk_settings(chunk_variant),
                      'db_tuning': settings if db_screen else None,
                      'forced_only': profile is not None,
                      'read_concurrency': settings['readers'] if settings is not None else None,
                      'metadata_read_concurrency': settings['rpc_limit'] if settings is not None else None,
                      'rss_ceiling_bytes': RSS_CEILING, 'disk_floor_bytes': FLOOR, 'fixture_ceiling_bytes': ceiling,
                      'managed_ram_limit': '160GiB', 'scratch_limit': '2GiB', 'total_timeout_seconds': 28800,
-                     'schedule': (['source-freeze', 'parent-setup', 'forced'] if inode_limit == 200000 else (['forced'] if profile is not None else (['unforced', 'forced'] if inode_limit == 10000 else ['parent-setup', 'unforced', 'forced']))), 'production_repository_writable': False,
-                     'source': str(root / 'input') if inode_limit == 200000 else (str(FIFTY / 'input') if profile is not None else (str(PREVIOUS / 'input') if inode_limit == 10000 else str(ACCEPTED / 'restore/ncl1-1-vs-50/fme_cae1'))), 'toolchains': {
+                     'schedule': (['parent-clone', 'forced', 'restore', 'reopen'] if chunk_leg is not None else (['source-freeze', 'parent-setup', 'forced'] if inode_limit == 200000 else (['forced'] if profile is not None else (['unforced', 'forced'] if inode_limit == 10000 else ['parent-setup', 'unforced', 'forced'])))), 'production_repository_writable': False,
+                     'source': str(SCALE_ROOT / 'input') if chunk_leg is not None else (str(root / 'input') if inode_limit == 200000 else (str(FIFTY / 'input') if profile is not None else (str(PREVIOUS / 'input') if inode_limit == 10000 else str(ACCEPTED / 'restore/ncl1-1-vs-50/fme_cae1')))), 'toolchains': {
                          name: subprocess.check_output(command, text=True).strip() for name, command in
                          [('go', ['go', 'version']), ('rust', ['rustc', '--version']), ('cargo', ['cargo', '--version'])]}})
     environment = {key: value for key, value in os.environ.items()
@@ -296,6 +339,10 @@ def execute(mode, inode_limit=10000, profile=None):
                             'VAULTIC_PHASE35_THROUGHPUT_UNCHANGED': '1', 'VAULTIC_PHASE35_THROUGHPUT_FORCE_COMPARE': '1',
                             'VAULTIC_PHASE35_THROUGHPUT_ON_DEMAND': '1', 'VAULTIC_PHASE35_THROUGHPUT_ORDER': '64',
                             'VAULTIC_PHASE35_THROUGHPUT_CANDIDATE': str(CANDIDATE), 'VAULTIC_PHASE35_THROUGHPUT_NATIVE': str(NATIVE)})
+    if chunk_leg is not None:
+        test_name = 'TestPublicationChunk200kComparison'
+        environment['VAULTIC_PHASE35_CHUNK_VARIANT'] = chunk_variant
+        environment.update({name: str(value) for name, value in chunk_settings(chunk_variant).items()})
     membership = next(line[3:] for line in Path('/proc/self/cgroup').read_text().splitlines() if line.startswith('0::'))
     cgroup = Path('/sys/fs/cgroup') / membership.lstrip('/')
     driver = root / 'driver'
@@ -320,7 +367,7 @@ def execute(mode, inode_limit=10000, profile=None):
                 last_storage = 0
                 while True:
                     rss, count = pilot.process_group_rss(process.pid)
-                    actual_settings = observe_db_settings(process.pid, settings, native) if db_screen else []
+                    actual_settings = observe_db_settings(process.pid, settings, native, chunk_variant) if db_screen else []
                     if actual_settings:
                         result['db_settings_verified'] = True
                     elapsed = time.monotonic() - started
@@ -372,7 +419,7 @@ def execute(mode, inode_limit=10000, profile=None):
     return 0 if result['accepted'] else 1
 
 
-def summarize_followup(root, profile, inode_limit=50000):
+def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None):
     outcome = json.loads((root / 'outcome.json').read_text())
     measured = json.loads((root / 'group-64/forced/result.json').read_text())
     settings = profile_settings(profile)
@@ -412,7 +459,7 @@ def summarize_followup(root, profile, inode_limit=50000):
                       f"--metadata-read-concurrency={settings['rpc_limit']}",
                       f"--metadata-batch-delay={settings['batch_delay_ns'] // 1000000}ms",
                       f"--metadata-publication-group-size={settings['publication_group_size']}"]
-    if measured['metadata_read_flags'] != expected_flags or measured['candidate'] != str(binaries(profile)[0]) or measured['engine_multi_get'] is not True:
+    if measured['metadata_read_flags'] != expected_flags or measured['candidate'] != str(expected_candidate or binaries(profile)[0]) or measured['engine_multi_get'] is not True:
         raise ValueError('follow-up binary, batching, concurrency or engine settings differ')
     before, after = measured['writer_before'], measured['writer_after']
     if before['process_started_unix_ms'] != after['process_started_unix_ms']:
@@ -457,6 +504,183 @@ def seal_followup(root, row):
         for path in artifacts:
             output.write(pilot.digest(path) + '  ' + str(path.relative_to(root)) + '\n')
     subprocess.run(['sha256sum', '-c', manifest.name], cwd=root, check=True)
+
+
+def chunk_comparison_report(rows):
+    if [row['variant'] for row in rows] != list(CHUNK_SCHEDULE):
+        raise ValueError('chunk comparison schedule incomplete or reordered')
+    for row in rows:
+        if row['entries'] != 200000 or not math.isfinite(row['main_seconds']) or row['main_seconds'] <= 0:
+            raise ValueError('chunk comparison requires positive exact 200k measurements')
+    variants = {}
+    for variant in ('A', 'B', 'C', 'D'):
+        selected = [row for row in rows if row['variant'] == variant]
+        variants[variant] = {'runs': len(selected),
+                             'median_main_seconds': statistics.median(row['main_seconds'] for row in selected),
+                             'median_entries_per_second': statistics.median(200000 / row['main_seconds'] for row in selected),
+                             'min_main_seconds': min(row['main_seconds'] for row in selected),
+                             'max_main_seconds': max(row['main_seconds'] for row in selected),
+                             'median_peak_rss_bytes': statistics.median(row['peak_combined_rss_bytes'] for row in selected)}
+    control = [row['main_seconds'] for row in rows[:12] if row['variant'] == 'A']
+    baseline_spread = max(control) / min(control) - 1
+    blocks = []
+    for start in (0, 6):
+        block = rows[start:start + 6]
+        means = {variant: statistics.mean(row['main_seconds'] for row in block if row['variant'] == variant)
+                 for variant in ('A', 'B', 'C')}
+        blocks.append({'schedule': [row['variant'] for row in block], 'mean_main_seconds': means,
+                       'coalescing_vs_old_throughput_gain': means['A'] / means['B'] - 1,
+                       'retention_vs_coalescing_throughput_gain': means['B'] / means['C'] - 1,
+                       'combined_vs_old_throughput_gain': means['A'] / means['C'] - 1})
+    capacity = rows[12:]
+    means = {variant: statistics.mean(row['main_seconds'] for row in capacity if row['variant'] == variant)
+             for variant in ('C', 'D')}
+    for row in rows:
+        encryption = row['deltas']['encryption_reads']
+        requested = encryption['requested_plaintext_bytes']
+        row['origin_amplification'] = encryption['ciphertext_origin_bytes'] / requested if requested else None
+        row['counter_window'] = 'writer status before backup through snapshot validation; wider than main phase'
+    return {'accepted': True, 'schedule': list(CHUNK_SCHEDULE), 'rows': rows, 'variants': variants,
+            'balanced_blocks': blocks, 'baseline_elapsed_spread_fraction': baseline_spread,
+            'combined_throughput_supported_above_observed_baseline_spread': all(
+                block['combined_vs_old_throughput_gain'] > baseline_spread for block in blocks),
+            'capacity_bracket': {'schedule': ['C', 'D', 'D', 'C'], 'mean_main_seconds': means,
+                                 'larger_cache_throughput_gain': means['C'] / means['D'] - 1},
+            'physical_nfs_traffic_measured': False, 'native_cache_gauges_sampled': False,
+            'single_pass_sustained_qualified': any(row['main_seconds'] >= 600 for row in rows),
+            'formal_statistical_qualification': False, 'deployment_qualified': False,
+            'production_modified': False, 'host_caches_dropped': False}
+
+
+def execute_chunk_series():
+    series = CHUNK_ROOT
+    if series.exists() or series.parent.resolve() != series.parent:
+        raise ValueError('refuse existing or noncanonical chunk comparison series')
+    if shutil.disk_usage(series.parent).free < FLOOR + len(CHUNK_SCHEDULE) * fixture_ceiling(200000):
+        raise ValueError('full series reservation plus shared free-space floor unavailable')
+    pilot.private_directory(series)
+    with private_output(series / '.nobackup') as output:
+        output.write(MARKER)
+    driver = CHUNK_BIN / 'qualifier.test'
+    inputs = (driver, CHUNK_BIN / 'vaultic', CHUNK_BIN / 'old/vaulticdb', CHUNK_BIN / 'new/vaulticdb',
+              CHUNK_BIN / 'build.json', Path(__file__), Path(pilot.__file__),
+              WORKSPACE / 'helpers/phase35-m6/observe.py', WORKSPACE / 'cmd/vaultic/working_benchmark_test.go',
+              SCALE_ROOT / 'FOLLOWUP-SHA256SUMS', SCALE_ROOT / 'group-64/result.json', SCALE_ROOT / 'source-observation.json')
+    pins = {str(path): pilot.digest(path) for path in inputs}
+    pilot.write_json(series / 'launch-pins.json', {'pins': pins, 'schedule': list(CHUNK_SCHEDULE),
+                     'parent': str(SCALE_ROOT), 'source_entries': 200000, 'production_modified': False,
+                     'baseline_revision': '01835ca98b1b66d48f176b719fffa8f89ac80c67',
+                     'candidate_revision': '931e3a5ef29c632fa483e304abe7b3d1a842865b',
+                     'single_pass_sustained_required_seconds': 600,
+                     'process_cache_state': 'fresh daemon; identical startup, no cross-leg retained cache',
+                     'host_cache_state': 'uncontrolled but unchanged; balanced leg ordering',
+                     'larger_cache_bracket_bytes': 256 << 20})
+    rows = []
+    try:
+        for index, variant in enumerate(CHUNK_SCHEDULE, 1):
+            if any(pilot.digest(Path(path)) != digest for path, digest in pins.items()):
+                raise ValueError('chunk series executable, fixture receipt or supervisor pin changed')
+            label = f'leg-{index:02d}-{variant}'
+            root, runtime = chunk_paths(label)
+            if root.exists() or runtime.exists():
+                raise ValueError('refuse existing chunk leg or runtime')
+            pilot.private_directory(root)
+            pilot.private_directory(runtime)
+            with private_output(root / '.nobackup') as output:
+                output.write(MARKER)
+            with private_output(root / 'source.patch') as output:
+                subprocess.run(['git', '-C', str(WORKSPACE), 'diff', '--binary'], stdout=output, check=True)
+            for source, target in ((driver, root / 'qualifier.test'),
+                                   (SCALE_ROOT / 'source-observation.json', root / 'source-observation.json')):
+                shutil.copyfile(source, target)
+                os.chmod(target, 0o500 if target.name == 'qualifier.test' else 0o600)
+            environment = dict(os.environ, VAULTIC_CHUNK_PARENT_MOUNT_NS=os.readlink('/proc/self/ns/mnt'))
+            command = ['timeout', '--signal=INT', '--kill-after=150s', '29100s',
+                       'unshare', '--mount', '--propagation', 'private', sys.executable, str(Path(__file__)),
+                       '--mode=coalesced', '--inode-limit=200000', '--concurrency-profile=db-scale200k', '--chunk-leg=' + label]
+            print(json.dumps({'starting': label, 'root': str(root), 'chunk_settings': chunk_settings(variant)}), flush=True)
+            with private_output(series / (label + '.stdout.log')) as output, private_output(series / (label + '.stderr.log')) as errors:
+                process = subprocess.Popen(command, stdout=output, stderr=errors, env=environment, start_new_session=True)
+                try:
+                    status = process.wait()
+                    if status:
+                        raise subprocess.CalledProcessError(status, command)
+                except BaseException:
+                    if process.poll() is None:
+                        process.send_signal(signal.SIGINT)
+                        try:
+                            process.wait(timeout=150)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait(timeout=30)
+                            raise ValueError('chunk supervisor required kill fallback; capture rejected')
+                    raise
+            row = summarize_followup(root, 'db-scale200k', 200000, CHUNK_BIN / 'vaultic')
+            row.update({'variant': variant, 'leg': label, 'chunk_settings': chunk_settings(variant)})
+            row['cache_evictions_measured'] = variant != 'A'
+            if variant != 'A' and row['deltas']['encryption_reads']['header_validation_calls'] <= 0:
+                raise ValueError('new chunk read path was not exercised')
+            seal_followup(root, row)
+            rows.append(row)
+            shutil.rmtree(runtime)
+            print(json.dumps({'accepted': label, 'main_seconds': row['main_seconds'],
+                              'entries_per_second': row['entries_per_second'],
+                              'encryption': row['deltas']['encryption_reads']}), flush=True)
+        report = chunk_comparison_report(rows)
+        pilot.write_json(series / 'verified-series.json', report)
+        with private_output(series / 'SERIES-SHA256SUMS', text=True) as output:
+            artifacts = sorted(path for path in series.iterdir() if path.is_file() and path.name != 'SERIES-SHA256SUMS')
+            artifacts.extend(series / row['leg'] / 'FOLLOWUP-SHA256SUMS' for row in rows)
+            for path in artifacts:
+                output.write(pilot.digest(path) + '  ' + str(path.relative_to(series)) + '\n')
+        subprocess.run(['sha256sum', '-c', 'SERIES-SHA256SUMS'], cwd=series, check=True)
+        print(json.dumps({'accepted': True, 'variants': report['variants'], 'balanced_blocks': report['balanced_blocks'],
+                          'capacity_bracket': report['capacity_bracket'],
+                          'single_pass_sustained_qualified': report['single_pass_sustained_qualified']}), flush=True)
+    except BaseException as error:
+        pilot.write_json(series / 'failed-series.json', {'accepted': False, 'completed_legs': [row['leg'] for row in rows],
+                         'failure': type(error).__name__ + ': ' + str(error)})
+        raise
+
+
+class ChunkComparisonTests(unittest.TestCase):
+    def test_schedule_and_routes(self):
+        for offset in (0, 6):
+            self.assertEqual({variant: CHUNK_SCHEDULE[offset:offset + 6].count(variant) for variant in 'ABC'},
+                             {'A': 2, 'B': 2, 'C': 2})
+        self.assertNotEqual(CHUNK_SCHEDULE[:6], CHUNK_SCHEDULE[6:12])
+        for index, variant in enumerate(CHUNK_SCHEDULE, 1):
+            root, runtime = chunk_paths(f'leg-{index:02d}-{variant}')
+            self.assertEqual(root.parent, CHUNK_ROOT)
+            self.assertEqual(runtime.parent, Path('/run'))
+        for label in ('leg-01-C', 'leg-17-C', '../retry', 'leg-03-C/retry'):
+            with self.assertRaises(ValueError):
+                chunk_paths(label)
+
+    def test_variant_isolation(self):
+        self.assertEqual(chunk_settings('A'), {})
+        self.assertEqual(chunk_settings('B')['VAULTICDB_CHUNK_CACHE_BYTES'], 0)
+        for variant in ('B', 'D'):
+            self.assertEqual([name for name in chunk_settings('C') if chunk_settings(variant)[name] != chunk_settings('C')[name]],
+                             ['VAULTICDB_CHUNK_CACHE_BYTES'])
+        with self.assertRaises(ValueError):
+            chunk_settings('unknown')
+
+    def test_analysis_rejects_reordering_and_short_gates(self):
+        rows = [{'variant': variant, 'entries': 200000, 'main_seconds': {'A': 220, 'B': 210, 'C': 180, 'D': 175}[variant],
+                 'peak_combined_rss_bytes': 1000000000,
+                 'deltas': {'encryption_reads': {'requested_plaintext_bytes': 100, 'ciphertext_origin_bytes': 200}}}
+                for variant in CHUNK_SCHEDULE]
+        report = chunk_comparison_report(rows)
+        self.assertFalse(report['single_pass_sustained_qualified'])
+        self.assertTrue(report['combined_throughput_supported_above_observed_baseline_spread'])
+        self.assertEqual(report['variants']['A']['runs'], 4)
+        self.assertGreater(report['capacity_bracket']['larger_cache_throughput_gain'], 0)
+        with self.assertRaises(ValueError):
+            chunk_comparison_report(rows[:-1])
+        rows[0], rows[1] = rows[1], rows[0]
+        with self.assertRaises(ValueError):
+            chunk_comparison_report(rows)
 
 
 def execute_series():
@@ -540,9 +764,24 @@ if __name__ == '__main__':
     parser.add_argument('--concurrency-profile', choices=('baseline', 'rpcs', 'readers', *DB_OVERRIDES))
     parser.add_argument('--prepare', action='store_true')
     parser.add_argument('--series', action='store_true')
+    parser.add_argument('--chunk-series', action='store_true')
+    parser.add_argument('--chunk-self-test', action='store_true')
+    parser.add_argument('--chunk-leg')
     arguments = parser.parse_args()
     os.umask(0o077)
-    if arguments.series:
+    if arguments.chunk_self_test:
+        result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(ChunkComparisonTests))
+        raise SystemExit(0 if result.wasSuccessful() else 1)
+    elif arguments.chunk_series or arguments.chunk_leg is not None:
+        if (arguments.mode, arguments.inode_limit, arguments.concurrency_profile) != ('coalesced', 200000, 'db-scale200k') or arguments.prepare or arguments.series:
+            raise ValueError('chunk series requires its fixed forced-only 200k routing')
+        if arguments.chunk_series:
+            if arguments.chunk_leg is not None:
+                raise ValueError('cannot select series and individual leg together')
+            execute_chunk_series()
+        else:
+            raise SystemExit(execute(arguments.mode, arguments.inode_limit, arguments.concurrency_profile, arguments.chunk_leg))
+    elif arguments.series:
         if arguments.mode != 'coalesced' or arguments.inode_limit != 50000 or arguments.prepare or arguments.concurrency_profile is not None:
             raise ValueError('series requires forced-only 50000-entry coalesced routing')
         execute_series()

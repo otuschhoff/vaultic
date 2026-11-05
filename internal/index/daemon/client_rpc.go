@@ -170,8 +170,16 @@ func daemonEnvironment(options Options) []string {
 		"HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true,
 		"http_proxy": true, "https_proxy": true, "no_proxy": true,
 		"SSL_CERT_FILE": true, "SSL_CERT_DIR": true,
-		"VAULTICDB_SLATEDB_MULTIGET": true,
-		"VAULTICDB_CRYPTO_THREADS":   true,
+		"VAULTICDB_SLATEDB_MULTIGET":    true,
+		"VAULTICDB_CRYPTO_THREADS":      true,
+		"VAULTICDB_CHUNK_CACHE_BYTES":   true,
+		"VAULTICDB_CHUNK_CACHE_ENTRIES": true,
+		"VAULTICDB_CHUNK_FETCH_LIMIT":   true,
+		"VAULTICDB_CHUNK_FETCH_BYTES":   true,
+		"VAULTICDB_CHUNK_MAX_BYTES":     true,
+		"VAULTICDB_CHUNK_RANGE_LIMIT":   true,
+		"VAULTICDB_BACKEND_ACCESS_MODE": true,
+		"VAULTICDB_SST_FRESHNESS":       true,
 	}
 	walS3Credentials := map[string]bool{
 		"VAULTICDB_WAL_S3_ACCESS_KEY_ID":     true,

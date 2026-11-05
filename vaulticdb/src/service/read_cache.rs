@@ -225,6 +225,7 @@ mod tests {
 
     fn storage_config(cache: CacheConfig) -> StorageConfig {
         StorageConfig {
+            backend_access_mode: crate::storage::BackendAccessMode::Shared,
             object_store: ObjectStoreConfig::Memory,
             wal_store: WalStoreConfig::Inherit,
             slatedb_tuning: crate::storage::SlateDbTuning::default(),

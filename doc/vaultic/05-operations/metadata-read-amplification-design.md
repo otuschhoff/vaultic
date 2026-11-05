@@ -20,6 +20,138 @@ full-crawl throughput, and reduces the measured work targeted by its hypothesis.
 Use the lowest useful concurrency that meets the objective within the approved
 resource envelope. Do not select a concurrency peak from a subsecond screen.
 
+## Chunk Comparison Protocol (2026-11-04)
+
+A create-only forced 200k comparison completed under
+`/volume2/NASDA2/vaultic-test-m6/chunk-compare-fme-cae1-20261104-200k`.
+All 16 legs passed correctness and cleanup and were sealed. Do not treat the
+historical 916.574 entries/second result as a paired baseline for this feature.
+
+The fixed variants are:
+
+| Variant | Native source | Retained authenticated chunks |
+| --- | --- | --- |
+| A | `01835ca98b1b66d48f176b719fffa8f89ac80c67` | Original contiguous read behavior |
+| B | `931e3a5ef29c632fa483e304abe7b3d1a842865b` | Zero bytes; concurrent-fetch coalescing remains active |
+| C | Same as B | Default 64 MiB |
+| D | Same as B | 256 MiB; only retained-byte capacity changes |
+
+Both native revisions were freshly compiled from isolated committed source
+archives using identical locked release builds and the same toolchain. Build
+logs must identify the actual archive source path, and the resulting hashes must
+differ. One newly built CLI and qualifier are shared across all variants. The
+CLI includes a launcher fix that explicitly forwards the six chunk-limit
+variables; without it, a zero-retention environment override was filtered out.
+Focused race tests cover forwarding through the real command builder and
+preservation of the ambient-secret filter.
+
+The primary schedules are `A B C C B A` and `B C A A C B`, followed by the
+capacity bracket `C D D C`. Each leg uses the same accepted retry2 frozen input
+and independently checksum-clones its untouched parent. The source remains
+200,000 entries, 178,208 regular files and 23,520,039,140 bytes, with digest
+`c1f7faee11872b1fac2f0af5d242c7a30f51ddc426bfd3e5c93b7200b3eefc83`.
+No leg inherits another leg's process caches, repository writes or daemon.
+Normal identical startup work may warm caches before the measured main phase.
+Host/NAS caches are not dropped or controlled; the balanced ordering exposes
+some drift but does not eliminate environmental uncertainty.
+
+Reader concurrency 128, RPC limit 32, publication group 16, metadata cache
+2 GiB, block cache 512 MiB, eight crypto workers and 1 ms batch delay stay fixed.
+All new variants explicitly use the original entry, flight-count, reserved-byte,
+chunk-size and range-count defaults. Live owned-daemon environment and crypto
+thread checks must confirm the selected settings, not merely launcher intent.
+
+Every leg retains main and command duration, CLI CPU, process CPU/RSS samples,
+cache and encrypted-read deltas, and reconciliation/publication attribution.
+Writer-status deltas cover backup through snapshot validation and are wider
+than the main-phase timer; compare like windows. Native cache occupancy and
+in-flight gauges are not exported by the Go receipt and remain unavailable to
+this comparison. Sampled process CPU is not an exact main-phase CPU integral.
+Origin bytes are logical object-store payload, not physical NAS traffic.
+
+B versus A measures the net coalescing-path effect, including fresh metadata
+validation overhead. C versus B isolates retention. C versus A answers the
+overall throughput question. The report retains individual legs and balanced
+block means; its conservative support flag requires both blocks' combined
+throughput gains to exceed the observed baseline elapsed-time spread. This is
+not formal statistical qualification. The final capacity bracket is a separate
+small experiment, not evidence for raising defaults or other limits.
+
+Correctness requires full forced scope, zero added content blobs, exact restore,
+encrypted reopen, unchanged source, idle writers and owned cleanup. Distinct
+private mount namespaces protect production, the source, accepted fixtures and
+workspace read-only in each child. Existing RSS, disk-space, fixture-size,
+timeout and SIGINT-first cleanup guards remain in force. Failures stop the
+series and preserve evidence; existing roots and seals are never overwritten.
+
+Only an actual single main interval of at least 600 seconds satisfies the
+sustained-duration gate. Repeated short 200k passes, cloning, hashing and restores
+must not be added together to claim it. No workload expansion, production
+replacement, host-cache flush, NFS tuning, unforced optimization or deployment
+is part of this comparison.
+
+### Observed Results
+
+| Variant | Runs | Median main seconds | Median entries/s | Mean logical origin GB | Mean cache hits | Max combined RSS GB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| A: old native | 4 | 280.236 | 718.9 | 39.980 | 0 | 40.700 |
+| B: coalescing, no retention | 4 | 289.837 | 690.1 | 39.762 | 0 | 40.769 |
+| C: 64 MiB retention | 6 | 268.354 | 745.3 | 29.459 | 40,090 | 41.142 |
+| D: 256 MiB retention | 2 | 199.059 | 1,008.3 | 28.973 | 41,930 | 41.631 |
+
+Times above are per-leg main-phase medians, not totals or sustained ten-minute
+measurements. The means for the two balanced six-leg blocks tell a more useful
+story than a cross-series median:
+
+| Block | A mean seconds | B mean seconds | C mean seconds | C versus A throughput |
+| --- | ---: | ---: | ---: | ---: |
+| `A B C C B A` | 289.011 | 303.932 | 306.695 | -5.77% |
+| `B C A A C B` | 280.236 | 268.571 | 266.224 | +5.26% |
+
+The A controls themselves ranged from 246.776 to 331.247 seconds, a 34.23%
+max/min elapsed spread. Even the sign of the measured default-cache improvement
+changes between balanced blocks. This series **does not establish a causal
+200k throughput improvement**, despite a repeatable reduction in logical
+payload reads. Do not promote C to a qualified throughput default.
+
+B joined approximately 834-852 concurrent chunk loads per leg but saved only
+about 0.218 GB of logical origin payload versus A, approximately 0.54%. B added
+approximately 146,700 header validations per leg; their accumulated timings
+were 189-225 worker-seconds. C had about 40,090 retained hits per leg, reduced
+mean logical origin from 39.762 to 29.459 GB versus B (25.9%), and still made
+approximately 146,700 metadata validations per leg. C evicted approximately
+108,000 chunks per leg. These are aggregate counter windows and cannot be
+subtracted from elapsed time or interpreted as physical NFS bytes or exclusive
+latencies. The workload demonstrably exercises retention, but storage/service
+variability and validation cost can absorb the work reduction.
+
+The `C D D C` capacity bracket yielded C/D means of 228.546/199.059 seconds,
+or an apparent 14.81% larger-cache throughput advantage. Yet C's two bracketing
+times were 267.737 and 189.356 seconds as the overall series sped up. D saved
+only an additional 0.486 GB of logical origin work versus C (1.65%) with about
+1,840 more hits. The timing cannot establish that increasing capacity caused
+the 14.81% difference. Keep 64 MiB as the default; 256 MiB is an opt-in
+experiment, not a deployment choice based on this bracket.
+
+Every leg retained an exact 200k forced backup, unchanged-source digest, zero
+new content blobs, full restore, encrypted reopen, verified idle writer and
+accepted owned cleanup. All 16 per-leg manifests independently verified (432
+files), as did the series manifest (51 entries) and all 12 launch pins. Private
+leg runtimes were removed and no owned qualifier/native process survived. The
+largest combined RSS sample was 41,631,424,512 bytes, below the 200 GB limit.
+The unrelated pre-existing profile daemon was not part of this series. The
+fastest main interval was 187.140 seconds and the slowest 331.247 seconds: **no
+single run met the 600-second sustained gate**. The report's support flag is
+false; formal causal, sustained and production qualification remain open.
+
+Further causal throughput inference requires a fresh, separately pinned repeated
+comparison with environmental I/O variability controlled or measured, not a
+selective rerun of favorable legs. Measure metadata validation overhead and
+actual host/NAS read behavior in matching phase windows before selecting cache
+capacity or changing defaults. A new sustained-duration workload requires
+separate scope and resource approval; do not extend the 200k duration by adding
+clones or restores.
+
 ## Evidence and Unknowns
 
 The retained 100,000-entry unchanged pass lasted 2,266.464 seconds and achieved
@@ -462,15 +594,106 @@ reuse; payload metadata changes fail closed. Writes/deletes invalidate retained
 chunks, and read-key retirement purges plaintext for retired keys and prevents
 older flights from retaining it afterward. The additional HEAD/stat validation
 is deliberate freshness work; it must be measured independently of payload I/O.
+Concurrent ordinary reads of the same cached object identity now share a
+bounded, cancellation-safe in-flight HEAD validation. Conditional, versioned
+and extension-bearing requests still validate independently, and sequential
+reads still revalidate; neither local writer ownership nor ciphertext
+authentication proves the object at a mutable path has not changed elsewhere.
+Failed validations are not cached. This follow-up has focused native correctness
+coverage but no new 200k throughput measurement; the sealed comparison above
+predates validation coalescing.
+
+Tagged compacted SST reads now use a narrower freshness policy: an unconditional
+read with the same SlateDB tag (including segment), a stable object identity and
+a header fetched or validated within the last second may reuse that header
+without another HEAD. An expired header must be revalidated; a changed object
+invalidates the retained chunks. Untagged/WAL, conditional and versioned reads
+continue to validate on each cached-header use. A SlateDB validation-retry tag
+invalidates local entries and refetches instead of replaying cached bytes. This
+bounded policy does not provide immediate detection of an external deletion
+during the one-second window; local writes and deletes invalidate immediately.
+It has native correctness coverage but no post-change throughput measurement.
+
+#### Backend Access and SST Freshness
+
+Two independent startup controls are forwarded by the Go daemon launcher:
+
+| Environment Variable | Values | Default |
+| --- | --- | --- |
+| `VAULTICDB_BACKEND_ACCESS_MODE` | `shared`, `dedicated` | `shared` |
+| `VAULTICDB_SST_FRESHNESS` | `strict`, `bounded`, `immutable` | `bounded` |
+
+Freshness applies to encrypted object-store reads. `strict` validates every
+cached header use; simultaneous requests with identical semantics can share
+that validation. `bounded` permits reuse for one second. `immutable` permits
+reuse for the lifetime of a retained header, not a time-to-live. Reuse requires
+an unconditional, unversioned compacted-SST request containing only the known
+SlateDB tag, an exactly matching tag (including segment), and a stable ETag or
+version. Unknown extensions bypass header reuse, validation coalescing and
+payload caching. WAL SSTs, manifests, leases and other mutable objects do not
+gain permanent freshness exemptions. Retry-tagged reads discard local entries
+and fetch from the origin instead of reusing payloads.
+
+The immutable contract comes from the pinned SlateDB implementation, not writer
+ownership: compacted SST IDs are unique, active manifests and reader checkpoints
+retain referenced SSTs, and compaction publishes new SSTs instead of replacing
+existing ones. This makes `immutable` useful in shared mode too. It is not a
+physical-existence check: a fully cached object may still be returned after an
+out-of-band deletion until eviction or invalidation. Do not select it when raw
+tools replace SSTs in place or require immediate deletion visibility. Local
+mutations invalidate before and after completion; a generation guard prevents
+older in-flight header observations from repopulating the cache afterwards.
+Eviction and process restart require a new origin observation. Authentication,
+key availability and payload/object-identity checks are retained in every mode.
+
+`shared` local backends take shared lifetime locks; `dedicated` takes an exclusive
+lifetime lock and fails on conflicts rather than silently reverting to shared.
+The sidecar is outside the deletable object namespace and uses the canonical
+root, so reset does not delete it and symlink aliases cannot bypass it. The lock
+is retained while the object-store wrapper is alive, including after database
+close until references are dropped. Never delete or replace a live lock sidecar.
+Local backend/cache/WAL directories require access to their lock sidecars even
+in shared mode. Failed opens release their acquired guards.
+
+Dedicated mode currently accepts only external, single-local-backend topology
+on supported Linux local filesystems (ext, XFS, btrfs, tmpfs, overlayfs, ZFS),
+with inherited WAL and no separate WAL handoff. NFS and other remote filesystems,
+S3/RADOS/replicated stores, capsule topology and separate WAL targets are rejected;
+they do not yet have an equivalent distributed access fence. Dedicated mode does
+not automatically relax mutable metadata freshness or change the SST policy.
+
+These are advisory locks among updated cooperating VaulticDB processes, not a
+security fence against arbitrary programs, older daemons or raw administrative
+tools. Stop older daemons before migration, restrict backend credentials and
+filesystem access to the participating deployment, and keep maintenance tools
+offline while dedicated mode is active. The existing writer epoch still governs
+writer ownership in shared mode. Startup lifecycle events
+`backend_access_configured` and `sst_freshness_configured` report the acquired
+access mode and encrypted-read policy; invalid values reject startup.
+
+For example, an encrypted local deployment can explicitly select both:
+
+```sh
+export VAULTICDB_BACKEND_ACCESS_MODE=dedicated
+export VAULTICDB_SST_FRESHNESS=immutable
+```
+
+This changes neither production configuration nor benchmark evidence. Cold,
+random SlateDB block misses remain expected. No writer batching, preparation
+queue or concurrency defaults are changed: prepared-work waiting can include
+batch collection and upstream filesystem/content/metadata work, so it is not
+evidence that the writer itself needs more concurrency. A new controlled screen
+is required to establish throughput impact.
 
 Read attribution adds `chunk_cache_hits`, `chunk_cache_misses`,
 `chunk_cache_evictions`, `chunk_coalesced_reads`, `header_validation_calls` and
-`header_validation_ns`. These monotonic counters pass through Go writer status
+`header_validation_ns`, plus `header_validation_coalesced_reads` for joined
+metadata checks. These monotonic counters pass through Go writer status
 and reset-checked backup interval deltas; older daemons may omit them. Native
 snapshots additionally expose current residency and in-flight gauges, which are
 not treated as monotonic interval counters.
 
-Validation covers 35 encryption tests, including persisted encrypted SST reads,
+Validation covers 38 encryption tests, including persisted encrypted SST reads,
 bounded admission, cancellation, shared authentication failures, replacement
 races, key retirement, conditional reads and backing-store isolation. A
 concurrent/nearby-range regression reduced payload fetches from 33 to one. The

@@ -162,7 +162,12 @@ impl TestObjectDelayProfile {
                 {
                     bail!("shared object delay profile contains unsupported or incomplete fields");
                 }
-                (profile.role, profile.method, profile.delay_us, profile.concurrency)
+                (
+                    profile.role,
+                    profile.method,
+                    profile.delay_us,
+                    profile.concurrency,
+                )
             }
         };
         if !matches!(
@@ -229,13 +234,13 @@ impl TestObjectDelayProfile {
 }
 
 #[cfg(feature = "test-failpoints")]
-fn test_object_delay_profile_from_env(repository_id: &str) -> Result<Option<Arc<TestObjectDelayProfile>>> {
+fn test_object_delay_profile_from_env(
+    repository_id: &str,
+) -> Result<Option<Arc<TestObjectDelayProfile>>> {
     let Some(encoded) = std::env::var_os("VAULTICDB_TEST_OBJECT_DELAY_PROFILE") else {
         return Ok(None);
     };
-    if std::env::var("VAULTICDB_TEST_CAPABILITY").as_deref()
-        != Ok("vaulticdb-process-tests-v1")
-    {
+    if std::env::var("VAULTICDB_TEST_CAPABILITY").as_deref() != Ok("vaulticdb-process-tests-v1") {
         bail!("test object delay profiles require the process-test capability");
     }
     let encoded = encoded
@@ -248,7 +253,9 @@ fn test_object_delay_profile_from_env(repository_id: &str) -> Result<Option<Arc<
 }
 
 #[cfg(not(feature = "test-failpoints"))]
-fn test_object_delay_profile_from_env(_repository_id: &str) -> Result<Option<Arc<TestObjectDelayProfile>>> {
+fn test_object_delay_profile_from_env(
+    _repository_id: &str,
+) -> Result<Option<Arc<TestObjectDelayProfile>>> {
     Ok(None)
 }
 
@@ -689,7 +696,9 @@ impl RoleAwareObjectStore {
         profile.delay_duration(role, operation)?;
         let profile = Arc::clone(profile);
         let operation = operation.to_owned();
-        Some(Box::pin(async move { profile.delay(role, &operation).await }))
+        Some(Box::pin(
+            async move { profile.delay(role, &operation).await },
+        ))
     }
 }
 
@@ -1336,14 +1345,21 @@ impl std::fmt::Display for RenewableObjectStore {
 struct ConditionalLocalFileSystem {
     inner: LocalFileSystem,
     lock_path: PathBuf,
+    _access: access::BackendAccessGuard,
 }
 
 impl ConditionalLocalFileSystem {
     fn new(root: &std::path::Path) -> Result<Self> {
+        Self::with_access(root, BackendAccessMode::Shared)
+    }
+
+    fn with_access(root: &std::path::Path, mode: BackendAccessMode) -> Result<Self> {
+        let access = access::BackendAccessGuard::acquire(root, mode)?;
         Ok(Self {
             inner: LocalFileSystem::new_with_prefix(root)
                 .with_context(|| format!("open SlateDB data directory {}", root.display()))?,
             lock_path: root.with_extension("coordination.lock"),
+            _access: access,
         })
     }
 
@@ -1581,13 +1597,24 @@ pub(crate) fn object_store(
     repository_id: &str,
     config: &ObjectStoreConfig,
 ) -> Result<(String, Arc<dyn ObjectStore>)> {
+    object_store_with_access(repository_id, config, BackendAccessMode::Shared)
+}
+
+pub(crate) fn object_store_with_access(
+    repository_id: &str,
+    config: &ObjectStoreConfig,
+    mode: BackendAccessMode,
+) -> Result<(String, Arc<dyn ObjectStore>)> {
+    if mode == BackendAccessMode::Dedicated && !matches!(config, ObjectStoreConfig::Local { .. }) {
+        bail!("dedicated access requires a single local object store");
+    }
     let repository_key = crate::repository_key(repository_id);
     match config {
         ObjectStoreConfig::Local { root } => {
             let root = root.join(&repository_key);
             std::fs::create_dir_all(&root)
                 .with_context(|| format!("create SlateDB data directory {}", root.display()))?;
-            let store = ConditionalLocalFileSystem::new(&root)?;
+            let store = ConditionalLocalFileSystem::with_access(&root, mode)?;
             Ok(("db".to_owned(), Arc::new(store)))
         }
         ObjectStoreConfig::Memory => Ok((repository_key, Arc::new(InMemory::new()))),

@@ -24,6 +24,7 @@ use slatedb::object_store::{
     ListResult, MultipartUpload, ObjectMeta, ObjectStore, ObjectStoreExt, PutMode,
     PutMultipartOptions, PutOptions, PutPayload, PutResult, Result, UploadPart,
 };
+use slatedb::object_store_tag::{ObjectStoreCallTag, SstType};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::ids::RepositoryId;
@@ -39,6 +40,7 @@ const DEFAULT_MAX_CRYPTO_THREADS: usize = 8;
 const MAX_CRYPTO_THREADS: usize = 64;
 const PARALLEL_CRYPTO_CHUNKS: usize = 4;
 const HEADER_CACHE_ENTRIES: usize = 16 * 1024;
+const IMMUTABLE_SST_FRESHNESS: std::time::Duration = std::time::Duration::from_secs(1);
 const DEFAULT_CHUNK_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CHUNK_CACHE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_CHUNK_CACHE_ENTRIES: usize = 16384;
@@ -47,6 +49,36 @@ const MAX_CHUNK_FLIGHT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CACHED_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CACHED_RANGE_CHUNKS: usize = 16;
 static NEXT_CHUNK_NAMESPACE: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SstFreshness {
+    Strict,
+    #[default]
+    Bounded,
+    Immutable,
+}
+
+impl SstFreshness {
+    fn parse(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "strict" => Ok(Self::Strict),
+            "bounded" => Ok(Self::Bounded),
+            "immutable" => Ok(Self::Immutable),
+            _ => anyhow::bail!("VAULTICDB_SST_FRESHNESS must be strict, bounded or immutable"),
+        }
+    }
+
+    fn configured() -> anyhow::Result<Self> {
+        match env::var_os("VAULTICDB_SST_FRESHNESS") {
+            None => Ok(Self::default()),
+            Some(value) => {
+                Self::parse(value.to_str().ok_or_else(|| {
+                    anyhow::anyhow!("VAULTICDB_SST_FRESHNESS must be valid UTF-8")
+                })?)
+            }
+        }
+    }
+}
 
 pub mod envelope;
 pub mod recovery_capsule;
@@ -82,9 +114,11 @@ pub(crate) struct EncryptedObjectStore {
     keyring: Arc<RwLock<Keyring>>,
     crypto: Arc<CryptoExecutor>,
     headers: Arc<Mutex<HeaderCache>>,
+    header_flights: Arc<Mutex<HashMap<Path, Arc<HeaderValidationFlight>>>>,
     chunks: Arc<ChunkCache>,
     chunk_namespace: u64,
     chunk_size: usize,
+    sst_freshness: SstFreshness,
 }
 
 #[derive(Default)]
@@ -107,6 +141,7 @@ struct EncryptionReadMetrics {
     range_reads: AtomicU64,
     header_validation_calls: AtomicU64,
     header_validation_ns: AtomicU64,
+    header_validation_coalesced_reads: AtomicU64,
     chunk_cache_hits: AtomicU64,
     chunk_cache_misses: AtomicU64,
     chunk_cache_evictions: AtomicU64,
@@ -163,6 +198,7 @@ impl EncryptionReadMetrics {
             "range_reads": self.range_reads.load(Ordering::Relaxed),
             "header_validation_calls": self.header_validation_calls.load(Ordering::Relaxed),
             "header_validation_ns": self.header_validation_ns.load(Ordering::Relaxed),
+            "header_validation_coalesced_reads": self.header_validation_coalesced_reads.load(Ordering::Relaxed),
             "chunk_cache_hits": self.chunk_cache_hits.load(Ordering::Relaxed),
             "chunk_cache_misses": self.chunk_cache_misses.load(Ordering::Relaxed),
             "chunk_cache_evictions": self.chunk_cache_evictions.load(Ordering::Relaxed),
@@ -187,6 +223,42 @@ struct ChunkKey {
 
 struct AuthenticatedChunk {
     plaintext: Zeroizing<Vec<u8>>,
+}
+
+struct ValidatedHeader {
+    meta: ObjectMeta,
+    attributes: slatedb::object_store::Attributes,
+    extensions: slatedb::object_store::Extensions,
+}
+
+type SharedHeaderResult =
+    std::result::Result<Arc<ValidatedHeader>, Arc<slatedb::object_store::Error>>;
+
+struct HeaderValidationFlight {
+    tag: Option<ObjectStoreCallTag>,
+    cached: CachedHeader,
+    result: tokio::sync::watch::Receiver<Option<SharedHeaderResult>>,
+}
+
+struct HeaderValidationGuard {
+    flights: Arc<Mutex<HashMap<Path, Arc<HeaderValidationFlight>>>>,
+    location: Path,
+    flight: Arc<HeaderValidationFlight>,
+}
+
+impl Drop for HeaderValidationGuard {
+    fn drop(&mut self) {
+        let mut flights = self
+            .flights
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if flights
+            .get(&self.location)
+            .is_some_and(|flight| Arc::ptr_eq(flight, &self.flight))
+        {
+            flights.remove(&self.location);
+        }
+    }
 }
 
 type SharedChunkResult =
@@ -459,12 +531,17 @@ fn parse_chunk_limit(name: &str, value: &str, maximum: usize) -> anyhow::Result<
 struct HeaderCache {
     entries: HashMap<Path, CachedHeader>,
     order: VecDeque<Path>,
+    generation: u64,
 }
 
 #[derive(Clone)]
 struct CachedHeader {
     header: Header,
     meta: ObjectMeta,
+    attributes: slatedb::object_store::Attributes,
+    extensions: slatedb::object_store::Extensions,
+    tag: Option<ObjectStoreCallTag>,
+    validated_at: Instant,
 }
 
 impl HeaderCache {
@@ -472,10 +549,28 @@ impl HeaderCache {
         self.entries.get(location).cloned()
     }
 
-    fn insert(&mut self, location: Path, header: Header, meta: ObjectMeta) {
+    fn insert(
+        &mut self,
+        location: Path,
+        header: Header,
+        meta: ObjectMeta,
+        attributes: slatedb::object_store::Attributes,
+        extensions: slatedb::object_store::Extensions,
+        tag: Option<ObjectStoreCallTag>,
+    ) {
         if self
             .entries
-            .insert(location.clone(), CachedHeader { header, meta })
+            .insert(
+                location.clone(),
+                CachedHeader {
+                    header,
+                    meta,
+                    attributes,
+                    extensions,
+                    tag,
+                    validated_at: Instant::now(),
+                },
+            )
             .is_some()
         {
             return;
@@ -489,6 +584,7 @@ impl HeaderCache {
     }
 
     fn remove(&mut self, location: &Path) {
+        self.generation = self.generation.wrapping_add(1);
         self.entries.remove(location);
         self.order.retain(|entry| entry != location);
     }
@@ -653,6 +749,7 @@ impl Debug for EncryptedObjectStore {
             .field("chunk_size", &self.chunk_size)
             .field("chunk_cache_capacity_bytes", &self.chunks.capacity)
             .field("chunk_cache_limits", &self.chunks.limits)
+            .field("sst_freshness", &self.sst_freshness)
             .finish_non_exhaustive()
     }
 }
@@ -686,6 +783,14 @@ impl EncryptedObjectStore {
             .into_iter()
             .map(CipherKey::new)
             .collect::<anyhow::Result<Vec<_>>>()?;
+        let sst_freshness = SstFreshness::configured()?;
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "category": "lifecycle", "component": "vaulticdb", "event": "sst_freshness_configured",
+                "fields": {"mode": match sst_freshness { SstFreshness::Strict => "strict", SstFreshness::Bounded => "bounded", SstFreshness::Immutable => "immutable" }}
+            })
+        );
         let crypto = Arc::new(CryptoExecutor::new(configured_crypto_threads()?)?);
         let read_metrics = Arc::new(EncryptionReadMetrics::default());
         let chunks = Arc::new(ChunkCache::with_limits(
@@ -703,9 +808,11 @@ impl EncryptedObjectStore {
             })),
             crypto,
             headers: Arc::new(Mutex::new(HeaderCache::default())),
+            header_flights: Arc::new(Mutex::new(HashMap::new())),
             chunks,
             chunk_namespace: NEXT_CHUNK_NAMESPACE.fetch_add(1, Ordering::Relaxed),
             chunk_size: DEFAULT_CHUNK_SIZE,
+            sst_freshness,
         })
     }
 
@@ -717,9 +824,11 @@ impl EncryptedObjectStore {
             keyring: self.keyring.clone(),
             crypto: self.crypto.clone(),
             headers: Arc::new(Mutex::new(HeaderCache::default())),
+            header_flights: Arc::new(Mutex::new(HashMap::new())),
             chunks: self.chunks.clone(),
             chunk_namespace: NEXT_CHUNK_NAMESPACE.fetch_add(1, Ordering::Relaxed),
             chunk_size: self.chunk_size,
+            sst_freshness: self.sst_freshness,
         }
     }
 
@@ -765,11 +874,30 @@ impl EncryptedObjectStore {
         cached
     }
 
-    fn cache_header(&self, location: &Path, header: Header, meta: &ObjectMeta) {
+    fn cache_header(
+        &self,
+        location: &Path,
+        header: Header,
+        meta: &ObjectMeta,
+        attributes: &slatedb::object_store::Attributes,
+        extensions: &slatedb::object_store::Extensions,
+        tag: Option<ObjectStoreCallTag>,
+        generation: u64,
+    ) {
         if let Ok(mut headers) = self.headers.lock() {
+            if headers.generation != generation {
+                return;
+            }
             let evicts = headers.entries.len() == HEADER_CACHE_ENTRIES
                 && !headers.entries.contains_key(location);
-            headers.insert(location.clone(), header, meta.clone());
+            headers.insert(
+                location.clone(),
+                header,
+                meta.clone(),
+                attributes.clone(),
+                extensions.clone(),
+                tag,
+            );
             if evicts {
                 self.read_metrics
                     .header_cache_evictions
@@ -1050,22 +1178,153 @@ impl EncryptedObjectStore {
         let Some(cached) = self.cached_header(location) else {
             return Ok(None);
         };
+        let tag = ObjectStoreCallTag::from_extensions(&options.extensions);
+        let immutable_sst = Self::immutable_sst_tag(options).is_some();
+        if immutable_sst
+            && cached.tag == tag
+            && (cached.meta.e_tag.is_some() || cached.meta.version.is_some())
+            && match self.sst_freshness {
+                SstFreshness::Strict => false,
+                SstFreshness::Bounded => cached.validated_at.elapsed() < IMMUTABLE_SST_FRESHNESS,
+                SstFreshness::Immutable => true,
+            }
+        {
+            return Ok(Some((cached.clone(), cached.attributes, cached.extensions)));
+        }
         let mut validation = options.clone();
         validation.head = true;
         validation.range = None;
+        let shareable = validation.if_match.is_none()
+            && validation.if_none_match.is_none()
+            && validation.if_modified_since.is_none()
+            && validation.if_unmodified_since.is_none()
+            && validation.version.is_none()
+            && validation.extensions.len() == usize::from(tag.is_some())
+            && tag.as_ref().is_none_or(|tag| tag.retry.is_none());
+        let observed = if shareable {
+            let flight = {
+                let mut flights = self
+                    .header_flights
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if let Some(flight) = flights.get(location) {
+                    if flight.cached.header == cached.header
+                        && flight.cached.meta == cached.meta
+                        && flight.tag == tag
+                    {
+                        self.read_metrics
+                            .header_validation_coalesced_reads
+                            .fetch_add(1, Ordering::Relaxed);
+                        Some(flight.clone())
+                    } else {
+                        None
+                    }
+                } else if flights.len() < self.chunks.limits.flights {
+                    let (sender, receiver) = tokio::sync::watch::channel(None);
+                    let flight = Arc::new(HeaderValidationFlight {
+                        tag: tag.clone(),
+                        cached: cached.clone(),
+                        result: receiver,
+                    });
+                    flights.insert(location.clone(), flight.clone());
+                    let guard = HeaderValidationGuard {
+                        flights: self.header_flights.clone(),
+                        location: location.clone(),
+                        flight: flight.clone(),
+                    };
+                    let store = self.clone();
+                    let location = location.clone();
+                    let request = validation.clone();
+                    tokio::spawn(async move {
+                        let result = store
+                            .validation_head(&location, request)
+                            .await
+                            .map_err(Arc::new);
+                        drop(guard);
+                        sender.send_replace(Some(result));
+                    });
+                    Some(flight)
+                } else {
+                    None
+                }
+            };
+            if let Some(flight) = flight {
+                let mut result = flight.result.clone();
+                loop {
+                    let completed = result.borrow_and_update().clone();
+                    if let Some(completed) = completed {
+                        break completed.map_err(shared_chunk_error)?;
+                    }
+                    result
+                        .changed()
+                        .await
+                        .map_err(|_| slatedb::object_store::Error::Generic {
+                            store: "vaulticdb encrypted header validation",
+                            source: Box::new(std::io::Error::other(
+                                "header validation worker terminated",
+                            )),
+                        })?;
+                }
+            } else {
+                self.validation_head(location, validation).await?
+            }
+        } else {
+            self.validation_head(location, validation).await?
+        };
+        if observed.meta == cached.meta
+            && (observed.meta.e_tag.is_some() || observed.meta.version.is_some())
+        {
+            if immutable_sst {
+                if let Ok(mut headers) = self.headers.lock() {
+                    if let Some(current) = headers.entries.get_mut(location) {
+                        if current.header == cached.header && current.meta == cached.meta {
+                            current.validated_at = Instant::now();
+                            current.attributes = observed.attributes.clone();
+                            current.extensions = observed.extensions.clone();
+                            current.tag = tag;
+                        }
+                    }
+                }
+            }
+            Ok(Some((
+                cached,
+                observed.attributes.clone(),
+                observed.extensions.clone(),
+            )))
+        } else {
+            self.invalidate_header(location);
+            Ok(None)
+        }
+    }
+
+    async fn validation_head(
+        &self,
+        location: &Path,
+        validation: GetOptions,
+    ) -> Result<Arc<ValidatedHeader>> {
         self.read_metrics
             .header_validation_calls
             .fetch_add(1, Ordering::Relaxed);
         let _validation = ReadTiming::new(&self.read_metrics.header_validation_ns);
         let observed = self.inner.get_opts(location, validation).await?;
-        if observed.meta == cached.meta
-            && (observed.meta.e_tag.is_some() || observed.meta.version.is_some())
-        {
-            Ok(Some((cached, observed.attributes, observed.extensions)))
-        } else {
-            self.invalidate_header(location);
-            Ok(None)
-        }
+        Ok(Arc::new(ValidatedHeader {
+            meta: observed.meta,
+            attributes: observed.attributes,
+            extensions: observed.extensions,
+        }))
+    }
+
+    fn immutable_sst_tag(options: &GetOptions) -> Option<ObjectStoreCallTag> {
+        ObjectStoreCallTag::from_extensions(&options.extensions).filter(|tag| {
+            tag.sst_type == SstType::Compacted
+                && tag.retry.is_none()
+                && options.extensions.len() == 1
+                && options.if_match.is_none()
+                && options.if_none_match.is_none()
+                && options.if_modified_since.is_none()
+                && options.if_unmodified_since.is_none()
+                && options.version.is_none()
+        })
     }
 
     async fn fetch_chunk(
@@ -1277,9 +1536,12 @@ impl ObjectStore for EncryptedObjectStore {
         self.invalidate_header(location);
         let plaintext = collect_payload(payload);
         let encrypted = self.encrypt(location, plaintext).await?;
-        self.inner
+        let result = self
+            .inner
             .put_opts(location, encrypted.into(), options)
-            .await
+            .await;
+        self.invalidate_header(location);
+        result
     }
 
     async fn put_multipart_opts(
@@ -1303,8 +1565,19 @@ impl ObjectStore for EncryptedObjectStore {
 
     async fn get_opts(&self, location: &Path, mut options: GetOptions) -> Result<GetResult> {
         self.read_metrics.reads.fetch_add(1, Ordering::Relaxed);
+        let tag = ObjectStoreCallTag::from_extensions(&options.extensions);
+        let retry = tag.as_ref().is_some_and(|tag| tag.retry.is_some());
+        if retry {
+            self.invalidate_header(location);
+        }
+        let generation = self
+            .headers
+            .lock()
+            .map_err(|_| encryption_error(EncryptionError::Header))?
+            .generation;
         let requested_range = options.range.take();
-        let cache_range = requested_range.is_some();
+        let cache_range =
+            requested_range.is_some() && options.extensions.len() == usize::from(tag.is_some());
         let head = options.head;
         if head {
             self.read_metrics.head_reads.fetch_add(1, Ordering::Relaxed);
@@ -1319,7 +1592,15 @@ impl ObjectStore for EncryptedObjectStore {
         let mut cached_meta = None;
         let mut header = if head {
             let response = self.header(location, options.clone()).await?;
-            self.cache_header(location, response.0, &response.1);
+            self.cache_header(
+                location,
+                response.0,
+                &response.1,
+                &response.2,
+                &response.3,
+                Self::immutable_sst_tag(&options),
+                generation,
+            );
             header_response = Some((response.1, response.2, response.3));
             response.0
         } else if let Some((cached, attributes, extensions)) =
@@ -1330,7 +1611,15 @@ impl ObjectStore for EncryptedObjectStore {
             cached.header
         } else {
             let response = self.header(location, options.clone()).await?;
-            self.cache_header(location, response.0, &response.1);
+            self.cache_header(
+                location,
+                response.0,
+                &response.1,
+                &response.2,
+                &response.3,
+                Self::immutable_sst_tag(&options),
+                generation,
+            );
             header_response = Some((response.1, response.2, response.3));
             response.0
         };
@@ -1339,7 +1628,15 @@ impl ObjectStore for EncryptedObjectStore {
             let response = self.header(location, options.clone()).await?;
             header = response.0;
             range = resolve_range(requested_range, header.plaintext_len)?;
-            self.cache_header(location, header, &response.1);
+            self.cache_header(
+                location,
+                header,
+                &response.1,
+                &response.2,
+                &response.3,
+                Self::immutable_sst_tag(&options),
+                generation,
+            );
             header_response = Some((response.1, response.2, response.3));
             cached_meta = None;
         }
@@ -1359,6 +1656,7 @@ impl ObjectStore for EncryptedObjectStore {
             let first_chunk = range.start / header.chunk_size;
             let last_chunk = (range.end - 1) / header.chunk_size;
             if cache_range
+                && !retry
                 && last_chunk - first_chunk < self.chunks.limits.range_chunks
                 && header.chunk_size <= self.chunks.limits.chunk_bytes
             {
@@ -1462,7 +1760,16 @@ impl ObjectStore for EncryptedObjectStore {
                 location
             })
             .boxed();
-        self.inner.delete_stream(locations)
+        let store = self.clone();
+        self.inner
+            .delete_stream(locations)
+            .map(move |result| {
+                if let Ok(location) = &result {
+                    store.invalidate_header(location);
+                }
+                result
+            })
+            .boxed()
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, Result<ObjectMeta>> {

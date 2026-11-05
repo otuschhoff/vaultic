@@ -126,6 +126,7 @@ func TestBackupEncryptionReadDelta(test *testing.T) {
 	}{
 		{&baseline.HeaderValidationCalls, &current.HeaderValidationCalls, func(value *daemon.EncryptionReadMetrics) uint64 { return value.HeaderValidationCalls }},
 		{&baseline.HeaderValidationNanoseconds, &current.HeaderValidationNanoseconds, func(value *daemon.EncryptionReadMetrics) uint64 { return value.HeaderValidationNanoseconds }},
+		{&baseline.HeaderValidationCoalescedReads, &current.HeaderValidationCoalescedReads, func(value *daemon.EncryptionReadMetrics) uint64 { return value.HeaderValidationCoalescedReads }},
 		{&baseline.ChunkCacheHits, &current.ChunkCacheHits, func(value *daemon.EncryptionReadMetrics) uint64 { return value.ChunkCacheHits }},
 		{&baseline.ChunkCacheMisses, &current.ChunkCacheMisses, func(value *daemon.EncryptionReadMetrics) uint64 { return value.ChunkCacheMisses }},
 		{&baseline.ChunkCacheEvictions, &current.ChunkCacheEvictions, func(value *daemon.EncryptionReadMetrics) uint64 { return value.ChunkCacheEvictions }},

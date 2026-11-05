@@ -420,28 +420,29 @@ type ReadCacheStatus struct {
 }
 
 type EncryptionReadMetrics struct {
-	Reads                       uint64 `json:"reads"`
-	RequestedPlaintextBytes     uint64 `json:"requested_plaintext_bytes"`
-	RoundedCiphertextBytes      uint64 `json:"rounded_ciphertext_bytes"`
-	CiphertextOriginCalls       uint64 `json:"ciphertext_origin_calls"`
-	CiphertextOriginBytes       uint64 `json:"ciphertext_origin_bytes"`
-	CiphertextOriginNanoseconds uint64 `json:"ciphertext_origin_ns"`
-	HeaderDecodeNanoseconds     uint64 `json:"header_decode_ns"`
-	HeaderCacheHits             uint64 `json:"header_cache_hits"`
-	HeaderCacheMisses           uint64 `json:"header_cache_misses"`
-	HeaderCacheEvictions        uint64 `json:"header_cache_evictions"`
-	CryptoJobs                  uint64 `json:"crypto_jobs"`
-	CryptoQueueNanoseconds      uint64 `json:"crypto_queue_ns"`
-	CryptoServiceNanoseconds    uint64 `json:"crypto_service_ns"`
-	HeadReads                   uint64 `json:"head_reads"`
-	FullReads                   uint64 `json:"full_reads"`
-	RangeReads                  uint64 `json:"range_reads"`
-	HeaderValidationCalls       uint64 `json:"header_validation_calls"`
-	HeaderValidationNanoseconds uint64 `json:"header_validation_ns"`
-	ChunkCacheHits              uint64 `json:"chunk_cache_hits"`
-	ChunkCacheMisses            uint64 `json:"chunk_cache_misses"`
-	ChunkCacheEvictions         uint64 `json:"chunk_cache_evictions"`
-	ChunkCoalescedReads         uint64 `json:"chunk_coalesced_reads"`
+	Reads                          uint64 `json:"reads"`
+	RequestedPlaintextBytes        uint64 `json:"requested_plaintext_bytes"`
+	RoundedCiphertextBytes         uint64 `json:"rounded_ciphertext_bytes"`
+	CiphertextOriginCalls          uint64 `json:"ciphertext_origin_calls"`
+	CiphertextOriginBytes          uint64 `json:"ciphertext_origin_bytes"`
+	CiphertextOriginNanoseconds    uint64 `json:"ciphertext_origin_ns"`
+	HeaderDecodeNanoseconds        uint64 `json:"header_decode_ns"`
+	HeaderCacheHits                uint64 `json:"header_cache_hits"`
+	HeaderCacheMisses              uint64 `json:"header_cache_misses"`
+	HeaderCacheEvictions           uint64 `json:"header_cache_evictions"`
+	CryptoJobs                     uint64 `json:"crypto_jobs"`
+	CryptoQueueNanoseconds         uint64 `json:"crypto_queue_ns"`
+	CryptoServiceNanoseconds       uint64 `json:"crypto_service_ns"`
+	HeadReads                      uint64 `json:"head_reads"`
+	FullReads                      uint64 `json:"full_reads"`
+	RangeReads                     uint64 `json:"range_reads"`
+	HeaderValidationCalls          uint64 `json:"header_validation_calls"`
+	HeaderValidationNanoseconds    uint64 `json:"header_validation_ns"`
+	HeaderValidationCoalescedReads uint64 `json:"header_validation_coalesced_reads"`
+	ChunkCacheHits                 uint64 `json:"chunk_cache_hits"`
+	ChunkCacheMisses               uint64 `json:"chunk_cache_misses"`
+	ChunkCacheEvictions            uint64 `json:"chunk_cache_evictions"`
+	ChunkCoalescedReads            uint64 `json:"chunk_coalesced_reads"`
 }
 
 func encryptionReadMetrics(encoded []byte) *EncryptionReadMetrics {
@@ -464,7 +465,7 @@ func encryptionReadMetrics(encoded []byte) *EncryptionReadMetrics {
 			return nil
 		}
 	}
-	for _, name := range []string{"header_validation_calls", "header_validation_ns", "chunk_cache_hits",
+	for _, name := range []string{"header_validation_calls", "header_validation_ns", "header_validation_coalesced_reads", "chunk_cache_hits",
 		"chunk_cache_misses", "chunk_cache_evictions", "chunk_coalesced_reads"} {
 		if value, found := fields[name]; found && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 			return nil

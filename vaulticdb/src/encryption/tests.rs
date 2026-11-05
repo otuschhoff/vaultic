@@ -14,6 +14,7 @@ mod tests {
     };
     use slatedb::{
         config::{FlushOptions, FlushType},
+        object_store_tag::{ObjectStoreCallTag, RetryReason, SstType, TableStoreKind},
         Db, WriteBatch,
     };
 
@@ -23,6 +24,7 @@ mod tests {
         reads: Mutex<Vec<(String, u64, u64)>>,
         delay: Option<std::time::Duration>,
         payload_gate: Option<Arc<tokio::sync::Semaphore>>,
+        head_gate: Option<Arc<tokio::sync::Semaphore>>,
         panic_payload: std::sync::atomic::AtomicBool,
         omit_identity: bool,
     }
@@ -53,6 +55,11 @@ mod tests {
         }
 
         async fn get_opts(&self, location: &Path, options: GetOptions) -> Result<GetResult> {
+            if options.head {
+                if let Some(gate) = &self.head_gate {
+                    gate.acquire().await.unwrap().forget();
+                }
+            }
             if !options.head
                 && matches!(&options.range, Some(GetRange::Bounded(range)) if range.start >= HEADER_SIZE as u64)
             {
@@ -206,6 +213,13 @@ mod tests {
             reader.await.unwrap();
         }
         assert_eq!(
+            encrypted
+                .read_metrics
+                .header_validation_calls
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
             encrypted.get_range(&location, 10..14).await.unwrap(),
             plaintext.slice(10..14)
         );
@@ -216,6 +230,134 @@ mod tests {
                 .filter(|(_, start, _)| *start >= HEADER_SIZE as u64)
                 .count(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_validation_leader_preserves_followers() {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let inner = Arc::new(CountingStore {
+            head_gate: Some(gate.clone()),
+            ..Default::default()
+        });
+        let encrypted = store(inner, "validation-cancellation");
+        let location = Path::from("compacted/validation.sst");
+        encrypted
+            .put(&location, Bytes::from_static(b"0123456789abcdef").into())
+            .await
+            .unwrap();
+        encrypted.head(&location).await.unwrap();
+        let leader = {
+            let encrypted = encrypted.clone();
+            let location = location.clone();
+            tokio::spawn(async move { encrypted.get_range(&location, 0..4).await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while encrypted
+                .read_metrics
+                .header_validation_calls
+                .load(Ordering::Relaxed)
+                == 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        leader.abort();
+        leader.await.unwrap_err();
+        let follower = {
+            let encrypted = encrypted.clone();
+            let location = location.clone();
+            tokio::spawn(async move { encrypted.get_range(&location, 4..8).await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if encrypted
+                    .read_metrics
+                    .header_validation_coalesced_reads
+                    .load(Ordering::Relaxed)
+                    > 0
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        gate.add_permits(1);
+        assert_eq!(
+            follower.await.unwrap().unwrap(),
+            Bytes::from_static(b"4567")
+        );
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .header_validation_calls
+                .load(Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_shared_validation_is_retried() {
+        let inner = Arc::new(CountingStore {
+            delay: Some(std::time::Duration::from_millis(20)),
+            ..Default::default()
+        });
+        let encrypted = store(inner.clone(), "validation-retry");
+        let location = Path::from("compacted/deleted.sst");
+        encrypted
+            .put(&location, Bytes::from_static(b"0123456789abcdef").into())
+            .await
+            .unwrap();
+        encrypted.head(&location).await.unwrap();
+        let original = inner
+            .inner
+            .get(&location)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        inner.inner.delete(&location).await.unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(8));
+        let readers = (0..8)
+            .map(|_| {
+                let encrypted = encrypted.clone();
+                let location = location.clone();
+                let barrier = barrier.clone();
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    assert!(matches!(
+                        encrypted.get_range(&location, 0..4).await.unwrap_err(),
+                        slatedb::object_store::Error::NotFound { .. }
+                    ));
+                })
+            })
+            .collect::<Vec<_>>();
+        for reader in readers {
+            reader.await.unwrap();
+        }
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .header_validation_calls
+                .load(Ordering::Relaxed),
+            1
+        );
+        inner.inner.put(&location, original.into()).await.unwrap();
+        assert_eq!(
+            encrypted.get_range(&location, 0..4).await.unwrap(),
+            Bytes::from_static(b"0123")
+        );
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .header_validation_calls
+                .load(Ordering::Relaxed),
+            2
         );
     }
 
@@ -415,6 +557,381 @@ mod tests {
         inner.delete(&location).await.unwrap();
         assert!(matches!(
             encrypted.get_range(&location, 0..4).await.unwrap_err(),
+            slatedb::object_store::Error::NotFound { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn compacted_sst_reuses_fresh_header_but_revalidates_after_expiry() {
+        let inner = Arc::new(CountingStore::default());
+        let mut encrypted = store(inner.clone(), "immutable-sst");
+        encrypted.sst_freshness = SstFreshness::Bounded;
+        let location = Path::from("compacted/immutable.sst");
+        encrypted
+            .put(&location, Bytes::from_static(b"0123456789abcdef").into())
+            .await
+            .unwrap();
+        let options = || GetOptions {
+            range: Some(GetRange::Bounded(0..4)),
+            extensions: ObjectStoreCallTag::new(TableStoreKind::Main, SstType::Compacted).into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            encrypted
+                .get_opts(&location, options())
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            Bytes::from_static(b"0123")
+        );
+        assert_eq!(
+            encrypted
+                .get_opts(&location, options())
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            Bytes::from_static(b"0123")
+        );
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .header_validation_calls
+                .load(Ordering::Relaxed),
+            0
+        );
+        let mut other_tag = options();
+        other_tag.extensions = ObjectStoreCallTag::new_with_segment(
+            TableStoreKind::Main,
+            SstType::Compacted,
+            Some(Bytes::from_static(b"other")),
+        )
+        .into();
+        encrypted.get_opts(&location, other_tag).await.unwrap();
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .header_validation_calls
+                .load(Ordering::Relaxed),
+            1
+        );
+        let mut conditional = options();
+        conditional.if_match = inner.inner.head(&location).await.unwrap().e_tag;
+        encrypted.get_opts(&location, conditional).await.unwrap();
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .header_validation_calls
+                .load(Ordering::Relaxed),
+            2
+        );
+        let mut retry = options();
+        let mut tag = ObjectStoreCallTag::new(TableStoreKind::Main, SstType::Compacted);
+        tag.retry = Some(RetryReason::CrcMismatch);
+        retry.extensions = tag.into();
+        encrypted.get_opts(&location, retry).await.unwrap();
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .header_cache_misses
+                .load(Ordering::Relaxed),
+            2
+        );
+        encrypted
+            .headers
+            .lock()
+            .unwrap()
+            .entries
+            .get_mut(&location)
+            .unwrap()
+            .validated_at -= IMMUTABLE_SST_FRESHNESS;
+        assert_eq!(
+            encrypted
+                .get_opts(&location, options())
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            Bytes::from_static(b"0123")
+        );
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .header_validation_calls
+                .load(Ordering::Relaxed),
+            3
+        );
+        encrypted
+            .headers
+            .lock()
+            .unwrap()
+            .entries
+            .get_mut(&location)
+            .unwrap()
+            .validated_at -= IMMUTABLE_SST_FRESHNESS;
+        inner.inner.delete(&location).await.unwrap();
+        assert!(matches!(
+            encrypted.get_opts(&location, options()).await.unwrap_err(),
+            slatedb::object_store::Error::NotFound { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn compacted_sst_freshness_policy_is_explicit_and_bounded_by_identity() {
+        assert!(SstFreshness::parse("dedicated").is_err());
+        assert_eq!(SstFreshness::parse("strict").unwrap(), SstFreshness::Strict);
+        assert_eq!(
+            SstFreshness::parse("bounded").unwrap(),
+            SstFreshness::Bounded
+        );
+        assert_eq!(
+            SstFreshness::parse("immutable").unwrap(),
+            SstFreshness::Immutable
+        );
+        for policy in [SstFreshness::Strict, SstFreshness::Immutable] {
+            let inner = Arc::new(CountingStore::default());
+            let mut encrypted = store(inner.clone(), "sst-policy");
+            encrypted.sst_freshness = policy;
+            let location = Path::from("compacted/policy.sst");
+            encrypted
+                .put(&location, Bytes::from_static(b"0123456789abcdef").into())
+                .await
+                .unwrap();
+            let options = || GetOptions {
+                range: Some(GetRange::Bounded(0..4)),
+                extensions: ObjectStoreCallTag::new(TableStoreKind::Main, SstType::Compacted)
+                    .into(),
+                ..Default::default()
+            };
+            encrypted.get_opts(&location, options()).await.unwrap();
+            encrypted
+                .headers
+                .lock()
+                .unwrap()
+                .entries
+                .get_mut(&location)
+                .unwrap()
+                .validated_at -= IMMUTABLE_SST_FRESHNESS;
+            assert_eq!(
+                encrypted
+                    .get_opts(&location, options())
+                    .await
+                    .unwrap()
+                    .bytes()
+                    .await
+                    .unwrap(),
+                Bytes::from_static(b"0123")
+            );
+            assert_eq!(
+                encrypted
+                    .read_metrics
+                    .header_validation_calls
+                    .load(Ordering::Relaxed),
+                u64::from(policy == SstFreshness::Strict)
+            );
+            encrypted.delete(&location).await.unwrap();
+            assert!(matches!(
+                encrypted.get_opts(&location, options()).await.unwrap_err(),
+                slatedb::object_store::Error::NotFound { .. }
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn compacted_sst_validation_coalesces_only_identical_tags() {
+        for different_segment in [false, true] {
+            let gate = Arc::new(tokio::sync::Semaphore::new(0));
+            let inner = Arc::new(CountingStore {
+                head_gate: Some(gate.clone()),
+                ..Default::default()
+            });
+            let mut encrypted = store(inner, "tagged-validation");
+            encrypted.sst_freshness = SstFreshness::Strict;
+            let location = Path::from("compacted/tagged-validation.sst");
+            encrypted
+                .put(&location, Bytes::from_static(b"0123456789abcdef").into())
+                .await
+                .unwrap();
+            encrypted.head(&location).await.unwrap();
+            let request = |segment: bool| {
+                let mut tag = ObjectStoreCallTag::new(TableStoreKind::Main, SstType::Compacted);
+                if segment {
+                    tag.segment = Some(Bytes::from_static(b"other"));
+                }
+                GetOptions {
+                    range: Some(GetRange::Bounded(0..4)),
+                    extensions: tag.into(),
+                    ..Default::default()
+                }
+            };
+            let first = {
+                let encrypted = encrypted.clone();
+                let location = location.clone();
+                let options = request(false);
+                tokio::spawn(async move {
+                    encrypted
+                        .get_opts(&location, options)
+                        .await
+                        .unwrap()
+                        .bytes()
+                        .await
+                        .unwrap()
+                })
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while encrypted
+                    .read_metrics
+                    .header_validation_calls
+                    .load(Ordering::Relaxed)
+                    == 0
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let second = {
+                let encrypted = encrypted.clone();
+                let location = location.clone();
+                let options = request(different_segment);
+                tokio::spawn(async move {
+                    encrypted
+                        .get_opts(&location, options)
+                        .await
+                        .unwrap()
+                        .bytes()
+                        .await
+                        .unwrap()
+                })
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while if different_segment {
+                    encrypted
+                        .read_metrics
+                        .header_validation_calls
+                        .load(Ordering::Relaxed)
+                        < 2
+                } else {
+                    encrypted
+                        .read_metrics
+                        .header_validation_coalesced_reads
+                        .load(Ordering::Relaxed)
+                        == 0
+                } {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            gate.add_permits(if different_segment { 2 } else { 1 });
+            assert_eq!(first.await.unwrap(), Bytes::from_static(b"0123"));
+            assert_eq!(second.await.unwrap(), Bytes::from_static(b"0123"));
+            assert_eq!(
+                encrypted
+                    .read_metrics
+                    .header_validation_calls
+                    .load(Ordering::Relaxed),
+                if different_segment { 2 } else { 1 }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn immutable_sst_policy_excludes_unknown_extensions_and_mutable_requests() {
+        let inner = Arc::new(CountingStore::default());
+        let mut encrypted = store(inner.clone(), "sst-exclusions");
+        encrypted.sst_freshness = SstFreshness::Immutable;
+        let location = Path::from("compacted/exclusions.sst");
+        encrypted
+            .put(&location, Bytes::from_static(b"0123456789abcdef").into())
+            .await
+            .unwrap();
+        let options = || GetOptions {
+            range: Some(GetRange::Bounded(0..4)),
+            extensions: ObjectStoreCallTag::new(TableStoreKind::Main, SstType::Compacted).into(),
+            ..Default::default()
+        };
+        encrypted.get_opts(&location, options()).await.unwrap();
+        let mut unknown = options();
+        unknown.extensions.insert("unknown semantics");
+        assert!(EncryptedObjectStore::immutable_sst_tag(&unknown).is_none());
+        let mut historical = options();
+        historical.version = Some("old-version".to_owned());
+        assert!(EncryptedObjectStore::immutable_sst_tag(&historical).is_none());
+        let mut conditional_seed = options();
+        conditional_seed.if_match = Some("etag".to_owned());
+        assert!(EncryptedObjectStore::immutable_sst_tag(&conditional_seed).is_none());
+        let mut wal = options();
+        wal.extensions = ObjectStoreCallTag::new(TableStoreKind::Main, SstType::Wal).into();
+        for excluded in [
+            unknown.clone(),
+            wal,
+            GetOptions {
+                range: Some(GetRange::Bounded(0..4)),
+                ..Default::default()
+            },
+        ] {
+            assert!(encrypted
+                .validated_cached_header(&location, &excluded)
+                .await
+                .unwrap()
+                .is_some());
+        }
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .header_validation_calls
+                .load(Ordering::Relaxed),
+            3
+        );
+        let origin_calls = encrypted
+            .read_metrics
+            .ciphertext_origin_calls
+            .load(Ordering::Relaxed);
+        assert_eq!(
+            encrypted
+                .get_opts(&location, unknown)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            Bytes::from_static(b"0123")
+        );
+        assert_eq!(
+            encrypted
+                .read_metrics
+                .ciphertext_origin_calls
+                .load(Ordering::Relaxed),
+            origin_calls + 1
+        );
+        let mut conditional = options();
+        conditional.if_match = Some("wrong-etag".to_owned());
+        assert!(encrypted.get_opts(&location, conditional).await.is_err());
+        inner.inner.delete(&location).await.unwrap();
+        assert_eq!(
+            encrypted
+                .get_opts(&location, options())
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            Bytes::from_static(b"0123")
+        );
+        let mut versioned = options();
+        versioned.version = Some("unsupported-version".to_owned());
+        assert!(encrypted.get_opts(&location, versioned).await.is_err());
+        let mut retry = options();
+        let mut tag = ObjectStoreCallTag::new(TableStoreKind::Main, SstType::Compacted);
+        tag.retry = Some(slatedb::object_store_tag::RetryReason::CrcMismatch);
+        retry.extensions = tag.into();
+        assert!(matches!(
+            encrypted.get_opts(&location, retry).await.unwrap_err(),
             slatedb::object_store::Error::NotFound { .. }
         ));
     }
@@ -677,11 +1194,60 @@ mod tests {
                     e_tag: None,
                     version: None,
                 },
+                Attributes::new(),
+                slatedb::object_store::Extensions::new(),
+                None,
             );
             headers.remove(&location);
         }
         assert!(headers.order.is_empty());
         assert!(headers.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_header_observations_cannot_repopulate_after_mutation() {
+        let inner = Arc::new(InMemory::new());
+        let encrypted = store(inner, "header-generation");
+        let location = Path::from("compacted/generation.sst");
+        encrypted
+            .put(&location, Bytes::from_static(b"original").into())
+            .await
+            .unwrap();
+        let generation = encrypted.headers.lock().unwrap().generation;
+        let observed = encrypted
+            .header(&location, GetOptions::default())
+            .await
+            .unwrap();
+        encrypted
+            .put(&location, Bytes::from_static(b"replaced").into())
+            .await
+            .unwrap();
+        encrypted.cache_header(
+            &location,
+            observed.0,
+            &observed.1,
+            &observed.2,
+            &observed.3,
+            None,
+            generation,
+        );
+        assert!(encrypted.headers.lock().unwrap().entries.is_empty());
+        let generation = encrypted.headers.lock().unwrap().generation;
+        let observed = encrypted
+            .header(&location, GetOptions::default())
+            .await
+            .unwrap();
+        encrypted.delete(&location).await.unwrap();
+        encrypted.cache_header(
+            &location,
+            observed.0,
+            &observed.1,
+            &observed.2,
+            &observed.3,
+            None,
+            generation,
+        );
+        assert!(encrypted.headers.lock().unwrap().entries.is_empty());
     }
 
     #[tokio::test]

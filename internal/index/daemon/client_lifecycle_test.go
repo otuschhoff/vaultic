@@ -372,6 +372,35 @@ func TestDaemonEnvironmentFiltersAmbientSecrets(t *testing.T) {
 	}
 }
 
+func TestDaemonEnvironmentForwardsChunkLimits(t *testing.T) {
+	settings := map[string]string{
+		"VAULTICDB_CHUNK_CACHE_BYTES": "0", "VAULTICDB_CHUNK_CACHE_ENTRIES": "16384",
+		"VAULTICDB_CHUNK_FETCH_LIMIT": "256", "VAULTICDB_CHUNK_FETCH_BYTES": "67108864",
+		"VAULTICDB_CHUNK_MAX_BYTES": "4194304", "VAULTICDB_CHUNK_RANGE_LIMIT": "16",
+		"VAULTICDB_BACKEND_ACCESS_MODE": "shared", "VAULTICDB_SST_FRESHNESS": "immutable",
+	}
+	for name, value := range settings {
+		t.Setenv(name, value)
+	}
+	t.Setenv("VAULTICDB_CHUNK_UNRELATED_SECRET", "must-not-be-inherited")
+	options := Options{RepositoryID: "chunk-env", DaemonPath: "/path/to/vaulticdb", ObjectStore: "local"}.withDefaults()
+	command, authRead, authWrite, err := prepareDaemonCommand(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = authRead.Close(); _ = authWrite.Close() })
+	for _, environment := range [][]string{daemonEnvironment(options), command.Env} {
+		for name, value := range settings {
+			if !slices.Contains(environment, name+"="+value) {
+				t.Fatalf("chunk setting %s was filtered", name)
+			}
+		}
+		if slices.Contains(environment, "VAULTICDB_CHUNK_UNRELATED_SECRET=must-not-be-inherited") {
+			t.Fatal("chunk prefix must not allow arbitrary ambient variables")
+		}
+	}
+}
+
 func TestEncryptedDaemonPersistsOnlyCiphertextAndReopens(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()

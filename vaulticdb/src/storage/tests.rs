@@ -56,46 +56,99 @@ mod tests {
             ObjectStoreRole::Main,
             None,
         );
-        claim_writer_epoch(object_store.as_ref(), None).await.unwrap();
+        claim_writer_epoch(object_store.as_ref(), None)
+            .await
+            .unwrap();
         let path = format!("stream-read-ahead-{}", rand::random::<u64>());
         let writer = Db::builder(path.as_str(), object_store.clone())
             .with_db_cache_disabled()
-            .build().await.unwrap();
+            .build()
+            .await
+            .unwrap();
         let mut batch = WriteBatch::new();
         for ordinal in 0..4096u32 {
-            batch.put(format!("scan:{ordinal:05}"), vec![(ordinal % 251) as u8; 1024]);
+            batch.put(
+                format!("scan:{ordinal:05}"),
+                vec![(ordinal % 251) as u8; 1024],
+            );
         }
         batch.put(b"scan-before:key", b"outside");
         batch.put(b"scan;after", b"outside");
         writer.write(batch).await.unwrap();
-        writer.flush_with_options(FlushOptions { flush_type: FlushType::MemTable }).await.unwrap();
-        let storage = Arc::new(transition_storage(Database::Writer(writer), path, object_store, 1));
+        writer
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+        let storage = Arc::new(transition_storage(
+            Database::Writer(writer),
+            path,
+            object_store,
+            1,
+        ));
         let transaction_id = storage.begin().await.unwrap().transaction_id;
-        storage.write_batch(&WriteBatchRequest {
-            puts: vec![KeyValue { key: b"scan:99999".to_vec(), value: b"later".to_vec() }],
-            await_durable: true,
-            ..Default::default()
-        }).await.unwrap();
+        storage
+            .write_batch(&WriteBatchRequest {
+                puts: vec![KeyValue {
+                    key: b"scan:99999".to_vec(),
+                    value: b"later".to_vec(),
+                }],
+                await_durable: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         for suffix in [b"".as_slice(), b"01023", b"01023x", b"99999"] {
-            let before = attribution.object_store_main.snapshot().get.timing.completed;
+            let before = attribution
+                .object_store_main
+                .snapshot()
+                .get
+                .timing
+                .completed;
             let slot = storage.transaction(&transaction_id).await.unwrap();
             let transaction = slot.transaction.write().await;
             let mut iterator = scan_prefix_transaction(
-                transaction.as_ref().unwrap(), b"scan:", suffix, &ScanOptions::default(),
-            ).await.unwrap();
+                transaction.as_ref().unwrap(),
+                b"scan:",
+                suffix,
+                &ScanOptions::default(),
+            )
+            .await
+            .unwrap();
             drop(transaction);
             drop(slot);
             let mut expected = Vec::new();
             while let Some(entry) = iterator.next().await.unwrap() {
-                expected.push(KeyValue { key: entry.key.to_vec(), value: entry.value.to_vec() });
+                expected.push(KeyValue {
+                    key: entry.key.to_vec(),
+                    value: entry.value.to_vec(),
+                });
             }
             drop(iterator);
-            let default_gets = attribution.object_store_main.snapshot().get.timing.completed - before;
-            let before = attribution.object_store_main.snapshot().get.timing.completed;
-            let cursor = if suffix.is_empty() { Vec::new() } else { [b"scan:", suffix].concat() };
-            let mut stream = storage.clone().scan_stream(
-                b"scan:".to_vec(), cursor, 113, transaction_id.clone(), 0,
-            ).await.unwrap();
+            let default_gets = attribution
+                .object_store_main
+                .snapshot()
+                .get
+                .timing
+                .completed
+                - before;
+            let before = attribution
+                .object_store_main
+                .snapshot()
+                .get
+                .timing
+                .completed;
+            let cursor = if suffix.is_empty() {
+                Vec::new()
+            } else {
+                [b"scan:", suffix].concat()
+            };
+            let mut stream = storage
+                .clone()
+                .scan_stream(b"scan:".to_vec(), cursor, 113, transaction_id.clone(), 0)
+                .await
+                .unwrap();
             let mut actual = Vec::new();
             let mut done = false;
             while let Some(chunk) = stream.next().await {
@@ -127,20 +180,42 @@ mod tests {
     #[tokio::test]
     async fn persistent_scan_stream_snapshot_expiry_and_cleanup() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        claim_writer_epoch(object_store.as_ref(), None).await.unwrap();
+        claim_writer_epoch(object_store.as_ref(), None)
+            .await
+            .unwrap();
         let path = format!("stream-lifecycle-{}", rand::random::<u64>());
-        let writer = open_writer(&path, object_store.clone(), None, &SlateDbTuning::default()).await.unwrap();
+        let writer = open_writer(&path, object_store.clone(), None, &SlateDbTuning::default())
+            .await
+            .unwrap();
         for ordinal in 0..20 {
-            writer.put(format!("scan:{ordinal:02}"), b"value").await.unwrap();
+            writer
+                .put(format!("scan:{ordinal:02}"), b"value")
+                .await
+                .unwrap();
         }
-        let storage = Arc::new(transition_storage(Database::Writer(writer), path, object_store, 1));
+        let storage = Arc::new(transition_storage(
+            Database::Writer(writer),
+            path,
+            object_store,
+            1,
+        ));
         let transaction_id = storage.begin().await.unwrap().transaction_id;
-        storage.write_batch(&WriteBatchRequest {
-            puts: vec![KeyValue { key: b"scan:99".to_vec(), value: b"later".to_vec() }],
-            await_durable: true,
-            ..Default::default()
-        }).await.unwrap();
-        let mut stream = storage.clone().scan_stream(b"scan:".to_vec(), Vec::new(), 3, transaction_id.clone(), 0).await.unwrap();
+        storage
+            .write_batch(&WriteBatchRequest {
+                puts: vec![KeyValue {
+                    key: b"scan:99".to_vec(),
+                    value: b"later".to_vec(),
+                }],
+                await_durable: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let mut stream = storage
+            .clone()
+            .scan_stream(b"scan:".to_vec(), Vec::new(), 3, transaction_id.clone(), 0)
+            .await
+            .unwrap();
         let mut keys = Vec::new();
         let mut setups = 0;
         let mut done = false;
@@ -153,26 +228,57 @@ mod tests {
         }
         assert!(done);
         assert_eq!(setups, 1);
-        assert_eq!(keys, (0..20).map(|ordinal| format!("scan:{ordinal:02}").into_bytes()).collect::<Vec<_>>());
+        assert_eq!(
+            keys,
+            (0..20)
+                .map(|ordinal| format!("scan:{ordinal:02}").into_bytes())
+                .collect::<Vec<_>>()
+        );
         assert_eq!(Arc::strong_count(&storage), 1);
 
         let mut streams = Vec::new();
         for _ in 0..32 {
-            streams.push(storage.clone().scan_stream(b"scan:".to_vec(), Vec::new(), 1, transaction_id.clone(), 0).await.unwrap());
+            streams.push(
+                storage
+                    .clone()
+                    .scan_stream(b"scan:".to_vec(), Vec::new(), 1, transaction_id.clone(), 0)
+                    .await
+                    .unwrap(),
+            );
         }
-        let error = storage.clone().scan_stream(b"scan:".to_vec(), Vec::new(), 1, transaction_id.clone(), 0).await.err().unwrap();
+        let error = storage
+            .clone()
+            .scan_stream(b"scan:".to_vec(), Vec::new(), 1, transaction_id.clone(), 0)
+            .await
+            .err()
+            .unwrap();
         assert_eq!(error.code(), tonic::Code::ResourceExhausted);
         drop(streams);
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while Arc::strong_count(&storage) != 1 { tokio::task::yield_now().await; }
-        }).await.unwrap();
+            while Arc::strong_count(&storage) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
 
         for expire in [true, false] {
             let transaction_id = storage.begin().await.unwrap().transaction_id;
-            let mut stream = storage.clone().scan_stream(b"scan:".to_vec(), Vec::new(), 1, transaction_id.clone(), 0).await.unwrap();
+            let mut stream = storage
+                .clone()
+                .scan_stream(b"scan:".to_vec(), Vec::new(), 1, transaction_id.clone(), 0)
+                .await
+                .unwrap();
             assert!(!stream.next().await.unwrap().unwrap().done);
             if expire {
-                storage.transactions.read().await.get(&transaction_id).unwrap().last_touched_ms.store(0, Ordering::Relaxed);
+                storage
+                    .transactions
+                    .read()
+                    .await
+                    .get(&transaction_id)
+                    .unwrap()
+                    .last_touched_ms
+                    .store(0, Ordering::Relaxed);
                 assert!(storage.get(b"scan:00", &transaction_id).await.is_err());
             } else {
                 storage.rollback(&transaction_id).await.unwrap();
@@ -330,6 +436,7 @@ mod tests {
     fn cache_storage_config(confidentiality: cache::CacheConfidentiality) -> StorageConfig {
         StorageConfig {
             object_store: ObjectStoreConfig::Memory,
+            backend_access_mode: BackendAccessMode::Shared,
             wal_store: WalStoreConfig::Inherit,
             slatedb_tuning: SlateDbTuning::default(),
             cache: cache::CacheConfig {
@@ -489,6 +596,61 @@ mod tests {
         );
         storage.close().await.unwrap();
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn dedicated_backend_access_is_enforced_before_open_and_survives_close() {
+        let repository_id = format!("dedicated-{}", rand::random::<u64>());
+        let root = env::temp_dir().join(format!("vaulticdb-dedicated-{}", rand::random::<u64>()));
+        let mut config = cache_storage_config(cache::CacheConfidentiality::DecryptedHighlyTrusted);
+        config.cache = cache::CacheConfig::default();
+        config.object_store = ObjectStoreConfig::Local { root: root.clone() };
+        config.backend_access_mode = BackendAccessMode::Dedicated;
+        config.fencing_replica = Some("unsupported-local-replica".to_owned());
+        assert!(Storage::open(&repository_id, &config).await.is_err());
+        config.fencing_replica = None;
+        let dedicated = Storage::open(&repository_id, &config).await.unwrap();
+        let other = Storage::open(&format!("{repository_id}-other"), &config)
+            .await
+            .unwrap();
+        other.close().await.unwrap();
+        drop(other);
+        assert!(Storage::open(&repository_id, &config).await.is_err());
+        config.backend_access_mode = BackendAccessMode::Shared;
+        assert!(Storage::open(&repository_id, &config).await.is_err());
+        dedicated.close().await.unwrap();
+        assert!(Storage::open(&repository_id, &config).await.is_err());
+        drop(dedicated);
+        let shared = Storage::open(&repository_id, &config).await.unwrap();
+        config.backend_access_mode = BackendAccessMode::Dedicated;
+        assert!(Storage::open(&repository_id, &config).await.is_err());
+        shared.close().await.unwrap();
+        drop(shared);
+        let dedicated = Storage::open(&repository_id, &config).await.unwrap();
+        dedicated.close().await.unwrap();
+        drop(dedicated);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn dedicated_backend_access_rejects_unfenced_topologies() {
+        let mut config = cache_storage_config(cache::CacheConfidentiality::DecryptedHighlyTrusted);
+        config.backend_access_mode = BackendAccessMode::Dedicated;
+        let error = Storage::open("dedicated-memory-rejected", &config)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("dedicated access requires"));
+        config.object_store = ObjectStoreConfig::Local {
+            root: env::temp_dir().join("vaulticdb-dedicated-wal-must-not-be-created"),
+        };
+        config.wal_store = WalStoreConfig::Store(ReplicaStoreConfig::Memory);
+        let error = Storage::open("dedicated-wal-rejected", &config)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("dedicated access requires"));
     }
 
     #[tokio::test]
