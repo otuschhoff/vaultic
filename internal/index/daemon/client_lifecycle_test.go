@@ -377,7 +377,7 @@ func TestDaemonEnvironmentForwardsChunkLimits(t *testing.T) {
 		"VAULTICDB_CHUNK_CACHE_BYTES": "0", "VAULTICDB_CHUNK_CACHE_ENTRIES": "16384",
 		"VAULTICDB_CHUNK_FETCH_LIMIT": "256", "VAULTICDB_CHUNK_FETCH_BYTES": "67108864",
 		"VAULTICDB_CHUNK_MAX_BYTES": "4194304", "VAULTICDB_CHUNK_RANGE_LIMIT": "16",
-		"VAULTICDB_BACKEND_ACCESS_MODE": "shared", "VAULTICDB_SST_FRESHNESS": "immutable",
+		"VAULTICDB_BACKEND_ACCESS_MODE": "dedicated-force", "VAULTICDB_SST_FRESHNESS": "immutable",
 	}
 	for name, value := range settings {
 		t.Setenv(name, value)

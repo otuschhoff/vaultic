@@ -8,6 +8,7 @@ pub(crate) enum BackendAccessMode {
     #[default]
     Shared,
     Dedicated,
+    DedicatedForced,
 }
 
 impl BackendAccessMode {
@@ -15,7 +16,20 @@ impl BackendAccessMode {
         match value {
             "shared" => Ok(Self::Shared),
             "dedicated" => Ok(Self::Dedicated),
-            _ => bail!("backend access mode must be shared or dedicated"),
+            "dedicated-force" => Ok(Self::DedicatedForced),
+            _ => bail!("backend access mode must be shared, dedicated or dedicated-force"),
+        }
+    }
+
+    pub(crate) fn is_dedicated(self) -> bool {
+        self != Self::Shared
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::Dedicated => "dedicated",
+            Self::DedicatedForced => "dedicated-force",
         }
     }
 }
@@ -46,7 +60,9 @@ impl BackendAccessGuard {
         }
         match mode {
             BackendAccessMode::Shared => FileExt::try_lock_shared(&file),
-            BackendAccessMode::Dedicated => FileExt::try_lock_exclusive(&file),
+            BackendAccessMode::Dedicated | BackendAccessMode::DedicatedForced => {
+                FileExt::try_lock_exclusive(&file)
+            }
         }
         .with_context(|| format!("backend access conflict or unsupported locking ({mode:?})"))?;
         Ok(Self(file))
@@ -99,6 +115,15 @@ mod tests {
             BackendAccessMode::parse("dedicated").unwrap(),
             BackendAccessMode::Dedicated
         );
+        assert_eq!(
+            BackendAccessMode::parse("dedicated-force").unwrap(),
+            BackendAccessMode::DedicatedForced
+        );
+        assert!(BackendAccessMode::DedicatedForced.is_dedicated());
+        assert_eq!(
+            BackendAccessMode::DedicatedForced.as_str(),
+            "dedicated-force"
+        );
         for invalid in ["", "exclusive", "Dedicated", " shared"] {
             assert!(BackendAccessMode::parse(invalid).is_err());
         }
@@ -122,6 +147,7 @@ mod tests {
         ));
         let alias = root.with_extension("alias");
         let dedicated = BackendAccessGuard::acquire(&root, BackendAccessMode::Dedicated).unwrap();
+        assert!(BackendAccessGuard::acquire(&root, BackendAccessMode::DedicatedForced).is_err());
         std::os::unix::fs::symlink(&root, &alias).unwrap();
         let child = |allowed: bool| {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -164,7 +190,32 @@ mod tests {
         assert!(BackendAccessGuard::acquire(&root, BackendAccessMode::Dedicated).is_err());
         assert!(BackendAccessGuard::acquire(&root, BackendAccessMode::Shared).is_err());
         drop(dedicated);
+        let forced =
+            BackendAccessGuard::acquire(&root, BackendAccessMode::DedicatedForced).unwrap();
+        assert!(BackendAccessGuard::acquire(&root, BackendAccessMode::Shared).is_err());
+        assert!(BackendAccessGuard::acquire(&root, BackendAccessMode::DedicatedForced).is_err());
+        drop(forced);
         assert!(BackendAccessGuard::acquire(&root, BackendAccessMode::Shared).is_ok());
+        std::fs::remove_file(root.with_extension("access.lock")).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn forced_dedicated_keeps_filesystem_lock_exclusion() {
+        let root =
+            std::env::temp_dir().join(format!("vaulticdb-forced-access-{}", rand::random::<u64>()));
+        let forced =
+            BackendAccessGuard::acquire(&root, BackendAccessMode::DedicatedForced).unwrap();
+        assert!(BackendAccessGuard::acquire(&root, BackendAccessMode::Shared).is_err());
+        assert!(BackendAccessGuard::acquire(&root, BackendAccessMode::DedicatedForced).is_err());
+        drop(forced);
+        if ensure_local_filesystem(&root).is_err() {
+            assert!(BackendAccessGuard::acquire(&root, BackendAccessMode::Dedicated).is_err());
+        }
+        let shared = BackendAccessGuard::acquire(&root, BackendAccessMode::Shared).unwrap();
+        assert!(BackendAccessGuard::acquire(&root, BackendAccessMode::DedicatedForced).is_err());
+        drop(shared);
+        assert!(BackendAccessGuard::acquire(&root, BackendAccessMode::DedicatedForced).is_ok());
         std::fs::remove_file(root.with_extension("access.lock")).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }

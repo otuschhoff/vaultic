@@ -620,7 +620,7 @@ Two independent startup controls are forwarded by the Go daemon launcher:
 
 | Environment Variable | Values | Default |
 | --- | --- | --- |
-| `VAULTICDB_BACKEND_ACCESS_MODE` | `shared`, `dedicated` | `shared` |
+| `VAULTICDB_BACKEND_ACCESS_MODE` | `shared`, `dedicated`, `dedicated-force` | `shared` |
 | `VAULTICDB_SST_FRESHNESS` | `strict`, `bounded`, `immutable` | `bounded` |
 
 Freshness applies to encrypted object-store reads. `strict` validates every
@@ -655,12 +655,25 @@ close until references are dropped. Never delete or replace a live lock sidecar.
 Local backend/cache/WAL directories require access to their lock sidecars even
 in shared mode. Failed opens release their acquired guards.
 
-Dedicated mode currently accepts only external, single-local-backend topology
+Normal `dedicated` mode accepts only external, single-local-backend topology
 on supported Linux local filesystems (ext, XFS, btrfs, tmpfs, overlayfs, ZFS),
 with inherited WAL and no separate WAL handoff. NFS and other remote filesystems,
-S3/RADOS/replicated stores, capsule topology and separate WAL targets are rejected;
-they do not yet have an equivalent distributed access fence. Dedicated mode does
-not automatically relax mutable metadata freshness or change the SST policy.
+S3/RADOS/replicated stores, capsule topology and separate WAL targets are rejected
+by that mode; they do not have an equivalent distributed access fence.
+
+`dedicated-force` explicitly overrides the filesystem and backend-type checks
+for NFS, other filesystems and remote object stores. It is an operator assertion
+of sole access, not verification or a distributed fence. Local/NFS backends still
+acquire exclusive advisory locks: force does not ignore a conflicting lock or an
+unavailable locking service. Remote backends have no backend access lock; the
+operator must exclude all other readers, writers, maintenance tools and hosts
+using deployment controls and credentials. Existing writer-epoch fencing remains
+active, but is not a sole-reader/writer access guarantee. Capsule topology,
+separate WAL targets and WAL handoffs remain rejected even with the override.
+The startup `backend_access_configured` event reports `mode=dedicated-force`,
+`operator_asserted=true` and the locking mechanism (or `no-backend-access-lock`).
+Neither dedicated mode automatically relaxes mutable metadata freshness or
+changes the independently selected SST policy.
 
 These are advisory locks among updated cooperating VaulticDB processes, not a
 security fence against arbitrary programs, older daemons or raw administrative
@@ -677,6 +690,15 @@ For example, an encrypted local deployment can explicitly select both:
 export VAULTICDB_BACKEND_ACCESS_MODE=dedicated
 export VAULTICDB_SST_FRESHNESS=immutable
 ```
+
+For an NFS or remote deployment whose sole access is enforced operationally:
+
+```sh
+export VAULTICDB_BACKEND_ACCESS_MODE=dedicated-force
+```
+
+Stop other clients and maintenance jobs before enabling this override; it does
+not acquire or verify remote exclusivity for you.
 
 This changes neither production configuration nor benchmark evidence. Cold,
 random SlateDB block misses remain expected. No writer batching, preparation

@@ -1606,7 +1606,7 @@ pub(crate) fn object_store_with_access(
     mode: BackendAccessMode,
 ) -> Result<(String, Arc<dyn ObjectStore>)> {
     if mode == BackendAccessMode::Dedicated && !matches!(config, ObjectStoreConfig::Local { .. }) {
-        bail!("dedicated access requires a single local object store");
+        bail!("dedicated access requires a single local object store; use dedicated-force to assert exclusive access to a remote backend");
     }
     let repository_key = crate::repository_key(repository_id);
     match config {
@@ -2027,6 +2027,20 @@ mod object_store_tests {
         assert!(error
             .to_string()
             .contains("provider profile requires an explicit endpoint"));
+    }
+
+    #[test]
+    fn dedicated_force_allows_s3_store_construction_without_an_access_fence() {
+        let config = ObjectStoreConfig::S3 {
+            bucket: "dedicated-force-test".to_owned(),
+            prefix: Some("metadata".to_owned()),
+            endpoint: Some("http://127.0.0.1:9".to_owned()),
+            region: Some("us-east-1".to_owned()),
+            provider: None,
+            bucket_lookup: None,
+        };
+        assert!(object_store_with_access("forced-s3", &config, BackendAccessMode::Dedicated).is_err());
+        assert!(object_store_with_access("forced-s3", &config, BackendAccessMode::DedicatedForced).is_ok());
     }
 
     #[tokio::test]

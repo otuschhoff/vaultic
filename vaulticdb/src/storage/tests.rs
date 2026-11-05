@@ -654,6 +654,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dedicated_backend_access_force_allows_nonlocal_but_not_separate_wal() {
+        let mut config = cache_storage_config(cache::CacheConfidentiality::DecryptedHighlyTrusted);
+        config.cache = cache::CacheConfig::default();
+        config.backend_access_mode = BackendAccessMode::DedicatedForced;
+        let storage = Storage::open("dedicated-forced-nonlocal", &config).await.unwrap();
+        storage.close().await.unwrap();
+        drop(storage);
+        config.wal_store = WalStoreConfig::Store(ReplicaStoreConfig::Memory);
+        let error = Storage::open("dedicated-forced-separate-wal", &config).await.err().unwrap();
+        assert!(error.to_string().contains("dedicated access requires"));
+    }
+
+    #[tokio::test]
     async fn metadata_rebuild_reset_rejects_persistent_read_cache() {
         let repository_id = format!("reset-persistent-cache-{}", rand::random::<u64>());
         let mut config = cache_storage_config(cache::CacheConfidentiality::DecryptedHighlyTrusted);

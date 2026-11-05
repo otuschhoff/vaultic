@@ -1469,13 +1469,14 @@ impl Storage {
                     Vec::new(),
                 )
             };
-        if config.backend_access_mode == BackendAccessMode::Dedicated
-            && (!matches!(effective_store, ObjectStoreConfig::Local { .. })
+        if config.backend_access_mode.is_dedicated()
+            && ((config.backend_access_mode == BackendAccessMode::Dedicated
+                && !matches!(effective_store, ObjectStoreConfig::Local { .. }))
                 || !matches!(effective_wal_store, WalStoreConfig::Inherit)
                 || config.bulk_import_local_wal_data_dir.is_some()
                 || config.topology_source == TopologySource::Capsule)
         {
-            bail!("dedicated access requires external single-local-backend topology with inherited WAL and no WAL handoff");
+            bail!("dedicated access requires external single-backend topology with inherited WAL and no WAL handoff; non-local backends require dedicated-force");
         }
         let (path, raw_object_store) =
             object_store_with_access(repository_id, &effective_store, config.backend_access_mode)?;
@@ -1483,14 +1484,18 @@ impl Storage {
             "{}",
             serde_json::json!({
                 "category": "lifecycle", "component": "vaulticdb", "event": "backend_access_configured",
-                "fields": {"mode": match config.backend_access_mode { BackendAccessMode::Shared => "shared", BackendAccessMode::Dedicated => "dedicated" }}
+                "fields": {
+                    "mode": config.backend_access_mode.as_str(),
+                    "operator_asserted": config.backend_access_mode == BackendAccessMode::DedicatedForced,
+                    "locking": if matches!(effective_store, ObjectStoreConfig::Local { .. }) { "filesystem-advisory" } else { "no-backend-access-lock" }
+                }
             })
         );
         let raw_control_store =
             repository_control_store(&effective_store, &path, raw_object_store.clone());
         if matches!(effective_wal_store, WalStoreConfig::Inherit) {
             if let Some(root) = local_wal_handoff_target(raw_control_store.as_ref()).await? {
-                if config.backend_access_mode == BackendAccessMode::Dedicated {
+                if config.backend_access_mode.is_dedicated() {
                     bail!("dedicated access does not permit a separate WAL handoff target");
                 }
                 effective_wal_store = WalStoreConfig::Store(ReplicaStoreConfig::Local { root });
