@@ -84,71 +84,74 @@ type backupOptions struct {
 	workingMemorySelected bool
 	filter.ExcludePatternOptions
 
-	Parent                    string
-	GroupBy                   data.SnapshotGroupByOptions
-	Force                     bool
-	ExcludeOtherFS            bool
-	ExcludeIfPresent          []string
-	ExcludeCaches             bool
-	ExcludeLargerThan         string
-	ExcludeCloudFiles         bool
-	Stdin                     bool
-	StdinFilename             string
-	StdinCommand              bool
-	Tags                      data.TagLists
-	Host                      string
-	Label                     string
-	Description               string
-	DescriptionFrom           string
-	DeleteNever               bool
-	DeleteAfter               string
-	FilesFrom                 []string
-	FilesFromVerbatim         []string
-	FilesFromRaw              []string
-	TimeStamp                 string
-	WithAtime                 bool
-	IgnoreInode               bool
-	IgnoreCtime               bool
-	UseFsSnapshot             bool
-	DryRun                    bool
-	ReadConcurrency           uint
-	UnchangedReadConcurrency  uint
-	MetadataReadConcurrency   int
-	MetadataBatchDelay        time.Duration
-	MetadataExactCatalog      bool
-	NoScan                    bool
-	UseCWalk                  bool
-	NoCWalk                   bool
-	CWalkConcurrency          int
-	NFSDirect                 bool
-	NFSAllowMissingMetadata   bool
-	NFSConnections            int
-	MetadataOnDemand          bool
-	MetadataScratch           string
-	MetadataCacheMiB          int
-	BoundedInodeManifest      string
-	MetadataQueueDepth        int
-	UsePathdiff               bool
-	PathdiffEndpoint          string
-	PathdiffRequireCoverage   bool
-	PathdiffSVMMap            string
-	UseFSEvents               bool
-	FSEventsRequireCoverage   bool
-	FSEventsReplayTimeout     time.Duration
-	FSEventsFullCrawlEvery    time.Duration
-	APFSSnapshot              bool
-	APFSSnapshotRequire       bool
-	APFSSnapshotKeep          bool
-	SkipIfUnchanged           bool
-	SnapshotPerSource         bool
-	CoalesceSources           bool
-	ProfileNames              []string
-	Init                      bool
-	List                      bool
-	AllowDeferredCommit       bool
-	DeferredMode              string
-	DeferredExpiry            time.Duration
-	AcknowledgeMetadataBypass bool
+	Parent                          string
+	GroupBy                         data.SnapshotGroupByOptions
+	Force                           bool
+	ExcludeOtherFS                  bool
+	ExcludeIfPresent                []string
+	ExcludeCaches                   bool
+	ExcludeLargerThan               string
+	ExcludeCloudFiles               bool
+	Stdin                           bool
+	StdinFilename                   string
+	StdinCommand                    bool
+	Tags                            data.TagLists
+	Host                            string
+	Label                           string
+	Description                     string
+	DescriptionFrom                 string
+	DeleteNever                     bool
+	DeleteAfter                     string
+	FilesFrom                       []string
+	FilesFromVerbatim               []string
+	FilesFromRaw                    []string
+	TimeStamp                       string
+	WithAtime                       bool
+	IgnoreInode                     bool
+	IgnoreCtime                     bool
+	UseFsSnapshot                   bool
+	DryRun                          bool
+	ReadConcurrency                 uint
+	UnchangedReadConcurrency        uint
+	MetadataReadConcurrency         int
+	MetadataBatchDelay              time.Duration
+	MetadataExactCatalog            bool
+	NoScan                          bool
+	UseCWalk                        bool
+	NoCWalk                         bool
+	CWalkConcurrency                int
+	NFSDirect                       bool
+	NFSAllowMissingMetadata         bool
+	NFSConnections                  int
+	MetadataOnDemand                bool
+	MetadataScratch                 string
+	MetadataCacheMiB                int
+	BoundedInodeManifest            string
+	MetadataQueueDepth              int
+	MetadataReconciliationBatchSize int
+	MetadataReconciliationReadAhead int
+	MetadataScalarRevisionReads     bool
+	UsePathdiff                     bool
+	PathdiffEndpoint                string
+	PathdiffRequireCoverage         bool
+	PathdiffSVMMap                  string
+	UseFSEvents                     bool
+	FSEventsRequireCoverage         bool
+	FSEventsReplayTimeout           time.Duration
+	FSEventsFullCrawlEvery          time.Duration
+	APFSSnapshot                    bool
+	APFSSnapshotRequire             bool
+	APFSSnapshotKeep                bool
+	SkipIfUnchanged                 bool
+	SnapshotPerSource               bool
+	CoalesceSources                 bool
+	ProfileNames                    []string
+	Init                            bool
+	List                            bool
+	AllowDeferredCommit             bool
+	DeferredMode                    string
+	DeferredExpiry                  time.Duration
+	AcknowledgeMetadataBypass       bool
 
 	MetadataPublicationGroupSize int
 
@@ -171,6 +174,9 @@ func (options *backupOptions) AddFlags(f *pflag.FlagSet) {
 
 	f.StringVar(&options.BoundedInodeManifest, "bounded-inode-manifest", "", "back up only a bounded source manifest (not a complete source baseline)")
 	f.IntVar(&options.MetadataQueueDepth, "metadata-reconciliation-queue-depth", 0, "metadata reconciliation queue capacity (0 uses 50000)")
+	f.IntVar(&options.MetadataReconciliationBatchSize, "metadata-reconciliation-batch-size", 0, "metadata reconciliation collection batch size (0 uses 5000, maximum 10000)")
+	f.IntVar(&options.MetadataReconciliationReadAhead, "metadata-reconciliation-read-ahead", 0, "metadata reconciliation prepared-batch read-ahead (0 or 1)")
+	f.BoolVar(&options.MetadataScalarRevisionReads, "metadata-reconciliation-scalar-revision-reads", false, "use scalar revision reads for controlled reconciliation comparisons")
 	f.BoolVarP(&options.ExcludeOtherFS, "one-file-system", "x", false, "exclude other file systems, don't cross filesystem boundaries and subvolumes")
 	f.StringArrayVar(
 		&options.ExcludeIfPresent,
@@ -571,6 +577,10 @@ func readFilenamesRaw(r io.Reader) (names []string, err error) {
 func (options backupOptions) Check(globalOptions global.Options, args []string) error {
 	if options.BoundedInodeManifest != "" && !options.Force {
 		return errors.Fatal("--bounded-inode-manifest requires --force to prevent reuse outside the inode cap")
+	}
+	if options.MetadataReconciliationBatchSize < 0 || options.MetadataReconciliationBatchSize > 10_000 ||
+		options.MetadataReconciliationReadAhead < 0 || options.MetadataReconciliationReadAhead > 1 {
+		return errors.Fatal("invalid metadata reconciliation batch size or read-ahead")
 	}
 	if options.MetadataQueueDepth < 0 || options.MetadataQueueDepth > 50_000 {
 		return errors.Fatal("--metadata-reconciliation-queue-depth must be between 0 and 50000")

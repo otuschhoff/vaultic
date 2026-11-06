@@ -131,6 +131,15 @@ func TestBackupEncryptionReadDelta(test *testing.T) {
 		{&baseline.ChunkCacheMisses, &current.ChunkCacheMisses, func(value *daemon.EncryptionReadMetrics) uint64 { return value.ChunkCacheMisses }},
 		{&baseline.ChunkCacheEvictions, &current.ChunkCacheEvictions, func(value *daemon.EncryptionReadMetrics) uint64 { return value.ChunkCacheEvictions }},
 		{&baseline.ChunkCoalescedReads, &current.ChunkCoalescedReads, func(value *daemon.EncryptionReadMetrics) uint64 { return value.ChunkCoalescedReads }},
+		{&baseline.ChunkSampledFirstFetches, &current.ChunkSampledFirstFetches, func(value *daemon.EncryptionReadMetrics) uint64 { return value.ChunkSampledFirstFetches }},
+		{&baseline.ChunkSampledRefetches, &current.ChunkSampledRefetches, func(value *daemon.EncryptionReadMetrics) uint64 { return value.ChunkSampledRefetches }},
+		{&baseline.ChunkSampledHistoryEvictions, &current.ChunkSampledHistoryEvictions, func(value *daemon.EncryptionReadMetrics) uint64 { return value.ChunkSampledHistoryEvictions }},
+		{&baseline.ChunkSampledReuseNS, &current.ChunkSampledReuseNS, func(value *daemon.EncryptionReadMetrics) uint64 { return value.ChunkSampledReuseNS }},
+		{&baseline.ChunkSampledReuseBytes, &current.ChunkSampledReuseBytes, func(value *daemon.EncryptionReadMetrics) uint64 { return value.ChunkSampledReuseBytes }},
+		{&baseline.ChunkSampledRefetchWithin64M, &current.ChunkSampledRefetchWithin64M, func(value *daemon.EncryptionReadMetrics) uint64 { return value.ChunkSampledRefetchWithin64M }},
+		{&baseline.ChunkSampledRefetchWithin256M, &current.ChunkSampledRefetchWithin256M, func(value *daemon.EncryptionReadMetrics) uint64 { return value.ChunkSampledRefetchWithin256M }},
+		{&baseline.ChunkSampledRefetchWithin1G, &current.ChunkSampledRefetchWithin1G, func(value *daemon.EncryptionReadMetrics) uint64 { return value.ChunkSampledRefetchWithin1G }},
+		{&baseline.ReadWindowsDropped, &current.ReadWindowsDropped, func(value *daemon.EncryptionReadMetrics) uint64 { return value.ReadWindowsDropped }},
 	} {
 		*field.baseline, *field.current = 5, 9
 		actual := backupEncryptionReadDelta(current, baseline)

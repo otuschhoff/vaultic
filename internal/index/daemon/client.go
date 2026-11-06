@@ -420,42 +420,79 @@ type ReadCacheStatus struct {
 }
 
 type EncryptionReadMetrics struct {
-	Reads                          uint64 `json:"reads"`
-	RequestedPlaintextBytes        uint64 `json:"requested_plaintext_bytes"`
-	RoundedCiphertextBytes         uint64 `json:"rounded_ciphertext_bytes"`
-	CiphertextOriginCalls          uint64 `json:"ciphertext_origin_calls"`
-	CiphertextOriginBytes          uint64 `json:"ciphertext_origin_bytes"`
-	CiphertextOriginNanoseconds    uint64 `json:"ciphertext_origin_ns"`
-	HeaderDecodeNanoseconds        uint64 `json:"header_decode_ns"`
-	HeaderCacheHits                uint64 `json:"header_cache_hits"`
-	HeaderCacheMisses              uint64 `json:"header_cache_misses"`
-	HeaderCacheEvictions           uint64 `json:"header_cache_evictions"`
-	CryptoJobs                     uint64 `json:"crypto_jobs"`
-	CryptoQueueNanoseconds         uint64 `json:"crypto_queue_ns"`
-	CryptoServiceNanoseconds       uint64 `json:"crypto_service_ns"`
-	HeadReads                      uint64 `json:"head_reads"`
-	FullReads                      uint64 `json:"full_reads"`
-	RangeReads                     uint64 `json:"range_reads"`
-	HeaderValidationCalls          uint64 `json:"header_validation_calls"`
-	HeaderValidationNanoseconds    uint64 `json:"header_validation_ns"`
-	HeaderValidationCoalescedReads uint64 `json:"header_validation_coalesced_reads"`
-	ChunkCacheHits                 uint64 `json:"chunk_cache_hits"`
-	ChunkCacheMisses               uint64 `json:"chunk_cache_misses"`
-	ChunkCacheEvictions            uint64 `json:"chunk_cache_evictions"`
-	ChunkCoalescedReads            uint64 `json:"chunk_coalesced_reads"`
+	ReadWindows                    []EncryptionReadWindow `json:"read_windows,omitempty"`
+	ReadWindowsDropped             uint64                 `json:"read_windows_dropped"`
+	Reads                          uint64                 `json:"reads"`
+	RequestedPlaintextBytes        uint64                 `json:"requested_plaintext_bytes"`
+	RoundedCiphertextBytes         uint64                 `json:"rounded_ciphertext_bytes"`
+	CiphertextOriginCalls          uint64                 `json:"ciphertext_origin_calls"`
+	CiphertextOriginBytes          uint64                 `json:"ciphertext_origin_bytes"`
+	CiphertextOriginNanoseconds    uint64                 `json:"ciphertext_origin_ns"`
+	HeaderDecodeNanoseconds        uint64                 `json:"header_decode_ns"`
+	HeaderCacheHits                uint64                 `json:"header_cache_hits"`
+	HeaderCacheMisses              uint64                 `json:"header_cache_misses"`
+	HeaderCacheEvictions           uint64                 `json:"header_cache_evictions"`
+	CryptoJobs                     uint64                 `json:"crypto_jobs"`
+	CryptoQueueNanoseconds         uint64                 `json:"crypto_queue_ns"`
+	CryptoServiceNanoseconds       uint64                 `json:"crypto_service_ns"`
+	HeadReads                      uint64                 `json:"head_reads"`
+	FullReads                      uint64                 `json:"full_reads"`
+	RangeReads                     uint64                 `json:"range_reads"`
+	HeaderValidationCalls          uint64                 `json:"header_validation_calls"`
+	HeaderValidationNanoseconds    uint64                 `json:"header_validation_ns"`
+	HeaderValidationCoalescedReads uint64                 `json:"header_validation_coalesced_reads"`
+	ChunkCacheHits                 uint64                 `json:"chunk_cache_hits"`
+	ChunkCacheMisses               uint64                 `json:"chunk_cache_misses"`
+	ChunkCacheEvictions            uint64                 `json:"chunk_cache_evictions"`
+	ChunkCoalescedReads            uint64                 `json:"chunk_coalesced_reads"`
+	ChunkSampledFirstFetches       uint64                 `json:"chunk_sampled_first_fetches"`
+	ChunkSampledRefetches          uint64                 `json:"chunk_sampled_refetches"`
+	ChunkSampledHistoryEvictions   uint64                 `json:"chunk_sampled_history_evictions"`
+	ChunkSampledReuseNS            uint64                 `json:"chunk_sampled_reuse_ns"`
+	ChunkSampledReuseBytes         uint64                 `json:"chunk_sampled_reuse_bytes"`
+	ChunkSampledRefetchWithin64M   uint64                 `json:"chunk_sampled_refetch_within_64m"`
+	ChunkSampledRefetchWithin256M  uint64                 `json:"chunk_sampled_refetch_within_256m"`
+	ChunkSampledRefetchWithin1G    uint64                 `json:"chunk_sampled_refetch_within_1g"`
+}
+
+type EncryptionReadWindow struct {
+	UnixSeconds             uint64 `json:"unix_seconds"`
+	RequestedPlaintextBytes uint64 `json:"requested_plaintext_bytes"`
+	CiphertextOriginBytes   uint64 `json:"ciphertext_origin_bytes"`
 }
 
 func encryptionReadMetrics(encoded []byte) *EncryptionReadMetrics {
-	if len(encoded) == 0 || len(encoded) > 4096 || !bytes.HasPrefix(bytes.TrimSpace(encoded), []byte("{")) {
+	if len(encoded) == 0 || len(encoded) > 128<<10 || !bytes.HasPrefix(bytes.TrimSpace(encoded), []byte("{")) {
 		return nil
 	}
 	var result EncryptionReadMetrics
 	if err := json.Unmarshal(encoded, &result); err != nil {
 		return nil
 	}
+	if len(result.ReadWindows) > 360 {
+		return nil
+	}
+	for index, window := range result.ReadWindows {
+		if window.UnixSeconds%10 != 0 || index > 0 && result.ReadWindows[index-1].UnixSeconds >= window.UnixSeconds {
+			return nil
+		}
+	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(encoded, &fields); err != nil {
 		return nil
+	}
+	if raw, present := fields["read_windows"]; present {
+		var windows []map[string]json.RawMessage
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &windows) != nil {
+			return nil
+		}
+		for _, window := range windows {
+			for _, name := range []string{"unix_seconds", "requested_plaintext_bytes", "ciphertext_origin_bytes"} {
+				if value, found := window[name]; !found || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+					return nil
+				}
+			}
+		}
 	}
 	for _, name := range []string{"reads", "requested_plaintext_bytes", "rounded_ciphertext_bytes",
 		"ciphertext_origin_calls", "ciphertext_origin_bytes", "ciphertext_origin_ns", "header_decode_ns",
@@ -466,7 +503,10 @@ func encryptionReadMetrics(encoded []byte) *EncryptionReadMetrics {
 		}
 	}
 	for _, name := range []string{"header_validation_calls", "header_validation_ns", "header_validation_coalesced_reads", "chunk_cache_hits",
-		"chunk_cache_misses", "chunk_cache_evictions", "chunk_coalesced_reads"} {
+		"chunk_cache_misses", "chunk_cache_evictions", "chunk_coalesced_reads",
+		"chunk_sampled_first_fetches", "chunk_sampled_refetches", "chunk_sampled_history_evictions",
+		"chunk_sampled_reuse_ns", "chunk_sampled_reuse_bytes", "chunk_sampled_refetch_within_64m",
+		"chunk_sampled_refetch_within_256m", "chunk_sampled_refetch_within_1g", "read_windows_dropped"} {
 		if value, found := fields[name]; found && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 			return nil
 		}

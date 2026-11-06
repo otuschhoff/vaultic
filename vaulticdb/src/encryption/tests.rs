@@ -18,6 +18,42 @@ mod tests {
         Db, WriteBatch,
     };
 
+    #[test]
+    fn sampled_chunk_refetch_history_is_bounded_and_counts_distance() {
+        let metrics = Arc::new(EncryptionReadMetrics::default());
+        let cache = ChunkCache::new(0, metrics.clone());
+        let now = Instant::now();
+        cache.record_fetch_fingerprint(0, 256 << 10, now);
+        cache.record_fetch_fingerprint(1, 128 << 20, now);
+        cache.record_fetch_fingerprint(0, 256 << 10, now + std::time::Duration::from_secs(2));
+        assert_eq!(metrics.chunk_sampled_first_fetches.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.chunk_sampled_refetches.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.chunk_sampled_reuse_ns.load(Ordering::Relaxed), 2_000_000_000);
+        assert_eq!(metrics.chunk_sampled_refetch_within_64m.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.chunk_sampled_refetch_within_256m.load(Ordering::Relaxed), 1);
+        for index in 1..=16384 {
+            cache.record_fetch_fingerprint(index * 64, 1, now);
+        }
+        assert_eq!(cache.state.lock().unwrap().sampled_fetches.len(), 16384);
+        assert_eq!(metrics.chunk_sampled_history_evictions.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn read_windows_are_bounded_and_keep_distinct_byte_counts() {
+        let metrics = EncryptionReadMetrics::default();
+        metrics.record_window_at(21, 100, 0);
+        metrics.record_window_at(29, 0, 256);
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot["read_windows"][0]["unix_seconds"], 20);
+        assert_eq!(snapshot["read_windows"][0]["requested_plaintext_bytes"], 100);
+        assert_eq!(snapshot["read_windows"][0]["ciphertext_origin_bytes"], 256);
+        for seconds in 3..=363 {
+            metrics.record_window_at(seconds * 10, 1, 2);
+        }
+        assert_eq!(metrics.read_windows.lock().unwrap().len(), 360);
+        assert_eq!(metrics.read_windows_dropped.load(Ordering::Relaxed), 2);
+    }
+
     #[derive(Debug, Default)]
     struct CountingStore {
         inner: InMemory,

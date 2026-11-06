@@ -4,13 +4,14 @@ use std::{
     collections::{HashMap, VecDeque},
     env,
     fmt::{Debug, Display, Formatter},
+    hash::{DefaultHasher, Hash, Hasher},
     num::NonZeroUsize,
     ops::Range,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex, RwLock,
     },
-    time::Instant,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -148,6 +149,23 @@ struct EncryptionReadMetrics {
     chunk_cache_bytes: AtomicU64,
     chunk_coalesced_reads: AtomicU64,
     chunk_inflight: AtomicU64,
+    chunk_sampled_first_fetches: AtomicU64,
+    chunk_sampled_refetches: AtomicU64,
+    chunk_sampled_history_evictions: AtomicU64,
+    chunk_sampled_reuse_ns: AtomicU64,
+    chunk_sampled_reuse_bytes: AtomicU64,
+    chunk_sampled_refetch_within_64m: AtomicU64,
+    chunk_sampled_refetch_within_256m: AtomicU64,
+    chunk_sampled_refetch_within_1g: AtomicU64,
+    read_windows: Mutex<VecDeque<EncryptionReadWindow>>,
+    read_windows_dropped: AtomicU64,
+}
+
+#[derive(Default, serde::Serialize)]
+struct EncryptionReadWindow {
+    unix_seconds: u64,
+    requested_plaintext_bytes: u64,
+    ciphertext_origin_bytes: u64,
 }
 
 struct ReadTiming<'counter> {
@@ -178,6 +196,40 @@ impl Drop for ReadTiming<'_> {
 }
 
 impl EncryptionReadMetrics {
+    fn record_window(&self, requested: u64, origin: u64) {
+        let seconds = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.record_window_at(seconds, requested, origin);
+    }
+
+    fn record_window_at(&self, seconds: u64, requested: u64, origin: u64) {
+        let mut windows = self
+            .read_windows
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let bucket =
+            (seconds / 10 * 10).max(windows.back().map_or(0, |window| window.unix_seconds));
+        if windows
+            .back()
+            .is_none_or(|window| window.unix_seconds != bucket)
+        {
+            if windows.len() == 360 {
+                windows.pop_front();
+                self.read_windows_dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            windows.push_back(EncryptionReadWindow {
+                unix_seconds: bucket,
+                ..Default::default()
+            });
+        }
+        let window = windows.back_mut().unwrap();
+        window.requested_plaintext_bytes =
+            window.requested_plaintext_bytes.saturating_add(requested);
+        window.ciphertext_origin_bytes = window.ciphertext_origin_bytes.saturating_add(origin);
+    }
+
     fn snapshot(&self) -> serde_json::Value {
         serde_json::json!({
             "reads": self.reads.load(Ordering::Relaxed),
@@ -205,6 +257,16 @@ impl EncryptionReadMetrics {
             "chunk_cache_bytes": self.chunk_cache_bytes.load(Ordering::Relaxed),
             "chunk_coalesced_reads": self.chunk_coalesced_reads.load(Ordering::Relaxed),
             "chunk_inflight": self.chunk_inflight.load(Ordering::Relaxed),
+            "chunk_sampled_first_fetches": self.chunk_sampled_first_fetches.load(Ordering::Relaxed),
+            "chunk_sampled_refetches": self.chunk_sampled_refetches.load(Ordering::Relaxed),
+            "chunk_sampled_history_evictions": self.chunk_sampled_history_evictions.load(Ordering::Relaxed),
+            "chunk_sampled_reuse_ns": self.chunk_sampled_reuse_ns.load(Ordering::Relaxed),
+            "chunk_sampled_reuse_bytes": self.chunk_sampled_reuse_bytes.load(Ordering::Relaxed),
+            "chunk_sampled_refetch_within_64m": self.chunk_sampled_refetch_within_64m.load(Ordering::Relaxed),
+            "chunk_sampled_refetch_within_256m": self.chunk_sampled_refetch_within_256m.load(Ordering::Relaxed),
+            "chunk_sampled_refetch_within_1g": self.chunk_sampled_refetch_within_1g.load(Ordering::Relaxed),
+            "read_windows": *self.read_windows.lock().unwrap_or_else(|error| error.into_inner()),
+            "read_windows_dropped": self.read_windows_dropped.load(Ordering::Relaxed),
         })
     }
 }
@@ -273,6 +335,8 @@ struct ChunkCacheState {
     bytes: usize,
     flights: HashMap<ChunkKey, Arc<ChunkFlight>>,
     flight_bytes: usize,
+    sampled_fetches: lru::LruCache<u64, (Instant, u64)>,
+    fetched_bytes: u64,
 }
 
 struct ChunkCache {
@@ -362,12 +426,63 @@ impl ChunkCache {
                 bytes: 0,
                 flights: HashMap::new(),
                 flight_bytes: 0,
+                sampled_fetches: lru::LruCache::new(NonZeroUsize::new(16384).unwrap()),
+                fetched_bytes: 0,
             }),
             changed: tokio::sync::Notify::new(),
             capacity,
             limits,
             metrics,
         }
+    }
+
+    fn record_fetch(&self, key: &ChunkKey, length: usize) {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        self.record_fetch_fingerprint(hasher.finish(), length, Instant::now());
+    }
+
+    fn record_fetch_fingerprint(&self, fingerprint: u64, length: usize, now: Instant) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.fetched_bytes = state.fetched_bytes.saturating_add(length as u64);
+        if fingerprint & 63 != 0 {
+            return;
+        }
+        let fetched_bytes = state.fetched_bytes;
+        if let Some((previous, previous_bytes)) = state.sampled_fetches.get(&fingerprint).copied() {
+            let distance = fetched_bytes.saturating_sub(previous_bytes);
+            self.metrics
+                .chunk_sampled_refetches
+                .fetch_add(1, Ordering::Relaxed);
+            self.metrics.chunk_sampled_reuse_ns.fetch_add(
+                now.saturating_duration_since(previous)
+                    .as_nanos()
+                    .min(u64::MAX as u128) as u64,
+                Ordering::Relaxed,
+            );
+            self.metrics
+                .chunk_sampled_reuse_bytes
+                .fetch_add(distance, Ordering::Relaxed);
+            for (bound, counter) in [
+                (64 << 20, &self.metrics.chunk_sampled_refetch_within_64m),
+                (256 << 20, &self.metrics.chunk_sampled_refetch_within_256m),
+                (1 << 30, &self.metrics.chunk_sampled_refetch_within_1g),
+            ] {
+                if distance <= bound {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        } else {
+            self.metrics
+                .chunk_sampled_first_fetches
+                .fetch_add(1, Ordering::Relaxed);
+            if state.sampled_fetches.len() == state.sampled_fetches.cap().get() {
+                self.metrics
+                    .chunk_sampled_history_evictions
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        state.sampled_fetches.put(fingerprint, (now, fetched_bytes));
     }
 
     fn insert(&self, key: ChunkKey, chunk: Arc<AuthenticatedChunk>) {
@@ -1357,6 +1472,7 @@ impl EncryptedObjectStore {
         self.read_metrics
             .ciphertext_origin_bytes
             .fetch_add(ciphertext.len() as u64, Ordering::Relaxed);
+        self.read_metrics.record_window(0, ciphertext.len() as u64);
         drop(timing);
         let plaintext = self
             .decrypt_chunks(location, header, index, ciphertext)
@@ -1451,6 +1567,7 @@ impl EncryptedObjectStore {
                         .await
                         .map_err(Arc::new);
                     if let Ok(chunk) = &result {
+                        guard.cache.record_fetch(&guard.key, chunk.plaintext.len());
                         if let Ok(keyring) = store.keyring.read() {
                             if keyring
                                 .keys
@@ -1508,6 +1625,7 @@ impl EncryptedObjectStore {
         self.read_metrics
             .ciphertext_origin_bytes
             .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        self.read_metrics.record_window(0, bytes.len() as u64);
         drop(fetch);
         let _decode = ReadTiming::new(&self.read_metrics.header_decode_ns);
         let header = decode_header(&bytes)?;
@@ -1653,6 +1771,7 @@ impl ObjectStore for EncryptedObjectStore {
             self.read_metrics
                 .requested_plaintext_bytes
                 .fetch_add(range.len() as u64, Ordering::Relaxed);
+            self.read_metrics.record_window(range.len() as u64, 0);
             let first_chunk = range.start / header.chunk_size;
             let last_chunk = (range.end - 1) / header.chunk_size;
             if cache_range
@@ -1725,6 +1844,7 @@ impl ObjectStore for EncryptedObjectStore {
             self.read_metrics
                 .ciphertext_origin_bytes
                 .fetch_add(ciphertext.len() as u64, Ordering::Relaxed);
+            self.read_metrics.record_window(0, ciphertext.len() as u64);
             drop(fetch);
             let chunks = self
                 .decrypt_chunks(location, header, first_chunk, ciphertext)

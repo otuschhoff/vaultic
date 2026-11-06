@@ -33,11 +33,15 @@ func TestEncryptionReadMetricsCompatibility(test *testing.T) {
 	for _, name := range []string{"header_validation_calls", "header_validation_ns", "header_validation_coalesced_reads", "chunk_cache_hits", "chunk_cache_misses", "chunk_cache_evictions", "chunk_coalesced_reads"} {
 		delete(fields, name)
 	}
+	optional := []string{"chunk_sampled_first_fetches", "chunk_sampled_refetches", "chunk_sampled_history_evictions", "chunk_sampled_reuse_ns", "chunk_sampled_reuse_bytes", "chunk_sampled_refetch_within_64m", "chunk_sampled_refetch_within_256m", "chunk_sampled_refetch_within_1g", "read_windows_dropped"}
+	for _, name := range optional {
+		delete(fields, name)
+	}
 	older, err := json.Marshal(fields)
 	if err != nil || encryptionReadMetrics(older) == nil {
 		test.Fatal("older daemon without chunk counters became unavailable")
 	}
-	for _, name := range []string{"header_validation_calls", "header_validation_ns", "header_validation_coalesced_reads", "chunk_cache_hits", "chunk_cache_misses", "chunk_cache_evictions", "chunk_coalesced_reads"} {
+	for _, name := range append(optional, "header_validation_calls", "header_validation_ns", "header_validation_coalesced_reads", "chunk_cache_hits", "chunk_cache_misses", "chunk_cache_evictions", "chunk_coalesced_reads") {
 		for _, invalid := range []string{"null", "-1", "18446744073709551616", `"invalid"`} {
 			fields[name] = json.RawMessage(invalid)
 			malformed, err := json.Marshal(fields)
@@ -54,6 +58,35 @@ func TestEncryptionReadMetricsCompatibility(test *testing.T) {
 	status = writerStatus(&vaulticdbv1.WriterStatusResponse{Attribution: &vaulticdbv1.AttributionSnapshot{EncryptionReadMetricsJson: extended}})
 	if status.Attribution.EncryptionReads == nil || status.Attribution.EncryptionReads.ChunkCacheHits != 7 || status.Attribution.EncryptionReads.ChunkCoalescedReads != 7 || status.Attribution.EncryptionReads.HeaderValidationNanoseconds != 7 || status.Attribution.EncryptionReads.HeaderValidationCoalescedReads != 7 {
 		test.Fatalf("chunk metrics lost in writer status: %+v", status.Attribution.EncryptionReads)
+	}
+}
+
+func TestEncryptionReadWindowsCompatibility(test *testing.T) {
+	encoded, err := json.Marshal(EncryptionReadMetrics{})
+	if err != nil {
+		test.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		test.Fatal(err)
+	}
+	for _, invalid := range []string{"null", "[null]", "[{}]",
+		`[{"unix_seconds":10,"requested_plaintext_bytes":null,"ciphertext_origin_bytes":1}]`,
+		`[{"unix_seconds":11,"requested_plaintext_bytes":1,"ciphertext_origin_bytes":1}]`,
+		`[{"unix_seconds":10,"requested_plaintext_bytes":1,"ciphertext_origin_bytes":1},{"unix_seconds":10,"requested_plaintext_bytes":1,"ciphertext_origin_bytes":1}]`} {
+		fields["read_windows"] = json.RawMessage(invalid)
+		payload, err := json.Marshal(fields)
+		if err != nil || encryptionReadMetrics(payload) != nil {
+			test.Fatalf("accepted invalid windows: %s (%v)", invalid, err)
+		}
+	}
+	windows := make([]EncryptionReadWindow, 360)
+	for index := range windows {
+		windows[index] = EncryptionReadWindow{UnixSeconds: uint64(index * 10), RequestedPlaintextBytes: 1, CiphertextOriginBytes: 2}
+	}
+	encoded, err = json.Marshal(EncryptionReadMetrics{ReadWindows: windows})
+	if err != nil || encryptionReadMetrics(encoded) == nil {
+		test.Fatal("bounded populated windows became unavailable", err)
 	}
 }
 

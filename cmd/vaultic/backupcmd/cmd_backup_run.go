@@ -411,6 +411,15 @@ func backupEncryptionReadDelta(current, baseline *daemon.EncryptionReadMetrics) 
 		{&result.ChunkCacheMisses, &baseline.ChunkCacheMisses},
 		{&result.ChunkCacheEvictions, &baseline.ChunkCacheEvictions},
 		{&result.ChunkCoalescedReads, &baseline.ChunkCoalescedReads},
+		{&result.ChunkSampledFirstFetches, &baseline.ChunkSampledFirstFetches},
+		{&result.ChunkSampledRefetches, &baseline.ChunkSampledRefetches},
+		{&result.ChunkSampledHistoryEvictions, &baseline.ChunkSampledHistoryEvictions},
+		{&result.ChunkSampledReuseNS, &baseline.ChunkSampledReuseNS},
+		{&result.ChunkSampledReuseBytes, &baseline.ChunkSampledReuseBytes},
+		{&result.ChunkSampledRefetchWithin64M, &baseline.ChunkSampledRefetchWithin64M},
+		{&result.ChunkSampledRefetchWithin256M, &baseline.ChunkSampledRefetchWithin256M},
+		{&result.ChunkSampledRefetchWithin1G, &baseline.ChunkSampledRefetchWithin1G},
+		{&result.ReadWindowsDropped, &baseline.ReadWindowsDropped},
 	}
 	for _, field := range fields {
 		if *field[0] < *field[1] {
@@ -529,8 +538,18 @@ func (run *backupRun) startCriticalPathReporting() func() {
 		defer close(done)
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
+		progress := time.NewTicker(time.Second)
+		defer progress.Stop()
 		for {
 			select {
+			case <-progress.C:
+				if run.globalOptions.JSON {
+					run.term.Print(ui.ToJSONString(struct {
+						MessageType    string            `json:"message_type"`
+						SecondsElapsed float64           `json:"seconds_elapsed"`
+						Reconciliation reconcile.Metrics `json:"reconciliation"`
+					}{"reconciliation_progress", time.Since(started).Seconds(), run.reconciler.Metrics()}))
+				}
 			case <-ticker.C:
 				report()
 			case <-stop:
@@ -1307,6 +1326,9 @@ func configureReconciliationHooks(ctx context.Context, run *backupRun) error {
 		reconciler, err := reconcile.New(ctx, run.targetFS, run.authoritativeEngine.SchemaStore(), reconcile.Options{
 			PathIndexPaths:          run.repo.Config().PathIndexPaths,
 			QueueDepth:              run.options.MetadataQueueDepth,
+			BatchSize:               run.options.MetadataReconciliationBatchSize,
+			CollectionReadAhead:     run.options.MetadataReconciliationReadAhead,
+			ScalarRevisionReads:     run.options.MetadataScalarRevisionReads,
 			PublicationGroupSize:    run.options.MetadataPublicationGroupSize,
 			AtomicPublicationGroups: run.options.MetadataPublicationGroupSize > 4,
 		})

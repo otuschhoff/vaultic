@@ -1087,19 +1087,149 @@ func publicationTestBatch(first, count int) []preparedItem {
 
 type publicationLookupStore struct {
 	*fakeStore
-	lookupMu  sync.Mutex
-	sizes     []int
-	failBatch bool
+	lookupMu      sync.Mutex
+	sizes         []int
+	failBatch     bool
+	failCall      int
+	malformedCall int
 }
 
 func (store *publicationLookupStore) MultiGet(ctx context.Context, keys [][]byte) ([]daemon.KeyValue, []bool, error) {
 	store.lookupMu.Lock()
 	store.sizes = append(store.sizes, len(keys))
+	call := len(store.sizes)
 	store.lookupMu.Unlock()
-	if store.failBatch && len(keys) > 1 {
+	if store.failBatch && len(keys) > 1 || call == store.failCall {
 		return nil, nil, errors.New("injected grouped lookup failure")
 	}
+	if call == store.malformedCall {
+		return nil, nil, nil
+	}
 	return store.fakeStore.MultiGet(ctx, keys)
+}
+
+func TestPublicationRevisionBatchFallbackAndMetrics(t *testing.T) {
+	for _, mode := range []string{"batched", "failed", "malformed", "scalar"} {
+		t.Run(mode, func(t *testing.T) {
+			store := &publicationLookupStore{fakeStore: newFakeStore()}
+			reconciler := &Reconciler{ctx: t.Context(), filesystem: testFilesystem(), store: store}
+			reconciler.options.ScalarRevisionReads = mode == "scalar"
+			batch := publicationTestBatch(0, publicationConcurrency)
+			for index := range batch {
+				batch[index].node.Content = nil
+				batch[index].node.Size, batch[index].stat.Size = 0, 0
+			}
+			published := make(map[string]publishedItem)
+			reconciler.publishInodes(batch, published)
+			store.sizes = nil
+			if mode == "failed" {
+				store.failCall = 2
+			}
+			if mode == "malformed" {
+				store.malformedCall = 2
+			}
+			reconciler.publishInodes(batch, published)
+			want := []int{len(batch), len(batch)}
+			if mode != "batched" {
+				if mode == "scalar" {
+					want = want[:1]
+				}
+				want = append(want, 1, 1, 1, 1)
+			}
+			metrics := reconciler.Metrics()
+			if !slices.Equal(store.sizes, want) || len(reconciler.errors) != 0 || metrics.Reused != uint64(len(batch)) {
+				t.Fatalf("lookups=%v errors=%v metrics=%+v", store.sizes, reconciler.errors, metrics)
+			}
+			if metrics.PointerLookup.Calls != 2 || metrics.RevisionLookup.Calls != uint64(len(want)-1) || metrics.ComparisonNS == 0 {
+				t.Fatalf("missing lookup attribution: %+v", metrics)
+			}
+		})
+	}
+}
+
+func TestCollectionReadAheadPreservesOrderAndDrains(t *testing.T) {
+	for _, readAhead := range []int{0, 1} {
+		t.Run(fmt.Sprint(readAhead), func(t *testing.T) {
+			reconciler, err := New(t.Context(), testFilesystem(), newFakeStore(), Options{Workers: 2, QueueDepth: 1, BatchSize: 2, CollectionReadAhead: readAhead})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for index := 0; index < 8; index++ {
+				reconciler.Observe("/file", "/root/file", fileNode("file", 1))
+			}
+			if err := reconciler.Close(); err != nil {
+				t.Fatal(err)
+			}
+			metrics := reconciler.Metrics()
+			var samples uint64
+			for _, count := range metrics.PreparedQueueSamples {
+				samples += count
+			}
+			if metrics.Observed != 8 || metrics.Scanned != 8 || metrics.WriterWaitFirstNS == 0 || metrics.WriterWaitFillNS == 0 || samples != 9 || metrics.ObservationLastUnixNS < metrics.ObservationFirstUnixNS {
+				t.Fatalf("incomplete collection: %+v", metrics)
+			}
+		})
+	}
+	for _, readAhead := range []int{-1, 2} {
+		if _, err := (Options{CollectionReadAhead: readAhead}).withDefaults(); err == nil {
+			t.Fatal("unbounded read-ahead accepted")
+		}
+	}
+}
+
+func TestPublicationRevisionBatchMissingAndCorruptRecords(t *testing.T) {
+	for _, corrupt := range []bool{false, true} {
+		t.Run(fmt.Sprint(corrupt), func(t *testing.T) {
+			store := &publicationLookupStore{fakeStore: newFakeStore()}
+			reconciler := &Reconciler{ctx: t.Context(), filesystem: testFilesystem(), store: store}
+			batch := publicationTestBatch(0, publicationConcurrency)
+			published := make(map[string]publishedItem)
+			reconciler.publishInodes(batch, published)
+			currentKey := schema.CurrentInodeKey(batch[0].identity.fsid, batch[0].identity.inode)
+			if corrupt {
+				if err := store.Put(t.Context(), currentKey, []byte("corrupt"), false); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				value, _, err := store.Get(t.Context(), currentKey)
+				if err != nil {
+					t.Fatal(err)
+				}
+				pointer, err := schema.UnmarshalCurrentPointer(value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				delete(store.values, string(pointer.RecordKey))
+			}
+			reconciler.publishInodes(batch, make(map[string]publishedItem))
+			if reconciler.Metrics().Reused != 3 || (len(reconciler.errors) != 0) != corrupt {
+				t.Fatalf("changed missing/corrupt behavior: metrics=%+v errors=%v", reconciler.Metrics(), reconciler.errors)
+			}
+		})
+	}
+}
+
+func TestCollectionReadAheadRetainsIndependentBatches(t *testing.T) {
+	reconciler := &Reconciler{options: Options{BatchSize: 2, CollectionReadAhead: 1}, prepared: make(chan preparedItem, 6)}
+	for _, item := range publicationTestBatch(0, 6) {
+		reconciler.prepared <- item
+	}
+	close(reconciler.prepared)
+	var batches [][]preparedItem
+	reconciler.collectBatches(func(batch []preparedItem) { batches = append(batches, batch) })
+	for index, batch := range batches {
+		if batch[0].sourcePath != fmt.Sprintf("/root/file%d", index*2) {
+			t.Fatalf("batch overwritten: %+v", batches)
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	reconciler, err := New(ctx, testFilesystem(), newFakeStore(), Options{Workers: 2, QueueDepth: 1, BatchSize: 2, CollectionReadAhead: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	reconciler.Observe("/file", "/root/file", fileNode("file", 1))
+	_ = reconciler.Close()
 }
 
 func TestPublicationGroupBatchesCurrentLookupsWithoutRetainingCache(t *testing.T) {
@@ -1122,7 +1252,7 @@ func TestPublicationGroupBatchesCurrentLookupsWithoutRetainingCache(t *testing.T
 		}
 	}
 	reconciler.publishInodes(batch, published)
-	if len(reconciler.errors) != 0 || reconciler.Metrics().Reused != uint64(len(batch)) || store.sizes[1] != len(batch) {
+	if len(reconciler.errors) != 0 || reconciler.Metrics().Reused != uint64(len(batch)) || !slices.Equal(store.sizes, []int{len(batch), len(batch), len(batch)}) {
 		t.Fatalf("repeated publication did not load fresh current pointers: lookups=%v metrics=%+v errors=%v", store.sizes, reconciler.Metrics(), reconciler.errors)
 	}
 }
@@ -1567,8 +1697,8 @@ func TestCriticalPathDBBackpressure(t *testing.T) {
 			}
 			for {
 				metrics := reconciler.Metrics()
-				if metrics.ObserveBlocked > 0 && metrics.PrepareBlocked > 0 {
-					if metrics.WriterPhase != "publish_batch" || metrics.InputQueueDepth != 2 || metrics.PreparedQueueDepth != 2 || metrics.Reconciled != 0 || metrics.StatActive != 0 {
+				if metrics.ObserveBlocked > 0 && metrics.PrepareBlocked > 0 && metrics.InputQueueDepth == 2 && metrics.PreparedQueueDepth == 2 && metrics.StatActive == 0 {
+					if metrics.WriterPhase != "publish_batch" || metrics.Reconciled != 0 {
 						t.Fatalf("wrong blocking chain for %s: %+v", stage, metrics)
 					}
 					break

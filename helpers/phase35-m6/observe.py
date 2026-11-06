@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import tempfile
 from pathlib import Path
 import threading
 import time
@@ -84,6 +85,7 @@ def counter_rates(current, previous):
 class TelemetryTail:
     def __init__(self):
         self.offsets = {}
+        self.reconciliation = {}
 
     def read(self, path):
         offset = self.offsets.get(str(path), 0)
@@ -106,7 +108,13 @@ class TelemetryTail:
                                'total_files', 'total_bytes', 'total_files_processed', 'total_bytes_processed',
                                'total_duration', 'data_added', 'data_added_packed')
                     result = {key: value[key] for key in allowed if key in value}
+                elif isinstance(value, dict) and value.get('message_type') in ('reconciliation_progress', 'backup_critical_path'):
+                    result = {key: value[key] for key in ('message_type', 'seconds_elapsed', 'reconciliation', 'encryption_reads') if key in value}
+                    if 'reconciliation' in value:
+                        self.reconciliation[str(path)] = (value.get('seconds_elapsed'), value['reconciliation'])
         self.offsets[str(path)] = offset
+        if result is not None and str(path) in self.reconciliation:
+            result['reconciliation_seconds_elapsed'], result['reconciliation'] = self.reconciliation[str(path)]
         return result
 
 
@@ -140,14 +148,14 @@ def observe(root, cgroup, output, interval):
                 processes.append(current)
             telemetry = []
             stages = []
-            for mode in ('pebble', 'ram', 'kv', 'auto'):
+            for mode in ('pebble', 'ram', 'kv', 'auto', 'group-64'):
                 cell = root / mode
                 if not cell.exists():
                     continue
                 stages += [mode + '/' + directory.name for directory in cell.iterdir()
-                           if directory.is_dir() and (directory / 'stdout.log').exists()
+                           if directory.is_dir() and ((directory / 'stdout.log').exists() or (directory / 'backup.stdout.log').exists())
                            and not (directory / 'result.json').exists()]
-                for name in ('import-telemetry.jsonl', 'index-check-telemetry.jsonl', 'backup/stdout.log'):
+                for name in ('import-telemetry.jsonl', 'index-check-telemetry.jsonl', 'backup/stdout.log', 'backup.stdout.log', 'forced/backup.stdout.log'):
                     path = cell / name
                     if path.exists():
                         value = tail.read(path)
@@ -178,6 +186,16 @@ def observe(root, cgroup, output, interval):
 
 
 class ObservationTests(unittest.TestCase):
+    def test_tail_keeps_reconciliation_through_frequent_status_lines(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'backup.stdout.log'
+            path.write_text(json.dumps({'message_type': 'reconciliation_progress', 'seconds_elapsed': 1,
+                                       'reconciliation': {'observed': 123, 'prepared_queue_depth': 4}}) + '\n' +
+                            json.dumps({'message_type': 'status', 'files_done': 100}) + '\n')
+            sample = TelemetryTail().read(path)
+            self.assertEqual(sample['reconciliation']['observed'], 123)
+            self.assertEqual(sample['reconciliation_seconds_elapsed'], 1)
+
     def test_operation_throughput_and_reset(self):
         def snapshot(timestamp, value, identity='fixture'):
             return {'components': [{'component': 'vaultic', 'captured_unix_ms': timestamp,

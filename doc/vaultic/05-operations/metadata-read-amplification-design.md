@@ -725,6 +725,252 @@ attribution and an authenticated encrypted backup/restore fixture also passed.
 These are correctness and fixture results, not a new 200k performance screen or
 production deployment qualification.
 
+### Reconciliation Diagnostics and 400k Comparisons
+
+The completed scale is explicitly 400,000 entries, with the same immutable SST and
+dedicated-force benchmark policies. Historical 200k fixtures remain sealed and
+unchanged. The new source is frozen under
+`/volume2/NASDA2/vaultic-test-m6/reconcile-parent-fme-cae1-20261105-400k`;
+comparison evidence uses the separate sibling
+`reconcile-read-fme-cae1-20261105-400k`. The 64 GiB logical-source ceiling,
+200 GB combined-RSS ceiling, private ownership checks, disk reserve, read-only
+mount isolation, SIGINT-first cleanup, inherited-WAL conversion receipts and
+restore/reopen correctness requirements remain enforced.
+
+Publication groups now prefetch current pointers and then their immutable
+revision values in two bounded MultiGet rounds. Missing records preserve the
+old behavior; failed or malformed grouped responses fall back to scalar reads.
+The cache is group-scoped and does not retain current pointers between groups.
+Pointer, revision and content-manifest RPC calls/keys/time are reported
+separately. Comparison time excludes content retrieval and debt-resolution RPC
+waits. Existing aggregate timers retain their historical definitions and must
+not be added to the new stage timers.
+
+Collection reports first-item wait, batch-fill wait, ready-batch blocking and
+sampled prepared-queue occupancy (empty, 1--25%, 25--50%, 50--75%, 75--100%).
+JSON backups emit `reconciliation_progress` every second alongside the existing
+30-second full critical-path report. Producer first/last timestamps and observed,
+scanned and queue counters permit windowed production/consumption analysis.
+With read-ahead enabled, collection waits are collector worker time and overlap
+coordinator work; `writer_wait_prepared_ns` remains coordinator phase time.
+
+The following backup controls support isolated comparisons:
+
+| Flag | Default | Scope |
+| --- | --- | --- |
+| `--metadata-reconciliation-scalar-revision-reads` | false | Diagnostic control disabling revision prefetch only |
+| `--metadata-reconciliation-batch-size` | 0 = 5000 | Collection size, maximum 10000 |
+| `--metadata-reconciliation-read-ahead` | 0 | 1 collects the next batch while the coordinator processes the current batch |
+
+Read-ahead is opt-in. Database lookups and publication remain ordered in one
+coordinator. Storage is bounded to an active batch, one queued batch and one
+batch being collected, in addition to the configured existing item queues.
+Hardlink, directory and conflicting-inode handling stays with the coordinator.
+
+Authenticated-chunk diagnostics sample 1/64 of chunk identities into a bounded
+16,384-entry hash history. They count successful sampled first/untracked fetches,
+re-fetches, history evictions, elapsed reuse time and intervening fetched bytes,
+with cumulative 64 MiB / 256 MiB / 1 GiB volume thresholds. No paths, keys or
+plaintext are logged. These are sampled estimates, not exact global unique-chunk
+counts. History eviction can make a revisit appear first/untracked, and fetched
+volume is not LRU stack distance or a counterfactual cache-hit prediction.
+Uncacheable range paths are outside the identity sample.
+
+Read-volume windows separately retain requested SST plaintext and origin
+ciphertext in up to 360 ten-second buckets. All range paths and header origin
+reads contribute to these volume windows. Go transport validates window fields,
+ordering, retention and payload size. Window receipts subtract the writer-before
+snapshot through main-end; boundary buckets are partial and this interval is
+not identical to the exact main-phase counter delta. Dropped windows are
+explicit. An origin-only bucket has unknown amplification, not infinity or zero.
+
+The 400k runner is selected with `--mode=coalesced --inode-limit=400000
+--concurrency-profile=db-scale400k`. Run preparation using `--prepare`, stage the
+pinned qualifier binary, and execute the parent in a private mount namespace.
+The explicit `--reconcile-series` selection then uses the same pinned CLI/native
+binaries for all twelve legs:
+
+- J/K/K/J: scalar versus batched revisions.
+- K/L/L/K: collection read-ahead off versus on.
+- K/M/M/K: collection batches of 5000 versus 500.
+
+Each bracket has two observations per variant and changes one control only.
+J/K/L/M share the 64 MiB authenticated cache, 128 readers, RPC cap 32, group 16,
+2 GiB metadata cache, 512 MiB block cache, eight crypto workers and 1ms batching.
+Neither cache capacity nor encryption encoding is changed speculatively.
+Reports retain observed ratios, all correctness gates and raw evidence; they do
+not claim statistically established causal speedups or sustained qualification
+unless the corresponding evidence exists. No production configuration changes.
+
+#### Accepted 400k Results
+
+The parent and all twelve comparison legs passed exact entry-count, forced
+backup, zero new data blobs, restore, encrypted reopen and unchanged-source
+checks. The frozen source contains 355,389 regular files and 31,813,367,320
+payload bytes; its SHA-256 is
+`0f650dea9f6cd4b768fdb1e27e1e959b73b07adc88ce8c84a551f3fcb2067819`.
+Restore accounting includes ancestor directories and reports 355,571 files.
+Parent preparation took 15,413.768 seconds including verification; its forced
+main took 362.518 seconds. The parent used shared/bounded policies and is not
+an immutable/dedicated-force performance control.
+
+Each row below is one independent ABBA bracket. Times are exact main-phase
+seconds rounded for display, not fixture or command durations. Observed
+throughput ratios divide control median time by candidate median time.
+
+| Comparison | Control Repetitions / Median (s) | Candidate Repetitions / Median (s) | Observed Throughput Ratio |
+| --- | ---: | ---: | ---: |
+| J vs K: revision batching | 487.285, 454.801 / 471.043 | 368.705, 329.700 / 349.203 | 1.349 |
+| K vs L: collection read-ahead | 370.328, 301.713 / 336.021 | 267.755, 325.668 / 296.711 | 1.132 |
+| K vs M: collection batch 500 | 332.849, 339.154 / 336.002 | 338.505, 209.330 / 273.918 | 1.227 |
+
+Revision batching reduced revision lookup calls from 400,000 to 66,691--66,692
+in the J/K bracket, about 83.3% fewer calls for the same 400,000 keys. Revision
+lookup time fell from 188.689--195.959 to 53.684--57.332 seconds. Writer batch
+time fell from 211.374--220.218 to 71.388--75.424 seconds. Pointer lookup time
+remained 51.207--55.266 seconds. These counters include directory/scalar paths,
+not only regular-file publication groups; stage timers overlap and are not
+additive wall-time partitions. Keep the implemented grouped revision reads and
+their scalar error fallback.
+
+After batching, sequential collection spent 203.603--271.198 seconds filling
+batches across the six K legs, versus only 0.013--0.256 seconds waiting for a
+first item. This is not evidence that stat service alone is slow: producer and
+prepared-send blocking coexist with the coordinator collecting and processing
+large batches. With L, coordinator prepared-work wait was 135.030--201.839
+seconds, while collector fill time was 245.603--303.898 worker-seconds and
+overlapped processing. Producer/prepared-send blocking was zero in both L
+captures, but pointer/revision lookup times increased. The bounded overlap
+changes pipeline scheduling rather than reducing encrypted read volume.
+
+M has substantial variance: one run was slightly slower than its neighboring
+K controls, while the other took only 209.330 seconds. The fast M run had
+*higher* pointer/revision and writer batch times than the slower M run, but
+coordinator wait fell from 211.186 to 53.454 seconds. Its origin worker time
+also differed by roughly tenfold despite similar byte volume. Two observations
+cannot establish that the smaller collection batch caused the median gain.
+Keep read-ahead and batch 500 opt-in; retain collection defaults of 0 and 5000.
+
+Exact main-phase origin ciphertext was 49.602--49.693 GB for approximately
+1.720 GB of requested plaintext: 28.840--28.893x logical amplification. All
+twelve main windows recorded zero header validations. Neither revision batching
+nor these collection controls materially reduced the amplified byte volume.
+Broader writer-before/validation windows must not be substituted for these main
+counter deltas. Ten-second volume receipts are phase-dependent: lookup-heavy
+windows often reach roughly 55--65x, with dips followed by renewed high ratios,
+not monotonic cache warming. Boundary buckets are partial and do not isolate
+individual lookup stages.
+
+Each main capture sampled 1,297--1,400 first fetches and 1,481--1,724 re-fetches,
+with no sampled-history evictions. Genuine repeated authenticated fetches are
+therefore present, not merely cold first visits. Mean sampled intervening fetch
+volume was 10.813--11.753 GB; only 0--2 re-fetches per leg were within 64 MiB,
+27--94 within 256 MiB, and 108--258 within 1 GiB. These cumulative sampled
+volume thresholds are not exact LRU stack distances: they do not establish a
+cache-size counterfactual or justify blindly raising the cache. Locality and
+encrypted-read granularity remain more targeted investigation candidates.
+
+Peak combined owned RSS across comparison legs was 40,782,082,048 bytes, below
+the unchanged 200 GB ceiling. Independent root-relative verification passed
+336 leg checksums, 39 series checksums and all 11 launch pins; the parent had
+36 independently verified seals. No owned executable survivors remained and
+all twelve private comparison runtimes were removed. Accepted receipts remain
+sealed under `reconcile-read-fme-cae1-20261105-400k/verified-series.json` and
+each leg's `verified-followup.json` and `group-64/forced/result.json`.
+
+The ratios are descriptive results from two observations per side, with host
+cache and service variability uncontrolled. `causal_speedup_claim` remains
+false. All main intervals were below 600 seconds, so sustained qualification
+is not established. Physical NFS traffic was not measured, and deployment is
+not qualified. No cache/concurrency defaults, production settings, NFS tuning
+or cache flushing were changed by this comparison.
+
+### Immutable Dedicated-Force Baseline
+
+The new default benchmark case is explicitly
+`VAULTICDB_BACKEND_ACCESS_MODE=dedicated-force` plus
+`VAULTICDB_SST_FRESHNESS=immutable`. This is a benchmark baseline, not a change
+to production settings or the application's shared/bounded defaults.
+
+Three forced 200k observations completed with fresh daemon processes, fixed
+128 readers / 32 metadata RPCs / publication group 16, 2 GiB metadata cache,
+512 MiB block cache, eight crypto workers, 1ms batching and 64 MiB authenticated
+chunk retention. Exact restore, encrypted reopen, source identity, zero added
+data blobs, idle-writer and live-policy checks passed for all three.
+
+| Measurement | Run 1 | Run 2 | Run 3 |
+| --- | ---: | ---: | ---: |
+| Main seconds | 201.762 | 192.574 | 187.800 |
+| Entries/second | 991.3 | 1038.6 | 1065.0 |
+| Command seconds | 206.995 | 197.505 | 192.673 |
+| Peak combined owned RSS, GB | 41.039 | 40.876 | 41.105 |
+| Writer batch seconds | 103.436 | 101.712 | 101.327 |
+| Prepared-work wait seconds | 87.708 | 79.781 | 76.269 |
+| Existing-record lookup seconds | 39.166 | 40.449 | 37.621 |
+| Main header validations | 0 | 0 | 0 |
+| Main logical origin ciphertext, GB | 29.275 | 29.281 | 29.276 |
+| Main origin/requested-plaintext ratio | 22.063 | 22.066 | 22.064 |
+| Main origin accumulated worker-seconds | 462.913 | 195.960 | 115.949 |
+| Main crypto queue / service worker-seconds | 2.825 / 16.714 | 3.033 / 16.310 | 3.243 / 15.901 |
+| Size-RPC peak active / cap | 24 / 32 | 24 / 32 | 20 / 32 |
+
+Median main time is 192.574 seconds (1038.6 entries/second). Header freshness
+validation is no longer a main-phase cost. The wider before/after writer-status
+window includes correctness work: it reports one header validation, approximately
+29.46 GB origin bytes and 40k chunk hits per run. Do not mix those counters with
+the main-phase counters above, where chunk hit rate is approximately 16.5%.
+
+Remaining investigation targets, in priority order:
+
+- Reconciliation's read/reuse path: writer batch processing is 51.3--54.0% of
+   main time, with 37.6--40.4 seconds in existing-record lookup. All 200k records
+   are reused. Publication-group and lookup timers overlap; they are not extra
+   wall-time components. Prepared-work wait is another 40.6--43.5%, including
+   batch collection, and does not imply continuous source-stat starvation.
+- Logical read amplification/locality: about 109.4k origin reads fetch 29.28 GB
+   for 1.327 GB of requested plaintext. Main chunk misses are approximately
+   108.4k, with approximately 108.2k evictions. Cold random block misses remain
+   expected; counts alone are not a defect. Profile the lookup path and consider
+   controlled smaller encrypted-read granularity or locality experiments before
+   assuming a larger cache is the answer.
+- MultiGet request work: 255.8--258.0k calls consume 441.8--596.7 accumulated
+   client worker-seconds, predominantly server storage work. Outside-handler
+   time is 77.9--80.0 worker-seconds, not pure network latency. Size-RPC admission
+   wait is only 0.146--0.200 worker-seconds, so this does not justify raising the
+   RPC cap. Durable waits total 0.968--0.997 worker-seconds, engine backpressure
+   is zero, and crypto queue/service totals do not indicate crypto saturation.
+
+Native CPU averages 1.44--1.47 cores within the first-to-last sampled backup CLI
+lifetime; CLI command CPU averages 1.77--1.82 cores. Native CPU windows are
+191--205 seconds and are not exact main-phase bounds. Shared host CPU pressure
+was negligible, but aggregate low CPU use cannot exclude serialization on a
+particular thread or lock. The observer's automatic active-stage labels are
+empty for this runner; PID/lifetime bounds were used instead. Worker timers
+overlap and logical origin bytes are not physical NFS traffic.
+
+Evidence is sealed at
+`/volume2/NASDA2/vaultic-test-m6/immutable-default-fme-cae1-20261105-200k-retry1`:
+84 leg checksums, 12 series checksums and all 11 launch pins were independently
+verified. No owned survivors or private runtimes remained. Derived analysis is
+the separate sibling `immutable-default-fme-cae1-20261105-200k-retry1-bottleneck-analysis.json`
+(SHA-256 `8ba86165f5cdfb4d3093ee8a3b0619ed194ab7c7996d3eefbe8faa6bdd2d193f`).
+
+The retained parent uses a separate WAL handoff, which dedicated-force rejects.
+Only disposable clones were converted to inherited WAL: regular WAL objects
+retain their logical paths and exact ciphertext, differing collisions reject
+the fixture, and a per-object hash receipt is retained. The immutable parent
+and production data were not modified. The first attempt failed a harness-only
+runtime-prefix check before daemon startup; its 19-artifact failed seal and
+original binaries are preserved separately without the `-retry1` suffix.
+
+These are three sequential baseline observations, not a paired causal speedup
+comparison. Host-cache effects are uncontrolled and WAL topology also differs
+from historical captures. The 146k-per-leg validations in the earlier sealed
+chunk screen versus one in the wider new window establish a work-count change,
+not an isolated throughput gain. All main intervals remain below 600 seconds;
+sustained qualification and production deployment are not established. No NFS
+tuning, cache flushing or writer-concurrency defaults were changed.
+
 ### Forced-Only Concurrency Screen
 
 The follow-up optimization scope is forced backups only; unchanged-path work is

@@ -35,6 +35,8 @@ type Options struct {
 	Workers                 int
 	QueueDepth              int
 	BatchSize               int
+	CollectionReadAhead     int
+	ScalarRevisionReads     bool
 	PathIndexPaths          []string
 	Authoritative           *AuthoritativeCrawlScope
 	AtomicInodePublication  bool
@@ -73,6 +75,9 @@ func (options Options) withDefaults() (Options, error) {
 	if options.Workers < 1 || options.QueueDepth < 1 || options.BatchSize < 1 || options.BatchSize > 10_000 {
 		return Options{}, fmt.Errorf("invalid reconciliation worker, queue, or batch limit")
 	}
+	if options.CollectionReadAhead < 0 || options.CollectionReadAhead > 1 {
+		return Options{}, fmt.Errorf("reconciliation collection read-ahead must be zero or one")
+	}
 	if scope := options.Authoritative; scope != nil &&
 		(scope.ScopeID == (schema.ID{}) || scope.RootFSID == 0 || scope.RootInode == 0 || scope.StartFence == 0) {
 		return Options{}, fmt.Errorf("invalid authoritative reconciliation scope")
@@ -81,6 +86,18 @@ func (options Options) withDefaults() (Options, error) {
 }
 
 type Metrics struct {
+	PointerLookup                             LookupMetrics                                   `json:"pointer_lookup"`
+	RevisionLookup                            LookupMetrics                                   `json:"revision_lookup"`
+	ContentLookup                             LookupMetrics                                   `json:"content_lookup"`
+	ComparisonNS                              uint64                                          `json:"comparison_ns"`
+	WriterWaitFirstNS                         uint64                                          `json:"writer_wait_first_ns"`
+	WriterWaitFillNS                          uint64                                          `json:"writer_wait_fill_ns"`
+	BatchReadyBlockedNS                       uint64                                          `json:"batch_ready_blocked_ns"`
+	CollectionBatchSize                       int                                             `json:"collection_batch_size"`
+	CollectionReadAhead                       int                                             `json:"collection_read_ahead"`
+	PreparedQueueSamples                      [5]uint64                                       `json:"prepared_queue_samples"`
+	ObservationFirstUnixNS                    int64                                           `json:"observation_first_unix_ns"`
+	ObservationLastUnixNS                     int64                                           `json:"observation_last_unix_ns"`
 	Observed                                  uint64                                          `json:"observed"`
 	InputQueueDepth                           int                                             `json:"input_queue_depth"`
 	PreparedQueueDepth                        int                                             `json:"prepared_queue_depth"`
@@ -144,6 +161,34 @@ type Metrics struct {
 	AtomicGroupNS                             uint64                                          `json:"atomic_group_ns"`
 }
 
+type LookupMetrics struct {
+	Calls uint64 `json:"calls"`
+	Keys  uint64 `json:"keys"`
+	NS    uint64 `json:"ns"`
+}
+
+type lookupCounters struct {
+	calls atomic.Uint64
+	keys  atomic.Uint64
+	ns    atomic.Uint64
+}
+
+func (counter *lookupCounters) snapshot() LookupMetrics {
+	return LookupMetrics{Calls: counter.calls.Load(), Keys: counter.keys.Load(), NS: counter.ns.Load()}
+}
+
+func (reconciler *Reconciler) lookup(keys [][]byte, counter *lookupCounters) ([]daemon.KeyValue, []bool, error) {
+	started := time.Now()
+	values, found, err := reconciler.store.MultiGet(reconciler.ctx, keys)
+	counter.calls.Add(1)
+	counter.keys.Add(uint64(len(keys)))
+	counter.ns.Add(uint64(time.Since(started)))
+	if err == nil && (len(values) != len(keys) || len(found) != len(keys)) {
+		err = fmt.Errorf("metadata lookup returned inconsistent result lengths")
+	}
+	return values, found, err
+}
+
 type Store interface {
 	Get(context.Context, []byte) ([]byte, bool, error)
 	MultiGet(context.Context, [][]byte) ([]daemon.KeyValue, []bool, error)
@@ -187,8 +232,11 @@ type preparedItem struct {
 }
 
 type existingPublicationRecord struct {
-	value []byte
-	found bool
+	value          []byte
+	found          bool
+	revision       []byte
+	revisionFound  bool
+	revisionLoaded bool
 }
 
 type publishedItem struct {
@@ -228,6 +276,16 @@ type Reconciler struct {
 	prepareBlockedWorkerNS atomic.Uint64
 	statActive             atomic.Int64
 	statWorkerNS           atomic.Uint64
+	pointerLookup          lookupCounters
+	revisionLookup         lookupCounters
+	contentLookup          lookupCounters
+	comparisonNS           atomic.Uint64
+	writerWaitFirstNS      atomic.Uint64
+	writerWaitFillNS       atomic.Uint64
+	batchReadyBlockedNS    atomic.Uint64
+	preparedQueueSamples   [5]atomic.Uint64
+	observationFirstUnixNS atomic.Int64
+	observationLastUnixNS  atomic.Int64
 	writerPhase            atomic.Pointer[writerPhase]
 	writerWaitPreparedNS   atomic.Uint64
 	writerBatchNS          atomic.Uint64
@@ -314,6 +372,13 @@ func (reconciler *Reconciler) Observe(snapshotPath, sourcePath string, node *dat
 	if node == nil {
 		return
 	}
+	now := time.Now().UnixNano()
+	reconciler.observationFirstUnixNS.CompareAndSwap(0, now)
+	for previous := reconciler.observationLastUnixNS.Load(); now > previous; previous = reconciler.observationLastUnixNS.Load() {
+		if reconciler.observationLastUnixNS.CompareAndSwap(previous, now) {
+			break
+		}
+	}
 	item := reconciler.pool.Get().(*workItem)
 	item.snapshotPath, item.sourcePath, item.node = snapshotPath, sourcePath, *node
 	item.node.Content = append(item.node.Content[:0:0], node.Content...)
@@ -357,6 +422,12 @@ func (reconciler *Reconciler) Close() error {
 
 func (reconciler *Reconciler) Metrics() Metrics {
 	metrics := Metrics{
+		PointerLookup: reconciler.pointerLookup.snapshot(), RevisionLookup: reconciler.revisionLookup.snapshot(),
+		ContentLookup: reconciler.contentLookup.snapshot(), ComparisonNS: reconciler.comparisonNS.Load(),
+		WriterWaitFirstNS: reconciler.writerWaitFirstNS.Load(), WriterWaitFillNS: reconciler.writerWaitFillNS.Load(),
+		BatchReadyBlockedNS: reconciler.batchReadyBlockedNS.Load(),
+		CollectionBatchSize: reconciler.options.BatchSize, CollectionReadAhead: reconciler.options.CollectionReadAhead,
+		ObservationFirstUnixNS: reconciler.observationFirstUnixNS.Load(), ObservationLastUnixNS: reconciler.observationLastUnixNS.Load(),
 		Observed: reconciler.observed.Load(), InputQueueDepth: len(reconciler.input),
 		PreparedQueueDepth: len(reconciler.prepared), QueueCapacity: cap(reconciler.input),
 		ObserveBlocked: reconciler.observeBlocked.Load(), ObserveBlockCalls: reconciler.observeBlockCalls.Load(),
@@ -406,7 +477,12 @@ func (reconciler *Reconciler) Metrics() Metrics {
 	for index := range metrics.PublicationGroups {
 		metrics.PublicationGroups[index] = reconciler.publicationGroups[index].Load()
 	}
-	if store, ok := reconciler.store.(interface{ PublicationMetrics() daemon.PublicationMetrics }); ok {
+	for index := range metrics.PreparedQueueSamples {
+		metrics.PreparedQueueSamples[index] = reconciler.preparedQueueSamples[index].Load()
+	}
+	if store, ok := reconciler.store.(interface {
+		PublicationMetrics() daemon.PublicationMetrics
+	}); ok {
 		stages := store.PublicationMetrics()
 		metrics.PublicationStages = &stages
 	}
@@ -540,7 +616,7 @@ func (reconciler *Reconciler) contentIDs(record schema.InodeRevision) ([]schema.
 		for index := range keys {
 			keys[index] = schema.ContentManifestKey(record.ContentManifestID, uint32(index))
 		}
-		values, found, err := reconciler.store.MultiGet(reconciler.ctx, keys)
+		values, found, err := reconciler.lookup(keys, &reconciler.contentLookup)
 		if err != nil {
 			return nil, err
 		}
@@ -657,21 +733,28 @@ func (reconciler *Reconciler) writer() {
 	var directories []preparedItem
 	hardlinks := make(map[identity][]preparedItem)
 	published := make(map[string]publishedItem)
-	batch := make([]preparedItem, 0, reconciler.options.BatchSize)
-	for item := range reconciler.prepared {
-		batch = append(batch, item)
-		if len(batch) == reconciler.options.BatchSize {
-			reconciler.setWriterPhase("publish_batch", &reconciler.writerWaitPreparedNS)
-			reconciler.processBatch(batch, &directories, hardlinks, published)
-			batch = batch[:0]
-			reconciler.setWriterPhase("wait_prepared", &reconciler.writerBatchNS)
-		}
-	}
-	reconciler.setWriterPhase("publish_batch", &reconciler.writerWaitPreparedNS)
-	if len(batch) > 0 {
+	process := func(batch []preparedItem) {
+		reconciler.setWriterPhase("publish_batch", &reconciler.writerWaitPreparedNS)
 		reconciler.processBatch(batch, &directories, hardlinks, published)
+		reconciler.setWriterPhase("wait_prepared", &reconciler.writerBatchNS)
 	}
-	reconciler.setWriterPhase("publish_hardlinks", &reconciler.writerBatchNS)
+	if reconciler.options.CollectionReadAhead == 1 {
+		batches := make(chan []preparedItem, 1)
+		go func() {
+			defer close(batches)
+			reconciler.collectBatches(func(batch []preparedItem) {
+				started := time.Now()
+				batches <- batch
+				reconciler.batchReadyBlockedNS.Add(uint64(time.Since(started)))
+			})
+		}()
+		for batch := range batches {
+			process(batch)
+		}
+	} else {
+		reconciler.collectBatches(process)
+	}
+	reconciler.setWriterPhase("publish_hardlinks", &reconciler.writerWaitPreparedNS)
 	reconciler.publishHardlinks(hardlinks, published)
 	reconciler.setWriterPhase("publish_directories", &reconciler.writerHardlinksNS)
 	reconciler.publishDirectories(directories, published)
@@ -680,6 +763,41 @@ func (reconciler *Reconciler) writer() {
 		reconciler.recordError(err)
 	}
 	reconciler.setWriterPhase("done", &reconciler.writerRootNS)
+}
+
+func (reconciler *Reconciler) collectBatches(deliver func([]preparedItem)) {
+	batch := make([]preparedItem, 0, reconciler.options.BatchSize)
+	for {
+		depth, capacity := len(reconciler.prepared), cap(reconciler.prepared)
+		bucket := 0
+		if depth > 0 && capacity > 0 {
+			bucket = 1 + (depth*4-1)/capacity
+		}
+		reconciler.preparedQueueSamples[bucket].Add(1)
+		started := time.Now()
+		item, open := <-reconciler.prepared
+		elapsed := uint64(time.Since(started))
+		if len(batch) == 0 {
+			reconciler.writerWaitFirstNS.Add(elapsed)
+		} else {
+			reconciler.writerWaitFillNS.Add(elapsed)
+		}
+		if !open {
+			break
+		}
+		batch = append(batch, item)
+		if len(batch) == reconciler.options.BatchSize {
+			deliver(batch)
+			if reconciler.options.CollectionReadAhead == 1 {
+				batch = make([]preparedItem, 0, reconciler.options.BatchSize)
+			} else {
+				batch = batch[:0]
+			}
+		}
+	}
+	if len(batch) > 0 {
+		deliver(batch)
+	}
 }
 
 func (reconciler *Reconciler) setWriterPhase(name string, elapsed *atomic.Uint64) {
@@ -1109,13 +1227,37 @@ func (reconciler *Reconciler) prefetchExistingPublicationRecords(items []prepare
 		keys[index] = schema.CurrentInodeKey(item.identity.fsid, item.identity.inode)
 	}
 	started := time.Now()
-	values, found, err := reconciler.store.MultiGet(reconciler.ctx, keys)
+	values, found, err := reconciler.lookup(keys, &reconciler.pointerLookup)
 	reconciler.existingRecordLookupNS.Add(uint64(time.Since(started)))
 	if err != nil || len(values) != len(items) || len(found) != len(items) {
 		return
 	}
 	for index := range items {
 		items[index].existingRecord = &existingPublicationRecord{value: values[index].Value, found: found[index]}
+	}
+	revisionKeys := make([][]byte, 0, len(items))
+	indices := make([]int, 0, len(items))
+	for index := range items {
+		if !found[index] {
+			continue
+		}
+		pointer, decodeErr := schema.UnmarshalCurrentPointer(values[index].Value)
+		if decodeErr != nil {
+			continue
+		}
+		revisionKeys = append(revisionKeys, pointer.RecordKey)
+		indices = append(indices, index)
+	}
+	if len(revisionKeys) == 0 || reconciler.options.ScalarRevisionReads {
+		return
+	}
+	revisions, revisionFound, err := reconciler.lookup(revisionKeys, &reconciler.revisionLookup)
+	if err != nil || len(revisions) != len(indices) || len(revisionFound) != len(indices) {
+		return
+	}
+	for offset, index := range indices {
+		record := items[index].existingRecord
+		record.revision, record.revisionFound, record.revisionLoaded = revisions[offset].Value, revisionFound[offset], true
 	}
 }
 
@@ -1130,7 +1272,7 @@ func (reconciler *Reconciler) lookupExistingPublicationRecord(
 	}
 	started := time.Now()
 	defer func() { reconciler.existingRecordLookupNS.Add(uint64(time.Since(started))) }()
-	values, found, err := reconciler.store.MultiGet(reconciler.ctx, [][]byte{currentKey})
+	values, found, err := reconciler.lookup([][]byte{currentKey}, &reconciler.pointerLookup)
 	if err != nil {
 		return nil, false, false, err
 	}
@@ -1666,9 +1808,24 @@ func (reconciler *Reconciler) reuseExistingRecord(
 	if err != nil {
 		return nil, false, false, err
 	}
-	existing, found, err := reconciler.store.MultiGet(reconciler.ctx, [][]byte{pointer.RecordKey})
+	var existing []daemon.KeyValue
+	var found []bool
+	if record := item.existingRecord; record != nil && record.revisionLoaded && bytes.Equal(record.value, pointerValue) {
+		existing, found = []daemon.KeyValue{{Value: record.revision}}, []bool{record.revisionFound}
+	} else {
+		existing, found, err = reconciler.lookup([][]byte{pointer.RecordKey}, &reconciler.revisionLookup)
+	}
 	if err != nil || !found[0] {
 		return nil, false, false, err
+	}
+	comparisonStarted := time.Now()
+	var excluded time.Duration
+	defer func() { reconciler.comparisonNS.Add(uint64(time.Since(comparisonStarted) - excluded)) }()
+	loadContent := func(record schema.InodeRevision) ([]schema.ID, error) {
+		started := time.Now()
+		content, err := reconciler.contentIDs(record)
+		excluded += time.Since(started)
+		return content, err
 	}
 	previousPath := ""
 	if directory {
@@ -1684,7 +1841,7 @@ func (reconciler *Reconciler) reuseExistingRecord(
 			return
 		}
 		if previous, err := schema.UnmarshalInodeRevision(existing[0].Value); err == nil {
-			*priorContent, _ = reconciler.contentIDs(previous)
+			*priorContent, _ = loadContent(previous)
 		}
 	}
 	if !bytes.Equal(existing[0].Value, value) {
@@ -1695,7 +1852,7 @@ func (reconciler *Reconciler) reuseExistingRecord(
 	if !directory {
 		record, decodeErr := schema.UnmarshalInodeRevision(existing[0].Value)
 		if decodeErr == nil && record.Freshness == schema.FreshnessVerified {
-			existingContent, contentErr := reconciler.contentIDs(record)
+			existingContent, contentErr := loadContent(record)
 			reusable = contentErr == nil && equalSchemaIDs(existingContent, content)
 		}
 	}
@@ -1703,7 +1860,10 @@ func (reconciler *Reconciler) reuseExistingRecord(
 		capturePriorContent()
 		return nil, pathChanged, false, nil
 	}
-	if err := reconciler.store.ResolveCrawlDebt(reconciler.ctx, item.debtKeys); err != nil {
+	debtStarted := time.Now()
+	debtErr := reconciler.store.ResolveCrawlDebt(reconciler.ctx, item.debtKeys)
+	excluded += time.Since(debtStarted)
+	if err := debtErr; err != nil {
 		return nil, false, false, err
 	}
 	return pointer.RecordKey, pathChanged, true, nil

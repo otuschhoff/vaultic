@@ -784,7 +784,31 @@ const publicationScale200kRoot = "/volume2/NASDA2/vaultic-test-m6/forced-scale-f
 
 const publicationChunk200kRoot = "/volume2/NASDA2/vaultic-test-m6/chunk-compare-fme-cae1-20261104-200k"
 
+const publicationImmutable200kRoot = "/volume2/NASDA2/vaultic-test-m6/immutable-default-fme-cae1-20261105-200k-retry1"
+
+const publicationScale400kRoot = "/volume2/NASDA2/vaultic-test-m6/reconcile-parent-fme-cae1-20261105-400k"
+const publicationRead400kRoot = "/volume2/NASDA2/vaultic-test-m6/reconcile-read-fme-cae1-20261105-400k"
+const publicationRead400kBin = "/root/proj/vaultic/bin/phase35-reconcile400k/linux-amd64"
+
+func publicationRead400kVariant(variant string) bool {
+	return variant == "J" || variant == "K" || variant == "L" || variant == "M"
+}
+
 func validatePublicationChunkLeg(root, variant string) error {
+	if publicationRead400kVariant(variant) {
+		for index, expected := range []string{"J", "K", "K", "J", "K", "L", "L", "K", "K", "M", "M", "K"} {
+			if variant == expected && root == filepath.Join(publicationRead400kRoot, fmt.Sprintf("leg-%02d-%s", index+1, expected)) {
+				return nil
+			}
+		}
+	}
+	if variant == "I" {
+		for index := 1; index <= 3; index++ {
+			if root == filepath.Join(publicationImmutable200kRoot, fmt.Sprintf("leg-%02d-I", index)) {
+				return nil
+			}
+		}
+	}
 	schedule := []string{"A", "B", "C", "C", "B", "A", "B", "C", "A", "A", "C", "B", "C", "D", "D", "C"}
 	for index, expected := range schedule {
 		if root == filepath.Join(publicationChunk200kRoot, fmt.Sprintf("leg-%02d-%s", index+1, expected)) && variant == expected {
@@ -795,6 +819,15 @@ func validatePublicationChunkLeg(root, variant string) error {
 }
 
 func TestPublicationChunkComparisonPolicy(t *testing.T) {
+	for index, variant := range []string{"J", "K", "K", "J", "K", "L", "L", "K", "K", "M", "M", "K"} {
+		root := filepath.Join(publicationRead400kRoot, fmt.Sprintf("leg-%02d-%s", index+1, variant))
+		if err := validatePublicationChunkLeg(root, variant); err != nil {
+			t.Fatal(err)
+		}
+		if validatePublicationChunkLeg(root, "I") == nil || validatePublicationChunkLeg(root+"/retry", variant) == nil {
+			t.Fatal("400k routing accepted scope mismatch")
+		}
+	}
 	for _, item := range []struct {
 		name, variant string
 		valid         bool
@@ -817,6 +850,9 @@ func TestPublicationChunkComparisonPolicy(t *testing.T) {
 func publicationScaleInodeLimit(selector, root string) (uint64, error) {
 	if selector == "" {
 		return 100_000, nil
+	}
+	if selector == "400000" && root == publicationScale400kRoot {
+		return 400_000, nil
 	}
 	if selector != "200000" || root != publicationScale200kRoot {
 		return 0, fmt.Errorf("200k scaling requires its explicit fresh private root")
@@ -860,6 +896,10 @@ func TestPublicationScaleInodeLimit(t *testing.T) {
 	}{
 		{"", "legacy", 100_000},
 		{"200000", publicationScale200kRoot, 200_000},
+		{"400000", publicationScale400kRoot, 400_000},
+		{"400000", publicationScale200kRoot, 0},
+		{"200000", publicationScale400kRoot, 0},
+		{"400000", publicationScale400kRoot + "/retry", 0},
 		{"200000", "/volume2/NASDA2/vaultic-test-m6/forced-scale-fme-cae1-20261103-200k", 0},
 		{"200000", "/volume2/NASDA2/vaultic-test-m6/forced-scale-fme-cae1-20261104-200k-retry1", 0},
 		{"100000", publicationScale200kRoot, 0},
@@ -885,13 +925,13 @@ func TestPrepareFmeCAE1Qualification(t *testing.T) {
 	}
 	limit, err := publicationScaleInodeLimit(os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT"), root)
 	rtest.OK(t, err)
-	if limit == 200_000 {
+	if limit >= 200_000 {
 		rtest.OK(t, validatePublicationQualificationRoot(root, "/volume2/NASDA2/vaultic-test-m6"))
 	} else {
 		rtest.OK(t, os.Mkdir(root, 0700))
 	}
 	rtest.OK(t, os.Chmod(root, 0700))
-	if limit != 200_000 {
+	if limit < 200_000 {
 		rtest.OK(t, os.WriteFile(filepath.Join(root, ".nobackup"), []byte("Disposable Phase 35 throughput qualification.\n"), 0600))
 	}
 	rtest.OK(t, os.Chmod(filepath.Join(root, ".nobackup"), 0600))
@@ -910,7 +950,7 @@ func TestPrepareFmeCAE1Qualification(t *testing.T) {
 	if files == 0 || size > 64<<30 {
 		t.Fatal("selected source is empty or exceeds the 64 GiB logical-byte safety ceiling")
 	}
-	if limit == 200_000 {
+	if limit >= 200_000 {
 		original := manifest.Source
 		manifest.Source = filepath.Join(root, "input")
 		rtest.OK(t, os.Mkdir(manifest.Source, 0700))
@@ -1130,6 +1170,16 @@ func TestPublicationForceInodeLimit(t *testing.T) {
 	}
 }
 
+func TestPublicationScale400kQualification(t *testing.T) {
+	if os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT") != "400000" {
+		t.Skip("400k scaling qualification not selected")
+	}
+	if !t.Run("prepare", TestPrepareFmeCAE1Qualification) {
+		return
+	}
+	t.Run("backup", TestPublicationBackupQualification)
+}
+
 func TestPublicationScale200kQualification(t *testing.T) {
 	if os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT") != "200000" {
 		t.Skip("200k scaling qualification not selected")
@@ -1158,10 +1208,15 @@ func TestPublicationBackupQualification(t *testing.T) {
 	forceCompare := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_FORCE_COMPARE")
 	scaleLimit, err := publicationScaleInodeLimit(os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT"), root)
 	rtest.OK(t, err)
-	scale200k := scaleLimit == 200_000
+	scale200k := scaleLimit == 200_000 || scaleLimit == 400_000
+	scaleProfile := fmt.Sprintf("db-scale%dk", scaleLimit/1000)
+	scaleBuild := "/root/proj/vaultic/bin/phase35-forced-followup/linux-amd64"
+	if scaleLimit == 400_000 {
+		scaleBuild = publicationRead400kBin
+	}
 	if scale200k && (onDemand != "1" || unchanged != "" || forceCompare != "" || resumeVerification != "" ||
 		os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ORDER") != "64" || os.Getenv("VAULTIC_PHASE35_METADATA_READ_FORCE_ONLY") != "1" ||
-		os.Getenv("VAULTIC_PHASE35_METADATA_READ_CONCURRENCY_PROFILE") != "db-scale200k" || os.Getenv("VAULTICDB_CRYPTO_THREADS") != "8") {
+		os.Getenv("VAULTIC_PHASE35_METADATA_READ_CONCURRENCY_PROFILE") != scaleProfile || os.Getenv("VAULTICDB_CRYPTO_THREADS") != "8") {
 		t.Fatal("200k scaling requires a fresh forced-only single-cell profile")
 	}
 	expanded := os.Getenv("VAULTIC_PHASE35_METADATA_READ_INODE_LIMIT")
@@ -1169,7 +1224,7 @@ func TestPublicationBackupQualification(t *testing.T) {
 	rtest.OK(t, err)
 	var metadataReadFlags []string
 	if scale200k {
-		tuning, err := publicationDBProfile("db-scale200k")
+		tuning, err := publicationDBProfile(scaleProfile)
 		rtest.OK(t, err)
 		metadataReadFlags = tuning.Flags
 	}
@@ -1200,7 +1255,7 @@ func TestPublicationBackupQualification(t *testing.T) {
 			selected != "/root/proj/vaultic/bin/phase35-critical-path-paired-reads/linux-amd64/vaultic" &&
 			!(forceCompare == "1" && selected == "/root/proj/vaultic/bin/phase35-force-10k/linux-amd64/vaultic") &&
 			!(expanded == "50000" && selected == "/root/proj/vaultic/bin/phase35-metadata-read/linux-amd64/vaultic") &&
-			!(scale200k && selected == "/root/proj/vaultic/bin/phase35-forced-followup/linux-amd64/vaultic") {
+			!(scale200k && selected == filepath.Join(scaleBuild, "vaultic")) {
 			t.Fatal("candidate is not the separate critical-path build")
 		}
 		encoded, err := os.ReadFile(selected)
@@ -1214,7 +1269,7 @@ func TestPublicationBackupQualification(t *testing.T) {
 	if selected := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_NATIVE"); selected != "" {
 		if (forceCompare != "1" && !scale200k) || (selected != "/root/proj/vaultic/bin/phase35-force-10k/linux-amd64/vaulticdb" &&
 			!(expanded == "50000" && selected == "/root/proj/vaultic/bin/phase35-metadata-read/linux-amd64/vaulticdb") &&
-			!(scale200k && selected == "/root/proj/vaultic/bin/phase35-forced-followup/linux-amd64/vaulticdb")) {
+			!(scale200k && selected == filepath.Join(scaleBuild, "vaulticdb"))) {
 			t.Fatal("native override requires the private force-comparison build")
 		}
 		encoded, err := os.ReadFile(selected)
@@ -1227,7 +1282,7 @@ func TestPublicationBackupQualification(t *testing.T) {
 	if expanded != "" && (candidate != "/root/proj/vaultic/bin/phase35-metadata-read/linux-amd64/vaultic" || binary != "/root/proj/vaultic/bin/phase35-metadata-read/linux-amd64/vaulticdb") {
 		t.Fatal("expanded scope requires the measurement-pinned metadata-read binaries")
 	}
-	if scale200k && (candidate != "/root/proj/vaultic/bin/phase35-forced-followup/linux-amd64/vaultic" || binary != "/root/proj/vaultic/bin/phase35-forced-followup/linux-amd64/vaulticdb") {
+	if scale200k && (candidate != filepath.Join(scaleBuild, "vaultic") || binary != filepath.Join(scaleBuild, "vaulticdb")) {
 		t.Fatal("200k scaling requires the separately pinned telemetry builds")
 	}
 	var marker struct {
@@ -1939,7 +1994,7 @@ func publicationDBProfile(profile string) (publicationDBTuning, error) {
 		tuning.MetaCacheBytes = 1 << 30
 	case "db-cache4g":
 		tuning.MetaCacheBytes = 4 << 30
-	case "db-scale200k":
+	case "db-scale200k", "db-scale400k":
 		tuning.MetaCacheBytes = 2 << 30
 		tuning.Flags[0] = "--read-concurrency=128"
 		tuning.Flags[3] = "--metadata-publication-group-size=16"
@@ -2239,6 +2294,91 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 	publicationQualificationForceComparison(t, cell, source, candidate, options, current, &owner, parent, paths, digest, regularFiles, files, size, extraFlags...)
 }
 
+func mergePublicationInheritedWAL(dataDir, repositoryHash string) error {
+	source := filepath.Join(dataDir, "wal", repositoryHash, "db", "wal")
+	target := filepath.Join(dataDir, repositoryHash, "db", "wal")
+	manifest := make(map[string]string)
+	err := filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() || info.Size() > 64<<20 {
+			return fmt.Errorf("unsafe WAL fixture entry %s", path)
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		destination := filepath.Join(target, relative)
+		if existing, err := os.ReadFile(destination); err == nil {
+			if !bytes.Equal(existing, contents) {
+				return fmt.Errorf("WAL collision differs at %s", relative)
+			}
+		} else if !os.IsNotExist(err) {
+			return err
+		} else {
+			if err := os.MkdirAll(filepath.Dir(destination), 0700); err != nil {
+				return err
+			}
+			if err := os.Chmod(filepath.Dir(destination), 0700); err != nil {
+				return err
+			}
+			if err := os.WriteFile(destination, contents, 0600); err != nil {
+				return err
+			}
+			if err := os.Chmod(destination, 0600); err != nil {
+				return err
+			}
+		}
+		manifest[relative] = fmt.Sprintf("%x", sha256.Sum256(contents))
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(manifest)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dataDir, "wal-inheritance.json"), encoded, 0600)
+}
+
+func TestPublicationImmutableDefaultPolicy(t *testing.T) {
+	for index := 1; index <= 3; index++ {
+		rtest.OK(t, validatePublicationChunkLeg(filepath.Join(publicationImmutable200kRoot, fmt.Sprintf("leg-%02d-I", index)), "I"))
+	}
+	if validatePublicationChunkLeg(filepath.Join(publicationImmutable200kRoot, "leg-04-I"), "I") == nil {
+		t.Fatal("unscheduled leg accepted")
+	}
+	root := t.TempDir()
+	source := filepath.Join(root, "wal", "fixture", "db", "wal")
+	target := filepath.Join(root, "fixture", "db", "wal")
+	rtest.OK(t, os.MkdirAll(source, 0700))
+	rtest.OK(t, os.MkdirAll(target, 0700))
+	rtest.OK(t, os.WriteFile(filepath.Join(source, "1.sst"), []byte("ciphertext"), 0600))
+	rtest.OK(t, mergePublicationInheritedWAL(root, "fixture"))
+	contents, err := os.ReadFile(filepath.Join(target, "1.sst"))
+	rtest.OK(t, err)
+	if string(contents) != "ciphertext" {
+		t.Fatal("WAL bytes changed")
+	}
+	rtest.OK(t, os.WriteFile(filepath.Join(source, "1.sst"), []byte("different"), 0600))
+	if mergePublicationInheritedWAL(root, "fixture") == nil {
+		t.Fatal("different WAL collision accepted")
+	}
+}
+
 func TestPublicationChunk200kComparison(t *testing.T) {
 	variant := os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT")
 	if variant == "" {
@@ -2246,14 +2386,33 @@ func TestPublicationChunk200kComparison(t *testing.T) {
 	}
 	root := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT")
 	rtest.OK(t, validatePublicationChunkLeg(root, variant))
-	rtest.OK(t, validatePublicationQualificationRoot(root, publicationChunk200kRoot))
-	if os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT") != "200000" ||
+	seriesRoot := publicationChunk200kRoot
+	limit, profile, parentRoot := 200000, "db-scale200k", publicationScale200kRoot
+	if publicationRead400kVariant(variant) {
+		seriesRoot, limit, profile, parentRoot = publicationRead400kRoot, 400000, "db-scale400k", publicationScale400kRoot
+	}
+	if variant == "I" || publicationRead400kVariant(variant) {
+		if variant == "I" {
+			seriesRoot = publicationImmutable200kRoot
+		}
+		if os.Getenv("VAULTICDB_BACKEND_ACCESS_MODE") != "dedicated-force" || os.Getenv("VAULTICDB_SST_FRESHNESS") != "immutable" {
+			t.Fatal("immutable default policies differ")
+		}
+	}
+	rtest.OK(t, validatePublicationQualificationRoot(root, seriesRoot))
+	if os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT") != fmt.Sprint(limit) ||
 		os.Getenv("VAULTIC_PHASE35_METADATA_READ_FORCE_ONLY") != "1" ||
-		os.Getenv("VAULTIC_PHASE35_METADATA_READ_CONCURRENCY_PROFILE") != "db-scale200k" ||
+		os.Getenv("VAULTIC_PHASE35_METADATA_READ_CONCURRENCY_PROFILE") != profile ||
 		os.Getenv("VAULTICDB_CRYPTO_THREADS") != "8" {
 		t.Fatal("chunk comparison requires the fixed forced-only 200k profile")
 	}
 	binRoot := "/root/proj/vaultic/bin/phase35-chunk200k/linux-amd64"
+	if variant == "I" {
+		binRoot = "/root/proj/vaultic/bin/phase35-immutable200k-retry1/linux-amd64"
+	}
+	if publicationRead400kVariant(variant) {
+		binRoot = publicationRead400kBin
+	}
 	candidate, binary := filepath.Join(binRoot, "vaultic"), filepath.Join(binRoot, "new/vaulticdb")
 	if variant == "A" {
 		binary = filepath.Join(binRoot, "old/vaulticdb")
@@ -2281,7 +2440,7 @@ func TestPublicationChunk200kComparison(t *testing.T) {
 			t.Fatal("chunk comparison executable pin differs")
 		}
 	}
-	parentCell := filepath.Join(publicationScale200kRoot, "group-64")
+	parentCell := filepath.Join(parentRoot, "group-64")
 	var receipt struct {
 		RestoreVerified bool   `json:"restore_verified"`
 		ReopenVerified  bool   `json:"reopen_verified"`
@@ -2293,16 +2452,33 @@ func TestPublicationChunk200kComparison(t *testing.T) {
 	encoded, err := os.ReadFile(filepath.Join(parentCell, "result.json"))
 	rtest.OK(t, err)
 	rtest.OK(t, json.Unmarshal(encoded, &receipt))
-	if !receipt.RestoreVerified || !receipt.ReopenVerified || receipt.Files != 178257 || receipt.Bytes != 23520039140 ||
-		receipt.InputSHA256 != "c1f7faee11872b1fac2f0af5d242c7a30f51ddc426bfd3e5c93b7200b3eefc83" {
+	expectedFiles, expectedBytes, expectedRegular := uint64(178257), uint64(23520039140), uint64(178208)
+	expectedDigest := "c1f7faee11872b1fac2f0af5d242c7a30f51ddc426bfd3e5c93b7200b3eefc83"
+	if limit == 400000 {
+		var sourceReceipt struct {
+			Entries      int    `json:"entries"`
+			Files        uint64 `json:"files"`
+			Bytes        uint64 `json:"bytes"`
+			RegularFiles uint64 `json:"regular_files"`
+			SHA256       string `json:"sha256"`
+		}
+		encoded, err := os.ReadFile(filepath.Join(parentRoot, "source-observation.json"))
+		rtest.OK(t, err)
+		rtest.OK(t, json.Unmarshal(encoded, &sourceReceipt))
+		if sourceReceipt.Entries != limit || sourceReceipt.Bytes > 64<<30 || sourceReceipt.RegularFiles == 0 {
+			t.Fatal("400k parent source scope differs")
+		}
+		expectedFiles, expectedBytes, expectedRegular, expectedDigest = sourceReceipt.Files, sourceReceipt.Bytes, sourceReceipt.RegularFiles, sourceReceipt.SHA256
+	}
+	if !receipt.RestoreVerified || !receipt.ReopenVerified || receipt.Files != expectedFiles || receipt.Bytes != expectedBytes || receipt.InputSHA256 != expectedDigest {
 		t.Fatal("chunk comparison parent identity differs")
 	}
 	parent, err := vaultic.ParseID(receipt.Snapshot)
 	rtest.OK(t, err)
-	source := filepath.Join(publicationScale200kRoot, "input")
-	selected, err := boundedLiveSourcePaths(source, 200001)
+	source := filepath.Join(parentRoot, "input")
+	selected, err := boundedLiveSourcePaths(source, uint64(limit+1))
 	rtest.OK(t, err)
-	if len(selected) != 200000 {
+	if len(selected) != limit {
 		t.Fatal("chunk comparison source scope differs")
 	}
 	paths := make(map[string]bool, len(selected))
@@ -2311,7 +2487,7 @@ func TestPublicationChunk200kComparison(t *testing.T) {
 	}
 	digest, files, size := m5FilesSelected(t, source, false, paths)
 	regularFiles := publicationQualificationRegularFiles(t, source, selected)
-	if digest != receipt.InputSHA256 || files != receipt.Files || size != receipt.Bytes || regularFiles != 178208 {
+	if digest != receipt.InputSHA256 || files != receipt.Files || size != receipt.Bytes || regularFiles != expectedRegular {
 		t.Fatal("chunk comparison source content differs")
 	}
 	controlRoot := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_CONTROL_ROOT")
@@ -2319,15 +2495,29 @@ func TestPublicationChunk200kComparison(t *testing.T) {
 	rtest.OK(t, err)
 	info, err := os.Stat(controlRoot)
 	rtest.OK(t, err)
-	if resolved != controlRoot || !strings.HasPrefix(controlRoot, "/run/vaultic-unchanged-chunk200k-") || info.Mode().Perm() != 0700 {
+	runtimePrefix := "/run/vaultic-unchanged-chunk200k-"
+	if variant == "I" {
+		runtimePrefix = "/run/vaultic-unchanged-immutable200k-"
+	}
+	if publicationRead400kVariant(variant) {
+		runtimePrefix = "/run/vaultic-unchanged-reconcile400k-"
+	}
+	if resolved != controlRoot || !strings.HasPrefix(controlRoot, runtimePrefix) || info.Mode().Perm() != 0700 {
 		t.Fatal("chunk comparison requires a private canonical runtime")
 	}
 	control, err := os.MkdirTemp(controlRoot, "fc-")
 	rtest.OK(t, err)
 	rtest.OK(t, os.Chmod(control, 0700))
 	t.Cleanup(func() { _ = os.RemoveAll(control) })
-	tuning, err := publicationDBProfile("db-scale200k")
+	tuning, err := publicationDBProfile(profile)
 	rtest.OK(t, err)
+	if variant == "J" {
+		tuning.Flags = append(tuning.Flags, "--metadata-reconciliation-scalar-revision-reads")
+	} else if variant == "L" {
+		tuning.Flags = append(tuning.Flags, "--metadata-reconciliation-read-ahead=1")
+	} else if variant == "M" {
+		tuning.Flags = append(tuning.Flags, "--metadata-reconciliation-batch-size=500")
+	}
 	current := daemon.Options{Socket: filepath.Join(control, "db.sock"), RepositoryID: "c4d68689c785d02a28d6eec485c62132823dc9873ff7f627c2bac80258251528",
 		DaemonPath: binary, DataDir: filepath.Join(parentCell, "db"), WALDataDir: filepath.Join(parentCell, "db", "wal"),
 		ObjectStore: "local", WALStore: "local", WALFlushInterval: 100 * time.Millisecond,
@@ -2358,6 +2548,7 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 	t.Helper()
 	chunk200k := os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT") != "" && validatePublicationChunkLeg(os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT"), os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT")) == nil
 	scale200k := len(paths) == 200_000 && os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT") == "200000" && (os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT") == publicationScale200kRoot || chunk200k)
+	scale200k = scale200k || len(paths) == 400_000 && os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT") == "400000" && (os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT") == publicationScale400kRoot || chunk200k && publicationRead400kVariant(os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT")))
 	if len(paths) != 10000 && len(paths) != 50000 && !scale200k {
 		t.Fatal("force comparison requires exactly 10000 or 50000 entries")
 	}
@@ -2417,7 +2608,15 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 		if string(copied) != "vaulticdb-local-wal-after-bulk-import-v1:"+daemonOptions.DataDir+"/wal" {
 			t.Fatal("comparison copied WAL binding differs")
 		}
-		rtest.OK(t, os.WriteFile(binding, []byte("vaulticdb-local-wal-after-bulk-import-v1:"+current.DataDir+"/wal"), 0600))
+		if os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT") == "I" || publicationRead400kVariant(os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT")) {
+			rtest.OK(t, mergePublicationInheritedWAL(current.DataDir, repositoryHash))
+			publicationQualificationCopy(t, filepath.Join(leg, "wal-inheritance.json"), filepath.Join(current.DataDir, "wal-inheritance.json"))
+			identity := fmt.Sprintf("sha256:%x\n", sha256.Sum256([]byte("inherit")))
+			rtest.OK(t, os.WriteFile(binding, []byte(identity), 0600))
+			current.WALStore, current.WALDataDir = "inherit", ""
+		} else {
+			rtest.OK(t, os.WriteFile(binding, []byte("vaulticdb-local-wal-after-bulk-import-v1:"+current.DataDir+"/wal"), 0600))
+		}
 		*owner, err = daemon.Ensure(t.Context(), current)
 		rtest.OK(t, err)
 		legOptions := publicationQualificationOptions(filepath.Join(leg, "repo"), current.Socket, current.PassphraseFile)
