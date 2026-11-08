@@ -885,6 +885,213 @@ is not established. Physical NFS traffic was not measured, and deployment is
 not qualified. No cache/concurrency defaults, production settings, NFS tuning
 or cache flushing were changed by this comparison.
 
+### Isolated 400k Cache-Capacity Screen
+
+The follow-up screen tests retention rather than increasing lookup concurrency
+or changing collection scheduling. Representative accepted 400k receipts show
+zero CLI blob-size lookup evictions (213,113 peak entries, 349,525 capacity),
+about 2.9 million index/filter hits each with only 158/169 misses, and about
+261,000 engine data-block misses. These wider receipt counters prioritize data
+blocks and authenticated chunks over increasing lookup or metadata capacity.
+
+Fresh evidence uses
+`/volume2/NASDA2/vaultic-test-m6/cache-read-fme-cae1-20261107-400k-retry4`, with pinned
+executables under `bin/phase35-cache400k-retry4-guard600/linux-amd64`. Historical parents,
+rejected retry1 captures and the frozen source remain unchanged. The explicit runner selection is
+`--mode=coalesced --inode-limit=400000 --concurrency-profile=db-scale400k
+--cache-series`. No earlier create-only evidence root is reused.
+
+| Variant | Engine Data Blocks | Authenticated Chunks | Chunk Entries |
+| --- | ---: | ---: | ---: |
+| N: control | 512 MiB | 64 MiB | 16384 |
+| O | 2 GiB | 64 MiB | 16384 |
+| P | 8 GiB | 64 MiB | 16384 |
+| Q | 512 MiB | 512 MiB | 16384 |
+| R | 512 MiB | 2 GiB | 16384 |
+| S | 512 MiB | 4 GiB | 16384 |
+
+The schedule is `NOON | NPPN | NQQN | NRRN | NSSN`: independent ABBA brackets,
+two observations per side, one capacity variable changed per bracket. All
+variants retain the same 2 GiB metadata cache, 128 readers, RPC cap 32, group
+16, eight crypto workers, 1ms batching, batched revisions, collection size 5000,
+read-ahead off and immutable/dedicated-force policies. Chunk entries are fixed
+at 16,384 even for the control to isolate byte capacity; 4 GiB of 256 KiB chunks
+requires that many entries. Flight limits and encryption chunk size do not
+change. Existing hard caps suffice and production defaults remain unchanged.
+
+Reports compare main time, exact-main origin bytes and chunk misses, wider-window
+engine block misses, and peak combined RSS. Keep the two counter scopes separate.
+Long fetched-byte reuse distance is not distinct-byte LRU stack distance, so
+neither benefit nor failure at a particular capacity is assumed in advance.
+Combine candidates only after separate evidence shows reduced work; do not
+promote a cache default based solely on a favorable timing median.
+
+The first attempt, without the `-retry1` suffix, stopped during the first leg's
+fixture preparation and has no accepted measurement or completion receipt.
+Its last logs precede the current host boot; the exact termination cause was
+not recorded. All 11 launch pins verified on recovery, with no owned executable
+survivors or private runtime remaining. Its partial clone is preserved, not
+resumed or promoted to an accepted fixture. The fresh retry uses a separate
+root, runtime prefix and bundle. Unrelated workspace changes are excluded from
+the retry qualifier by building an isolated committed tree plus the benchmark
+harness patch; runtime CLI/native binaries remain the qualified versions.
+
+The retry was stopped gracefully during leg five after a workload mismatch was
+identified. Four completed legs passed source/restore/reopen/zero-new-data
+correctness, but all reported `reused=0`, `changed=400000` and zero revision
+lookups, rather than the intended complete record reuse. Their main intervals
+were 6915.278, 6931.966, 6984.981 and 6930.353 seconds (about 57--58 entries/s).
+Writer batch processing took roughly 4513--4581 seconds, with substantial
+fresh directory publication and revision allocation. These are fresh-metadata
+publication captures, not evidence for the intended reuse-cache workload.
+
+All 112 completed-leg checksums and 11 launch pins independently verified.
+The supervisor exited on SIGINT with no owned executable survivors; the fifth
+leg is explicitly canceled. Original receipts are preserved without rewriting
+their correctness classifications. The cache acceptance guard now additionally
+requires all observed entries to be reconciled and reused, zero changed/failed/
+deferred entries and publication/allocation calls, and complete revision lookup
+coverage. Regression tests reject each of the four mismatched captures.
+
+Source identity remains under investigation: reconciliation keys use numeric
+source `DeviceID`, and the source currently reports device 1048681 after the
+host restart. The frozen content receipt did not record a historical device
+identity, so identity drift is a hypothesis, not yet a proven cause. A verified
+reuse preflight and suitable current-identity parent are required before another
+long screen; do not remap identities or modify the historical parent blindly.
+
+The corrected parent is staged separately at
+`/volume2/NASDA2/vaultic-test-m6/cache-parent-fme-cae1-20261107-400k` from the
+verified post-restart first N snapshot. Preparation verifies all 48 stopped
+diagnostic seals and the completed leg seals, checksum-compares cloned database
+and repository payloads, preserves inherited WAL topology, and records snapshot
+provenance. It retains the original frozen source path and inode manifest;
+neither filesystem IDs nor historical records are rewritten.
+
+Before timing, the authenticated clone connection validates snapshot format
+and checks 64 evenly spaced current pointers and their revision availability.
+Every parsed revision key must match the live source device, inode and node
+kind. Normalized snapshots require positive commit sequence and root revision;
+their root FSID and inode can be zero or differ from the source identity.
+Legacy-tree snapshots require zero normalized scope fields. Neither format's
+root IDs establish source filesystem identity. Historical snapshot zeros do
+not prove device drift.
+This untimed sample warming
+is identical across cache variants and excluded from the writer-before counters.
+An incremental bounded JSON monitor stops a measured leg at its first changed,
+failed, deferred, allocation or publication counter. Accepted captures still
+require complete 400k reuse and revision lookup coverage, restore, reopen and
+source checks. The performance target is at least 1000 entries/s in the exact
+main interval (400k entries in at most 400 seconds); report correctness and
+performance acceptance separately and inspect each candidate replicate.
+
+The cache-screen supervisor enforces a separate 600-second backup-command
+deadline using its monotonic clock and atomic launcher start/finish receipts.
+Cloning, parent preparation, authenticated reuse preflight, restore and reopen
+are excluded. A hung or over-budget backup rejects the leg and sends SIGINT
+to the entire owned process group, including Vaultic and VaulticDB. Existing
+bounded shutdown allows up to 120 seconds before SIGKILL fallback; shutdown
+time is separate from the execution budget. Monitoring has 0.25-second polling
+resolution, and completion after 600 seconds is rejected independently by the
+launcher. At 400k entries, this is a 50 percent time margin over the 1000
+entries/s target and corresponds to about 667 entries/s, not 100k ops/s.
+
+The corrected parent completed full checksum verification. The first guarded
+retry2 launch exited before daemon startup because forced-run receipts omit
+the `files` field expected in initial-parent receipts. Source digest, bytes,
+restore and reopen flags matched. That rejected startup and its pinned sources
+are preserved under retry2 with `STARTUP-SHA256SUMS`; no backup was measured.
+The cache-parent reader now derives only that absent count from the sealed
+source receipt after checking exact entries, regular-file count and unchanged
+source status. Python acceptance additionally checks digest and byte bindings.
+Explicitly inconsistent counts are rejected, and the sealed parent is not
+rewritten. The corrected run used a fresh retry3 root and qualifier bundle.
+
+Retry3 stopped at native preflight after 1296.56 seconds of preparation, before
+starting a backup or its runtime timer. Both snapshot root identities were
+zero, and the preflight wrongly treated those zeros as source identities.
+The initial attribution to legacy-tree format was incorrect: the next native
+probe decoded a normalized snapshot with zero root IDs. The rejected clone, logs, source
+archives and `PREFLIGHT-SHA256SUMS` diagnostic manifest are preserved; no reuse
+or throughput result was accepted. The corrected check uses authenticated
+current-pointer revision keys and validates each format's actual scope contract.
+Go decoder round-trip and Python regression tests cover normalized zero or
+different root IDs, legacy records and malformed scopes/source identities.
+The first database-only probe stopped before sampling after 401.05 seconds;
+its executable, source and diagnostic evidence are retained without a payload
+seal. Before the next full fixture run, a bounded retry probe at
+`/volume2/NASDA2/vaultic-test-m6/cache-native-probe-fme-cae1-20261107-400k-retry1`
+tests the corrected preflight and scans current directory keys for source-root
+identities. It uses a fresh checksum clone, retains evidence and does not copy
+repository payloads, run a backup, or change the sealed parent.
+
+The retry database-only probe passed all 64 authenticated source-pointer and
+revision checks in 403.41 seconds, with 309739520 bytes peak combined RSS.
+The normalized snapshot had zero root IDs, commit sequence 1324403 and root
+revision 1324402; current-source references matched filesystem ID 1048681.
+The directory scan completed but did not match stored source paths, so it does
+not establish historical device drift. No backup was measured.
+
+The first retry4 control leg reused all 400000 records with 400000 revision
+lookups, zero changed records and zero allocation/publication calls. Its main
+interval was 317.954 seconds (1258.04 entries/s); the backup command took
+323.764 seconds under the 600-second guard. Restore, encrypted reopen and
+unchanged-source checks passed. Peak combined RSS across the whole leg was
+39927332864 bytes; this is not an exact-main-only RSS measurement.
+
+The series initially rejected this valid capture because its report required
+`reconciled == 400000`. The reconciler increments that counter only for new
+publication, not reuse. The corrected gate requires observed/scanned/reused
+400000 and reconciled/changed/allocation/publication zero. Updated tests and
+full receipt replay passed. The original failure and pinned source are retained;
+separate correction provenance and verified follow-up seals accept the completed
+control without rerunning it. Remaining legs used fresh fixtures and separately
+pinned continuation supervision with unchanged qualifier/CLI/native binaries.
+
+All 20 legs completed the fixed `NOON | NPPN | NQQN | NRRN | NSSN` schedule.
+Every leg exceeded 1000 entries/s: the observed range was 1248.90--1717.21
+entries/s, with main intervals 232.936--320.282 seconds. Backup commands took
+238.097--325.855 seconds, all below the 600-second limit; no timeout occurred.
+Each leg reused all 400000 records with exact revision lookup coverage and
+zero changed records, allocations or publication calls. Restore, encrypted
+reopen, unchanged-source and zero-data checks passed throughout. Whole-leg peak
+combined RSS ranged from 39.662 to 47.221 GB, below the 200 GB ceiling.
+
+Each contrast below uses only its own four-leg bracket, with two observations
+per side. Ratios are control median time divided by candidate median time;
+logical origin reductions use exact-main authenticated ciphertext counters.
+
+| Candidate | Control Main, s | Candidate Main, s | Observed Ratio | Logical Origin Reduction | Candidate Median Whole-leg Peak RSS, GB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| O: 2 GiB block / 64 MiB chunk | 286.849 | 244.673 | 1.172 | 0.31% | 40.241 |
+| P: 8 GiB block / 64 MiB chunk | 296.961 | 261.318 | 1.136 | 0.32% | 40.562 |
+| Q: 512 MiB block / 512 MiB chunk | 235.582 | 239.879 | 0.982 | 2.55% | 41.016 |
+| R: 512 MiB block / 2 GiB chunk | 280.648 | 279.472 | 1.004 | 8.99% | 43.659 |
+| S: 512 MiB block / 4 GiB chunk | 291.663 | 277.262 | 1.052 | 16.39% | 46.942 |
+
+The 2 GiB block cache had the best observed paired time ratio, but origin
+bytes fell only 0.31% and control times varied substantially. This screen
+does not establish a causal speedup or an optimal production setting. The
+8 GiB block cache did not justify its larger capacity over the smaller option
+in these separate brackets. Larger chunk retention reduced logical reads,
+but its time benefit was small or inconsistent; 4 GiB retention cost about
+6.83 GB additional median whole-leg peak RSS against its paired control.
+Do not change production defaults based on this short screen.
+
+Status: the full cache screen and the 1000 entries/s target are accepted.
+All 20 receipts were independently replayed, series/continuation/leg/bundle
+seals verified from their intended roots, and original continuation source
+pins verified before this documentation update. No owned executable processes
+or runtime directories remained. The original reporting failure is preserved;
+separate post-run validation records final acceptance. Replicated causal
+speedup, sustained 600-second performance and physical NFS qualification are
+not claimed.
+All existing private ownership, exact
+source/restore/reopen/zero-data checks, read-only child mount isolation, 64 GiB
+source ceiling, 200 GB combined RSS ceiling, storage reserve and SIGINT-first
+cleanup requirements remain. Main intervals shorter than 600 seconds remain
+short screens; physical NFS and production qualification are separate gates.
+
 ### Immutable Dedicated-Force Baseline
 
 The new default benchmark case is explicitly

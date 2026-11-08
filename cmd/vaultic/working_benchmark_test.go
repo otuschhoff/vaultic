@@ -24,6 +24,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/backend/all"
 	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/feature"
+	"github.com/otuschhoff/vaultic/internal/fs"
 	"github.com/otuschhoff/vaultic/internal/global"
 	metadataindex "github.com/otuschhoff/vaultic/internal/index"
 	"github.com/otuschhoff/vaultic/internal/index/daemon"
@@ -538,6 +539,41 @@ func publicationQualificationSample(t *testing.T, target string) (string, uint64
 	return digest, files, size
 }
 
+func publicationBackupRuntimeLimited(name, variant string) bool {
+	return name == "backup" && publicationCache400kVariant(variant)
+}
+
+func TestPublicationBackupRuntimeScope(t *testing.T) {
+	for _, variant := range []string{"N", "O", "P", "Q", "R", "S"} {
+		if !publicationBackupRuntimeLimited("backup", variant) {
+			t.Fatalf("cache backup %s lacks runtime guard", variant)
+		}
+		for _, stage := range []string{"copy-db", "restore", "reopen", "preflight"} {
+			if publicationBackupRuntimeLimited(stage, variant) {
+				t.Fatalf("non-backup stage %s is timed", stage)
+			}
+		}
+	}
+	if publicationBackupRuntimeLimited("backup", "K") {
+		t.Fatal("historical comparison unexpectedly changed")
+	}
+}
+
+func publicationRuntimeReceipt(t *testing.T, path string, value any) {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	rtest.OK(t, err)
+	pending := path + ".pending"
+	file, err := os.OpenFile(pending, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	rtest.OK(t, err)
+	rtest.OK(t, file.Chmod(0600))
+	_, err = file.Write(append(encoded, '\n'))
+	closeErr := file.Close()
+	rtest.OK(t, errors.Join(err, closeErr))
+	rtest.OK(t, os.Link(pending, path))
+	rtest.OK(t, os.Remove(pending))
+}
+
 func publicationQualificationCommand(t *testing.T, directory, name, binary string, args ...string) (time.Duration, float64) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 4*time.Hour)
@@ -554,11 +590,22 @@ func publicationQualificationCommand(t *testing.T, directory, name, binary strin
 	command.Env = append(os.Environ(), "VAULTIC_FEATURES=slatedb-authoritative=true")
 	command.Stdout, command.Stderr = stdout, stderr
 	command.WaitDelay = 5 * time.Second
+	guarded := publicationBackupRuntimeLimited(name, os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT"))
+	if guarded {
+		publicationRuntimeReceipt(t, filepath.Join(directory, "backup.runtime-start.json"), map[string]any{"limit_seconds": 600})
+	}
 	started := time.Now()
 	if err := command.Run(); err != nil {
 		t.Fatalf("qualification stage %s failed: %v; inspect private logs at %s", name, err, directory)
 	}
-	return time.Since(started), (command.ProcessState.UserTime() + command.ProcessState.SystemTime()).Seconds()
+	elapsed := time.Since(started)
+	if guarded {
+		publicationRuntimeReceipt(t, filepath.Join(directory, "backup.runtime-finished.json"), map[string]any{"seconds": elapsed.Seconds()})
+		if elapsed > 600*time.Second {
+			t.Fatal("backup runtime exceeded the 600-second limit")
+		}
+	}
+	return elapsed, (command.ProcessState.UserTime() + command.ProcessState.SystemTime()).Seconds()
 }
 
 func TestPublicationQualificationTreeComparison(t *testing.T) {
@@ -789,12 +836,30 @@ const publicationImmutable200kRoot = "/volume2/NASDA2/vaultic-test-m6/immutable-
 const publicationScale400kRoot = "/volume2/NASDA2/vaultic-test-m6/reconcile-parent-fme-cae1-20261105-400k"
 const publicationRead400kRoot = "/volume2/NASDA2/vaultic-test-m6/reconcile-read-fme-cae1-20261105-400k"
 const publicationRead400kBin = "/root/proj/vaultic/bin/phase35-reconcile400k/linux-amd64"
+const publicationCache400kRoot = "/volume2/NASDA2/vaultic-test-m6/cache-read-fme-cae1-20261107-400k-retry4"
+const publicationCache400kBin = "/root/proj/vaultic/bin/phase35-cache400k-retry4-guard600/linux-amd64"
+const publicationCache400kParent = "/volume2/NASDA2/vaultic-test-m6/cache-parent-fme-cae1-20261107-400k"
+
+func publicationCache400kVariant(variant string) bool {
+	return variant == "N" || variant == "O" || variant == "P" || variant == "Q" || variant == "R" || variant == "S"
+}
+
+func publicationCache400kChunkBytes(variant string) string {
+	return map[string]string{"N": "67108864", "O": "67108864", "P": "67108864", "Q": "536870912", "R": "2147483648", "S": "4294967296"}[variant]
+}
 
 func publicationRead400kVariant(variant string) bool {
-	return variant == "J" || variant == "K" || variant == "L" || variant == "M"
+	return variant == "J" || variant == "K" || variant == "L" || variant == "M" || publicationCache400kVariant(variant)
 }
 
 func validatePublicationChunkLeg(root, variant string) error {
+	if publicationCache400kVariant(variant) {
+		for index, expected := range []string{"N", "O", "O", "N", "N", "P", "P", "N", "N", "Q", "Q", "N", "N", "R", "R", "N", "N", "S", "S", "N"} {
+			if variant == expected && root == filepath.Join(publicationCache400kRoot, fmt.Sprintf("leg-%02d-%s", index+1, expected)) {
+				return nil
+			}
+		}
+	}
 	if publicationRead400kVariant(variant) {
 		for index, expected := range []string{"J", "K", "K", "J", "K", "L", "L", "K", "K", "M", "M", "K"} {
 			if variant == expected && root == filepath.Join(publicationRead400kRoot, fmt.Sprintf("leg-%02d-%s", index+1, expected)) {
@@ -819,6 +884,15 @@ func validatePublicationChunkLeg(root, variant string) error {
 }
 
 func TestPublicationChunkComparisonPolicy(t *testing.T) {
+	for index, variant := range []string{"N", "O", "O", "N", "N", "P", "P", "N", "N", "Q", "Q", "N", "N", "R", "R", "N", "N", "S", "S", "N"} {
+		root := filepath.Join(publicationCache400kRoot, fmt.Sprintf("leg-%02d-%s", index+1, variant))
+		if validatePublicationChunkLeg(root, variant) != nil || publicationCache400kChunkBytes(variant) == "" {
+			t.Fatal("cache comparison routing or capacity missing")
+		}
+		if validatePublicationChunkLeg(root+"/retry", variant) == nil || validatePublicationChunkLeg(root, "K") == nil || validatePublicationChunkLeg(filepath.Join(publicationRead400kRoot, filepath.Base(root)), variant) == nil {
+			t.Fatal("cache comparison accepted a mismatched root or variant")
+		}
+	}
 	for index, variant := range []string{"J", "K", "K", "J", "K", "L", "L", "K", "K", "M", "M", "K"} {
 		root := filepath.Join(publicationRead400kRoot, fmt.Sprintf("leg-%02d-%s", index+1, variant))
 		if err := validatePublicationChunkLeg(root, variant); err != nil {
@@ -2391,6 +2465,9 @@ func TestPublicationChunk200kComparison(t *testing.T) {
 	if publicationRead400kVariant(variant) {
 		seriesRoot, limit, profile, parentRoot = publicationRead400kRoot, 400000, "db-scale400k", publicationScale400kRoot
 	}
+	if publicationCache400kVariant(variant) {
+		seriesRoot, parentRoot = publicationCache400kRoot, publicationCache400kParent
+	}
 	if variant == "I" || publicationRead400kVariant(variant) {
 		if variant == "I" {
 			seriesRoot = publicationImmutable200kRoot
@@ -2413,6 +2490,9 @@ func TestPublicationChunk200kComparison(t *testing.T) {
 	if publicationRead400kVariant(variant) {
 		binRoot = publicationRead400kBin
 	}
+	if publicationCache400kVariant(variant) {
+		binRoot = publicationCache400kBin
+	}
 	candidate, binary := filepath.Join(binRoot, "vaultic"), filepath.Join(binRoot, "new/vaulticdb")
 	if variant == "A" {
 		binary = filepath.Join(binRoot, "old/vaulticdb")
@@ -2423,8 +2503,12 @@ func TestPublicationChunk200kComparison(t *testing.T) {
 		} else if variant == "D" {
 			capacity = "268435456"
 		}
+		entries := "4096"
+		if publicationCache400kVariant(variant) {
+			capacity, entries = publicationCache400kChunkBytes(variant), "16384"
+		}
 		for name, expected := range map[string]string{
-			"VAULTICDB_CHUNK_CACHE_BYTES": capacity, "VAULTICDB_CHUNK_CACHE_ENTRIES": "4096",
+			"VAULTICDB_CHUNK_CACHE_BYTES": capacity, "VAULTICDB_CHUNK_CACHE_ENTRIES": entries,
 			"VAULTICDB_CHUNK_FETCH_LIMIT": "64", "VAULTICDB_CHUNK_FETCH_BYTES": "16777216",
 			"VAULTICDB_CHUNK_MAX_BYTES": "1048576", "VAULTICDB_CHUNK_RANGE_LIMIT": "4",
 		} {
@@ -2452,6 +2536,7 @@ func TestPublicationChunk200kComparison(t *testing.T) {
 	encoded, err := os.ReadFile(filepath.Join(parentCell, "result.json"))
 	rtest.OK(t, err)
 	rtest.OK(t, json.Unmarshal(encoded, &receipt))
+	parentEncoded := encoded
 	expectedFiles, expectedBytes, expectedRegular := uint64(178257), uint64(23520039140), uint64(178208)
 	expectedDigest := "c1f7faee11872b1fac2f0af5d242c7a30f51ddc426bfd3e5c93b7200b3eefc83"
 	if limit == 400000 {
@@ -2470,12 +2555,19 @@ func TestPublicationChunk200kComparison(t *testing.T) {
 		}
 		expectedFiles, expectedBytes, expectedRegular, expectedDigest = sourceReceipt.Files, sourceReceipt.Bytes, sourceReceipt.RegularFiles, sourceReceipt.SHA256
 	}
+	if publicationCache400kVariant(variant) {
+		receipt.Files, err = publicationCacheParentFileCount(parentEncoded, limit, expectedFiles, expectedRegular)
+		rtest.OK(t, err)
+	}
 	if !receipt.RestoreVerified || !receipt.ReopenVerified || receipt.Files != expectedFiles || receipt.Bytes != expectedBytes || receipt.InputSHA256 != expectedDigest {
 		t.Fatal("chunk comparison parent identity differs")
 	}
 	parent, err := vaultic.ParseID(receipt.Snapshot)
 	rtest.OK(t, err)
 	source := filepath.Join(parentRoot, "input")
+	if publicationCache400kVariant(variant) {
+		source = filepath.Join(publicationScale400kRoot, "input")
+	}
 	selected, err := boundedLiveSourcePaths(source, uint64(limit+1))
 	rtest.OK(t, err)
 	if len(selected) != limit {
@@ -2502,6 +2594,9 @@ func TestPublicationChunk200kComparison(t *testing.T) {
 	if publicationRead400kVariant(variant) {
 		runtimePrefix = "/run/vaultic-unchanged-reconcile400k-"
 	}
+	if publicationCache400kVariant(variant) {
+		runtimePrefix = "/run/vaultic-unchanged-cache400k-retry4-"
+	}
 	if resolved != controlRoot || !strings.HasPrefix(controlRoot, runtimePrefix) || info.Mode().Perm() != 0700 {
 		t.Fatal("chunk comparison requires a private canonical runtime")
 	}
@@ -2511,6 +2606,11 @@ func TestPublicationChunk200kComparison(t *testing.T) {
 	t.Cleanup(func() { _ = os.RemoveAll(control) })
 	tuning, err := publicationDBProfile(profile)
 	rtest.OK(t, err)
+	if variant == "O" {
+		tuning.BlockCacheBytes = 2 << 30
+	} else if variant == "P" {
+		tuning.BlockCacheBytes = 8 << 30
+	}
 	if variant == "J" {
 		tuning.Flags = append(tuning.Flags, "--metadata-reconciliation-scalar-revision-reads")
 	} else if variant == "L" {
@@ -2539,6 +2639,266 @@ func TestPublicationChunk200kComparison(t *testing.T) {
 		}
 	}()
 	publicationQualificationForceComparison(t, cell, source, candidate, options, current, &owner, parent, paths, digest, regularFiles, files, size, tuning.Flags...)
+}
+
+func publicationCacheParentFileCount(encoded []byte, entries int, files, regular uint64) (uint64, error) {
+	var receipt struct {
+		Entries         int     `json:"entries"`
+		Regular         uint64  `json:"regular_files"`
+		Files           *uint64 `json:"files"`
+		SourceUnchanged bool    `json:"source_unchanged"`
+	}
+	if err := json.Unmarshal(encoded, &receipt); err != nil {
+		return 0, err
+	}
+	if receipt.Entries != entries || receipt.Regular != regular || !receipt.SourceUnchanged || files == 0 {
+		return 0, fmt.Errorf("cache parent source count binding differs")
+	}
+	if receipt.Files != nil && *receipt.Files != files {
+		return 0, fmt.Errorf("cache parent file count differs")
+	}
+	return files, nil
+}
+
+func TestPublicationCacheParentFileCount(t *testing.T) {
+	valid := map[string]any{"entries": 400000, "regular_files": 355389, "source_unchanged": true}
+	encoded, err := json.Marshal(valid)
+	rtest.OK(t, err)
+	files, err := publicationCacheParentFileCount(encoded, 400000, 355571, 355389)
+	rtest.OK(t, err)
+	if files != 355571 {
+		t.Fatal("forced receipt file count binding differs")
+	}
+	for name, value := range map[string]any{"entries": 1, "regular_files": 1, "source_unchanged": false, "files": 0} {
+		invalid := map[string]any{"entries": 400000, "regular_files": 355389, "source_unchanged": true}
+		invalid[name] = value
+		encoded, err := json.Marshal(invalid)
+		rtest.OK(t, err)
+		if _, err := publicationCacheParentFileCount(encoded, 400000, 355571, 355389); err == nil {
+			t.Fatalf("invalid parent %s accepted", name)
+		}
+	}
+}
+
+func validatePublicationCacheIdentity(snapshotFSID uint32, device uint64) error {
+	if device == 0 || device > uint64(^uint32(0)) || snapshotFSID == 0 || uint64(snapshotFSID) != device {
+		return fmt.Errorf("cache parent filesystem identity %d differs from current source device %d", snapshotFSID, device)
+	}
+	return nil
+}
+
+func TestPublicationCacheIdentity(t *testing.T) {
+	for _, item := range []struct {
+		fsid   uint32
+		device uint64
+		valid  bool
+	}{{7, 7, true}, {7, 8, false}, {0, 7, false}, {7, 0, false}, {7, 1 << 32, false}} {
+		if (validatePublicationCacheIdentity(item.fsid, item.device) == nil) != item.valid {
+			t.Fatalf("identity (%d, %d) validation differs", item.fsid, item.device)
+		}
+	}
+}
+
+func validatePublicationCacheSnapshotIdentity(snapshot schema.SnapshotRecord, device uint64) error {
+	if snapshot.LegacyTree != (schema.ID{}) {
+		if snapshot.CommitSequence != 0 || snapshot.RootFSID != 0 || snapshot.RootInode != 0 || snapshot.RootRevision != 0 {
+			return fmt.Errorf("legacy cache snapshot has normalized identity fields")
+		}
+	} else if snapshot.CommitSequence == 0 || snapshot.RootRevision == 0 {
+		return fmt.Errorf("normalized cache snapshot scope is incomplete")
+	}
+	return validatePublicationCacheIdentity(uint32(device), device)
+}
+
+func TestPublicationCacheSnapshotIdentity(t *testing.T) {
+	legacy := schema.SnapshotRecord{LegacyTree: schema.ID{1}}
+	rtest.OK(t, validatePublicationCacheSnapshotIdentity(legacy, 7))
+	normalized := schema.SnapshotRecord{CommitSequence: 1, RootRevision: 1, RootFSID: 7}
+	rtest.OK(t, validatePublicationCacheSnapshotIdentity(normalized, 7))
+	rtest.OK(t, validatePublicationCacheSnapshotIdentity(normalized, 8))
+	encoded, err := (schema.SnapshotRecord{CommitSequence: 1, RootRevision: 1, OriginalJSON: []byte("{}")}).MarshalBinary()
+	rtest.OK(t, err)
+	root, err := schema.UnmarshalSnapshotRecord(encoded)
+	rtest.OK(t, err)
+	rtest.OK(t, validatePublicationCacheSnapshotIdentity(root, 7))
+	for _, item := range []struct {
+		snapshot schema.SnapshotRecord
+		device   uint64
+	}{{legacy, 0}, {legacy, 1 << 32}, {schema.SnapshotRecord{LegacyTree: schema.ID{1}, RootFSID: 7}, 7}, {schema.SnapshotRecord{RootRevision: 1}, 7}, {schema.SnapshotRecord{}, 7}} {
+		if validatePublicationCacheSnapshotIdentity(item.snapshot, item.device) == nil {
+			t.Fatal("invalid snapshot/source identity accepted")
+		}
+	}
+}
+
+func publicationCacheReusePreflight(ctx context.Context, client *daemon.Client, parent vaultic.ID, source string, paths map[string]bool) (map[string]any, error) {
+	filesystem := fs.NewLocal()
+	info, err := filesystem.Lstat(source)
+	if err != nil {
+		return nil, err
+	}
+	store := daemon.NewSchemaStore(client)
+	value, found, err := store.Get(ctx, schema.SnapshotKey(schema.ID(parent)))
+	if err != nil || !found {
+		return nil, fmt.Errorf("cache parent snapshot unavailable: found=%t: %w", found, err)
+	}
+	snapshot, err := schema.UnmarshalSnapshotRecord(value)
+	if err != nil {
+		return nil, err
+	}
+	receipt := map[string]any{"source_device": info.DeviceID, "snapshot_fsid": snapshot.RootFSID,
+		"snapshot_root_inode": snapshot.RootInode, "snapshot_commit_sequence": snapshot.CommitSequence, "snapshot_root_revision": snapshot.RootRevision,
+		"source_inode": info.Inode, "sampled_records": 0, "accepted": false}
+	receipt["snapshot_format"] = "normalized"
+	if snapshot.LegacyTree != (schema.ID{}) {
+		receipt["snapshot_format"] = "legacy-tree"
+	}
+	if err := validatePublicationCacheSnapshotIdentity(snapshot, info.DeviceID); err != nil {
+		return receipt, err
+	}
+	selected := make([]string, 0, len(paths))
+	for path := range paths {
+		selected = append(selected, path)
+	}
+	slices.Sort(selected)
+	if len(selected) == 0 {
+		return receipt, fmt.Errorf("cache source selection is empty")
+	}
+	count := min(64, len(selected))
+	for index := 0; index < count; index++ {
+		path := selected[index*len(selected)/count]
+		if path != "." && !filepath.IsLocal(path) {
+			return receipt, fmt.Errorf("cache source sample escapes its frozen root")
+		}
+		stat, err := filesystem.Lstat(filepath.Join(source, path))
+		if err != nil {
+			return receipt, err
+		}
+		if err := validatePublicationCacheIdentity(uint32(info.DeviceID), stat.DeviceID); err != nil {
+			return receipt, err
+		}
+		key := schema.CurrentInodeKey(uint32(stat.DeviceID), stat.Inode)
+		kind := schema.KeyInodeRevision
+		if stat.Mode.IsDir() {
+			key = schema.CurrentDirectoryKey(uint32(stat.DeviceID), stat.Inode)
+			kind = schema.KeyDirectoryRevision
+		}
+		value, found, err := store.Get(ctx, key)
+		if err != nil || !found {
+			return receipt, fmt.Errorf("cache current-pointer sample %d unavailable: found=%t: %w", index, found, err)
+		}
+		pointer, err := schema.UnmarshalCurrentPointer(value)
+		if err != nil {
+			return receipt, err
+		}
+		revision, err := schema.ParseKey(pointer.RecordKey)
+		if err != nil || revision.FSID != uint32(stat.DeviceID) || revision.Inode != stat.Inode || revision.Kind != kind {
+			return receipt, fmt.Errorf("cache revision sample %d source identity differs: %w", index, err)
+		}
+		value, found, err = store.Get(ctx, pointer.RecordKey)
+		if err != nil || !found || len(value) == 0 {
+			return receipt, fmt.Errorf("cache revision sample %d unavailable: found=%t: %w", index, found, err)
+		}
+		receipt["source_fsid"] = revision.FSID
+		receipt["sampled_records"] = index + 1
+	}
+	receipt["accepted"] = true
+	return receipt, nil
+}
+
+func TestPublicationCacheNativePreflight(t *testing.T) {
+	root := os.Getenv("VAULTIC_PHASE35_CACHE_PREFLIGHT_ROOT")
+	if root == "" {
+		t.Skip("private native cache preflight not selected")
+	}
+	if root != "/volume2/NASDA2/vaultic-test-m6/cache-native-probe-fme-cae1-20261107-400k" && root != "/volume2/NASDA2/vaultic-test-m6/cache-native-probe-fme-cae1-20261107-400k-retry1" {
+		t.Fatal("native cache probe root differs")
+	}
+	rtest.OK(t, validatePublicationQualificationRoot(root, "/volume2/NASDA2/vaultic-test-m6"))
+	control, err := os.MkdirTemp("/run", "vcp-")
+	rtest.OK(t, err)
+	rtest.OK(t, os.Chmod(control, 0700))
+	t.Cleanup(func() { _ = os.RemoveAll(control) })
+	database := filepath.Join(root, "db")
+	rtest.OK(t, os.Mkdir(database, 0700))
+	rtest.OK(t, os.Chmod(database, 0700))
+	parentDatabase := filepath.Join(publicationCache400kParent, "group-64", "db")
+	publicationQualificationCommand(t, root, "copy-db", "rsync", "-a", "--chmod=D700,F600", "--exclude=*.coordination.lock", parentDatabase+"/", database+"/")
+	publicationQualificationCommand(t, root, "checksum-db", "rsync", "-rcni", "--delete", "--exclude=*.coordination.lock", parentDatabase+"/", database+"/")
+	checksum, err := os.ReadFile(filepath.Join(root, "checksum-db.stdout.log"))
+	rtest.OK(t, err)
+	if len(checksum) != 0 {
+		t.Fatal("native probe database checksum clone differs")
+	}
+	options := daemon.Options{Socket: filepath.Join(control, "db.sock"), RepositoryID: "c4d68689c785d02a28d6eec485c62132823dc9873ff7f627c2bac80258251528",
+		DaemonPath: filepath.Join(publicationCache400kBin, "new", "vaulticdb"), DataDir: database, ObjectStore: "local", WALStore: "inherit",
+		MetaCacheBytes: 2 << 30, BlockCacheBytes: 512 << 20, EngineMultiGet: true,
+		EncryptionMode: "required", PassphraseFile: "/volume2/NASDA2/rustic/etc/metadata-recovery", StartTimeout: 90 * time.Second}
+	client, err := daemon.Ensure(t.Context(), options)
+	rtest.OK(t, err)
+	defer func() { rtest.OK(t, client.Close(context.Background())) }()
+	encoded, err := os.ReadFile(filepath.Join(publicationCache400kParent, "parent-provenance.json"))
+	rtest.OK(t, err)
+	var provenance struct {
+		Snapshot string `json:"snapshot"`
+	}
+	rtest.OK(t, json.Unmarshal(encoded, &provenance))
+	parent, err := vaultic.ParseID(provenance.Snapshot)
+	rtest.OK(t, err)
+	encoded, err = os.ReadFile(filepath.Join(publicationCache400kParent, "inode-manifest.json"))
+	rtest.OK(t, err)
+	var manifest struct {
+		Source string   `json:"source"`
+		Paths  []string `json:"paths"`
+	}
+	rtest.OK(t, json.Unmarshal(encoded, &manifest))
+	if manifest.Source != filepath.Join(publicationScale400kRoot, "input") || len(manifest.Paths) != 400000 {
+		t.Fatal("native probe frozen source selection differs")
+	}
+	paths := make(map[string]bool, len(manifest.Paths))
+	for _, path := range manifest.Paths {
+		paths[path] = true
+	}
+	receipt, preflightErr := publicationCacheReusePreflight(t.Context(), client, parent, manifest.Source, paths)
+	if preflightErr == nil {
+		store := daemon.NewSchemaStore(client)
+		var cursor []byte
+		var identities []map[string]any
+		scanned, done := 0, false
+		for scanned < 200000 && !done {
+			entries, complete, err := store.ScanPrefix(t.Context(), schema.CurrentDirectoryKey(0, 0)[:2], cursor, 5000)
+			rtest.OK(t, err)
+			if len(entries) == 0 && !complete {
+				t.Fatal("native identity scan did not advance")
+			}
+			for _, entry := range entries {
+				key, err := schema.ParseKey(entry.Key)
+				rtest.OK(t, err)
+				if key.Inode != receipt["source_inode"].(uint64) {
+					continue
+				}
+				pointer, err := schema.UnmarshalCurrentPointer(entry.Value)
+				rtest.OK(t, err)
+				value, found, err := store.Get(t.Context(), pointer.RecordKey)
+				rtest.OK(t, err)
+				if !found {
+					t.Fatal("native identity scan revision missing")
+				}
+				directory, err := schema.UnmarshalDirectoryRevision(value)
+				rtest.OK(t, err)
+				identities = append(identities, map[string]any{"fsid": key.FSID, "source_path_matches": directory.SourcePath == manifest.Source})
+			}
+			if len(entries) != 0 {
+				cursor = entries[len(entries)-1].Key
+			}
+			scanned, done = scanned+len(entries), complete
+		}
+		receipt["root_pointer_identities"], receipt["root_pointer_scan_complete"] = identities, done
+	}
+	publicationRuntimeReceipt(t, filepath.Join(root, "reuse-preflight.json"), receipt)
+	rtest.OK(t, preflightErr)
+	_, err = client.WriterStatus(t.Context())
+	rtest.OK(t, err)
 }
 
 func publicationQualificationForceComparison(t *testing.T, cell, source, candidate string, options global.Options,
@@ -2605,14 +2965,17 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 		binding := filepath.Join(current.DataDir, repositoryHash, "_vaultic", "wal-target-v1")
 		copied, err := os.ReadFile(binding)
 		rtest.OK(t, err)
-		if string(copied) != "vaulticdb-local-wal-after-bulk-import-v1:"+daemonOptions.DataDir+"/wal" {
+		inheritedIdentity := fmt.Sprintf("sha256:%x\n", sha256.Sum256([]byte("inherit")))
+		inheritedCacheParent := publicationCache400kVariant(os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT")) && string(copied) == inheritedIdentity
+		if !inheritedCacheParent && string(copied) != "vaulticdb-local-wal-after-bulk-import-v1:"+daemonOptions.DataDir+"/wal" {
 			t.Fatal("comparison copied WAL binding differs")
 		}
 		if os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT") == "I" || publicationRead400kVariant(os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT")) {
-			rtest.OK(t, mergePublicationInheritedWAL(current.DataDir, repositoryHash))
-			publicationQualificationCopy(t, filepath.Join(leg, "wal-inheritance.json"), filepath.Join(current.DataDir, "wal-inheritance.json"))
-			identity := fmt.Sprintf("sha256:%x\n", sha256.Sum256([]byte("inherit")))
-			rtest.OK(t, os.WriteFile(binding, []byte(identity), 0600))
+			if !inheritedCacheParent {
+				rtest.OK(t, mergePublicationInheritedWAL(current.DataDir, repositoryHash))
+				publicationQualificationCopy(t, filepath.Join(leg, "wal-inheritance.json"), filepath.Join(current.DataDir, "wal-inheritance.json"))
+				rtest.OK(t, os.WriteFile(binding, []byte(inheritedIdentity), 0600))
+			}
 			current.WALStore, current.WALDataDir = "inherit", ""
 		} else {
 			rtest.OK(t, os.WriteFile(binding, []byte("vaulticdb-local-wal-after-bulk-import-v1:"+current.DataDir+"/wal"), 0600))
@@ -2621,6 +2984,32 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 		rtest.OK(t, err)
 		legOptions := publicationQualificationOptions(filepath.Join(leg, "repo"), current.Socket, current.PassphraseFile)
 		rtest.OK(t, publicationQualificationLoadPassword(&legOptions))
+		if publicationCache400kVariant(os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT")) {
+			receipt, preflightErr := publicationCacheReusePreflight(t.Context(), *owner, parent, source, paths)
+			provenance, err := os.ReadFile(filepath.Join(publicationCache400kParent, "parent-provenance.json"))
+			rtest.OK(t, err)
+			var historical struct {
+				Snapshot string `json:"historical_snapshot"`
+			}
+			rtest.OK(t, json.Unmarshal(provenance, &historical))
+			historicalID, err := vaultic.ParseID(historical.Snapshot)
+			rtest.OK(t, err)
+			value, found, err := daemon.NewSchemaStore(*owner).Get(t.Context(), schema.SnapshotKey(schema.ID(historicalID)))
+			rtest.OK(t, err)
+			if !found {
+				t.Fatal("historical parent diagnostic snapshot missing")
+			}
+			record, err := schema.UnmarshalSnapshotRecord(value)
+			rtest.OK(t, err)
+			if receipt != nil {
+				receipt["historical_snapshot_fsid"] = record.RootFSID
+				receipt["historical_snapshot_root_inode"] = record.RootInode
+			}
+			encoded, err := json.MarshalIndent(receipt, "", "  ")
+			rtest.OK(t, err)
+			rtest.OK(t, os.WriteFile(filepath.Join(leg, "reuse-preflight.json"), append(encoded, '\n'), 0600))
+			rtest.OK(t, preflightErr)
+		}
 		before, err := (*owner).WriterStatus(t.Context())
 		rtest.OK(t, err)
 		if before.ActiveTransactions != 0 || before.ActiveWriteIntents != 0 {

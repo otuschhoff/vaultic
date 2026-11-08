@@ -31,6 +31,14 @@ RECONCILE_PARENT = Path('/volume2/NASDA2/vaultic-test-m6/reconcile-parent-fme-ca
 RECONCILE_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/reconcile-read-fme-cae1-20261105-400k')
 RECONCILE_BIN = WORKSPACE / 'bin/phase35-reconcile400k/linux-amd64'
 RECONCILE_SCHEDULE = ('J', 'K', 'K', 'J', 'K', 'L', 'L', 'K', 'K', 'M', 'M', 'K')
+CACHE_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/cache-read-fme-cae1-20261107-400k-retry4')
+CACHE_BIN = WORKSPACE / 'bin/phase35-cache400k-retry4-guard600/linux-amd64'
+CACHE_PARENT = Path('/volume2/NASDA2/vaultic-test-m6/cache-parent-fme-cae1-20261107-400k')
+CACHE_VARIANTS = {'N': (512 << 20, 64 << 20), 'O': (2 << 30, 64 << 20),
+                  'P': (8 << 30, 64 << 20), 'Q': (512 << 20, 512 << 20),
+                  'R': (512 << 20, 2 << 30), 'S': (512 << 20, 4 << 30)}
+CACHE_SCHEDULE = ('N', 'O', 'O', 'N', 'N', 'P', 'P', 'N', 'N', 'Q', 'Q', 'N',
+                  'N', 'R', 'R', 'N', 'N', 'S', 'S', 'N')
 ACCEPTED = Path('/volume2/NASDA2/vaultic-test-m6/critical-path-fme_cae1-20261102-production-cap100k/group-64')
 SEED = Path('/ncl1-1-vs-50/fme_dump/amakura/db.begin-readiness-20261001-fuU56R')
 CANDIDATE = WORKSPACE / 'bin/phase35-metadata-read/linux-amd64/vaultic'
@@ -103,6 +111,9 @@ def profile_settings(profile):
 
 
 def chunk_settings(variant):
+    if variant in CACHE_VARIANTS:
+        return dict(chunk_settings('I'), VAULTICDB_CHUNK_CACHE_BYTES=CACHE_VARIANTS[variant][1],
+                    VAULTICDB_CHUNK_CACHE_ENTRIES=16384)
     if variant in ('J', 'K', 'L', 'M'):
         return chunk_settings('I')
     if variant not in ('A', 'B', 'C', 'D', 'I'):
@@ -119,6 +130,8 @@ def chunk_settings(variant):
 
 
 def chunk_paths(label):
+    if label in [f'leg-{index:02d}-{variant}' for index, variant in enumerate(CACHE_SCHEDULE, 1)]:
+        return CACHE_ROOT / label, Path('/run/vaultic-unchanged-cache400k-retry4-' + label)
     if label in [f'leg-{index:02d}-{variant}' for index, variant in enumerate(RECONCILE_SCHEDULE, 1)]:
         return RECONCILE_ROOT / label, Path('/run/vaultic-unchanged-reconcile400k-' + label)
     if label in ('leg-01-I', 'leg-02-I', 'leg-03-I'):
@@ -154,6 +167,15 @@ def observe_db_settings(group, settings, native=NATIVE, chunk_variant=None):
         except (FileNotFoundError, ProcessLookupError):
             continue
     return observed
+
+
+def cache_profile_settings(profile, variant=None):
+    settings = profile_settings(profile)
+    if variant in CACHE_VARIANTS:
+        if profile != 'db-scale400k':
+            raise ValueError('cache variant requires the exact 400k profile')
+        settings['block_cache_bytes'] = CACHE_VARIANTS[variant][0]
+    return settings
 
 
 def paths(mode, inode_limit=10000, profile=None):
@@ -216,7 +238,7 @@ def prepare(mode, inode_limit=10000, profile=None):
     print(json.dumps({'root': str(root), 'runtime': str(runtime), 'prepared': True}))
 
 
-def protect(profile=None, chunk=False):
+def protect(profile=None, chunk=False, cache=False, extra_roots=()):
     library = ctypes.CDLL(None, use_errno=True)
     protected = [SEED, ACCEPTED, Path('/volume2/NASDA2/rustic'), WORKSPACE, PREVIOUS / 'group-64', PREVIOUS / 'input']
     if profile is not None:
@@ -225,6 +247,9 @@ def protect(profile=None, chunk=False):
         protected.append(SCALE_SOURCE)
     if chunk:
         protected.append(RECONCILE_PARENT if profile == 'db-scale400k' else SCALE_ROOT)
+    if cache:
+        protected.append(CACHE_PARENT)
+    protected.extend(extra_roots)
     for path in protected:
         encoded = os.fsencode(path)
         if library.mount(encoded, encoded, None, 4096, None) != 0 or library.mount(None, encoded, None, 4096 | 32 | 1, None) != 0:
@@ -280,6 +305,37 @@ def storage_bytes(root):
     return total
 
 
+class BackupRuntimeGuard:
+    def __init__(self, limit=600):
+        self.limit = limit
+        self.started = None
+        self.finished = False
+
+    def observe(self, now, launched, finished_seconds=None):
+        if self.finished:
+            return
+        if launched and self.started is None:
+            self.started = now
+        if finished_seconds is not None:
+            if self.started is None or not math.isfinite(finished_seconds) or finished_seconds < 0:
+                raise ValueError('invalid backup runtime completion receipt')
+            if finished_seconds > self.limit:
+                raise ValueError('backup runtime exceeded the 600-second limit; stop owned process group')
+            self.finished = True
+        elif self.started is not None and now - self.started >= self.limit:
+            raise ValueError('backup runtime exceeded the 600-second limit; stop owned process group')
+
+
+def validate_cache_progress(event):
+    if event.get('message_type') not in ('reconciliation_progress', 'reconciliation_stats'):
+        return False
+    metrics = event['reconciliation'] if event['message_type'] == 'reconciliation_progress' else event
+    for name in ('changed', 'failed', 'deferred', 'revision_allocation_calls', 'atomic_group_calls', 'directory_publication_calls'):
+        if metrics[name] != 0:
+            raise ValueError('cache reuse workload rejected during execution: ' + name)
+    return True
+
+
 def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
     root, runtime = paths(mode, inode_limit, profile) if chunk_leg is None else chunk_paths(chunk_leg)
     candidate, native = binaries(profile)
@@ -292,12 +348,12 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
         if not parent_namespace or os.readlink('/proc/self/ns/mnt') == parent_namespace:
             raise ValueError('chunk leg must run in a distinct private mount namespace')
         chunk_variant = chunk_leg.rsplit('-', 1)[1]
-        if (chunk_variant in ('J', 'K', 'L', 'M')) != (inode_limit == 400000):
+        if (chunk_variant in ('J', 'K', 'L', 'M', *CACHE_VARIANTS)) != (inode_limit == 400000):
             raise ValueError('chunk variant and source scope differ')
-        bin_root = RECONCILE_BIN if inode_limit == 400000 else (IMMUTABLE_BIN if chunk_variant == 'I' else CHUNK_BIN)
+        bin_root = CACHE_BIN if chunk_variant in CACHE_VARIANTS else (RECONCILE_BIN if inode_limit == 400000 else (IMMUTABLE_BIN if chunk_variant == 'I' else CHUNK_BIN))
         candidate = bin_root / 'vaultic'
         native = bin_root / ('old' if chunk_variant == 'A' else 'new') / 'vaulticdb'
-    settings = profile_settings(profile) if profile is not None else None
+    settings = cache_profile_settings(profile, chunk_variant) if profile is not None else None
     db_screen = profile in DB_OVERRIDES
     ceiling = fixture_ceiling(inode_limit)
     for path in (root, runtime):
@@ -305,9 +361,10 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
             raise ValueError('unsafe capture root')
     if (root / '.nobackup').read_bytes() != MARKER:
         raise ValueError('ownership marker differs')
-    protect(profile, chunk=chunk_leg is not None)
+    protect(profile, chunk=chunk_leg is not None, cache=chunk_variant in CACHE_VARIANTS)
     if chunk_leg is not None:
-        subprocess.run(['sha256sum', '-c', 'FOLLOWUP-SHA256SUMS'], cwd=RECONCILE_PARENT if inode_limit == 400000 else SCALE_ROOT, check=True)
+        parent_root = CACHE_PARENT if chunk_variant in CACHE_VARIANTS else (RECONCILE_PARENT if inode_limit == 400000 else SCALE_ROOT)
+        subprocess.run(['sha256sum', '-c', 'FOLLOWUP-SHA256SUMS'], cwd=parent_root, check=True)
     if profile is not None:
         subprocess.run(['sha256sum', '-c', 'METADATA-READ-SHA256SUMS'], cwd=FIFTY, check=True)
         retained = json.loads((FIFTY / 'launch-pins.json').read_text())
@@ -330,6 +387,8 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
                      'metadata_read_concurrency': settings['rpc_limit'] if settings is not None else None,
                      'rss_ceiling_bytes': RSS_CEILING, 'disk_floor_bytes': FLOOR, 'fixture_ceiling_bytes': ceiling,
                      'managed_ram_limit': '160GiB', 'scratch_limit': '2GiB', 'total_timeout_seconds': 28800,
+                     'backup_runtime_limit_seconds': 600 if chunk_variant in CACHE_VARIANTS else None,
+                     'backup_runtime_scope': 'CLI backup only; excludes cloning, preflight, restore and reopen',
                      'schedule': (['parent-clone', 'forced', 'restore', 'reopen'] if chunk_leg is not None else (['source-freeze', 'parent-setup', 'forced'] if inode_limit in (200000, 400000) else (['forced'] if profile is not None else (['unforced', 'forced'] if inode_limit == 10000 else ['parent-setup', 'unforced', 'forced'])))), 'production_repository_writable': False,
                      'source': str((RECONCILE_PARENT if inode_limit == 400000 else SCALE_ROOT) / 'input') if chunk_leg is not None else (str(root / 'input') if inode_limit in (200000, 400000) else (str(FIFTY / 'input') if profile is not None else (str(PREVIOUS / 'input') if inode_limit == 10000 else str(ACCEPTED / 'restore/ncl1-1-vs-50/fme_cae1')))), 'toolchains': {
                          name: subprocess.check_output(command, text=True).strip() for name, command in
@@ -379,6 +438,8 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
     result = {'accepted': False, 'failure': None, 'peak_combined_rss_bytes': 0, 'entries': inode_limit, 'mode': mode,
               'concurrency_profile': profile, 'forced_only': profile is not None, 'db_settings_verified': False}
     started = time.monotonic()
+    progress_offset, progress_pending = 0, b''
+    backup_guard = BackupRuntimeGuard()
     try:
         with private_output(driver / 'observer.stdout.log') as observer_output, private_output(driver / 'observer.stderr.log') as observer_errors:
             observer = subprocess.Popen([sys.executable, str(WORKSPACE / 'helpers/phase35-m6/observe.py'), '--root', str(root),
@@ -399,6 +460,29 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
                     if actual_settings:
                         result['db_settings_verified'] = True
                     elapsed = time.monotonic() - started
+                    if chunk_variant in CACHE_VARIANTS:
+                        stage = root / 'group-64/forced'
+                        completed = stage / 'backup.runtime-finished.json'
+                        seconds = None
+                        if not backup_guard.finished and completed.exists() and completed.stat().st_size:
+                            if completed.stat().st_size > 4096:
+                                raise ValueError('backup runtime receipt exceeds bounded parser limit')
+                            seconds = json.loads(completed.read_text())['seconds']
+                        backup_guard.observe(time.monotonic(), (stage / 'backup.runtime-start.json').exists(), seconds)
+                        progress_path = root / 'group-64/forced/backup.stdout.log'
+                        if progress_path.exists():
+                            with progress_path.open('rb') as progress:
+                                progress.seek(progress_offset)
+                                addition = progress.read(65536)
+                                progress_offset += len(addition)
+                            records = (progress_pending + addition).split(b'\n')
+                            progress_pending = records.pop()
+                            if len(progress_pending) > 1 << 20:
+                                raise ValueError('cache progress record exceeds bounded parser limit')
+                            for record in records:
+                                event = json.loads(record)
+                                if validate_cache_progress(event):
+                                    result['cache_progress_observed'] = True
                     result['peak_combined_rss_bytes'] = max(result['peak_combined_rss_bytes'], rss)
                     samples.write(json.dumps({'elapsed_seconds': elapsed, 'rss_bytes': rss, 'processes': count,
                                               'db_settings': actual_settings}) + '\n')
@@ -427,6 +511,8 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
                     raise ValueError('pin or fixture ceiling differs')
                 if db_screen and not result['db_settings_verified']:
                     raise ValueError('actual owned daemon tuning was not verified')
+                if chunk_variant in CACHE_VARIANTS and not backup_guard.finished:
+                    raise ValueError('cache backup lacks completed runtime guard receipt')
                 result['accepted'] = True
     except BaseException as error:
         result['failure'] = type(error).__name__ + ': ' + str(error)
@@ -441,16 +527,46 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
             result['failure'] = 'cleanup: ' + type(error).__name__ + ': ' + str(error)
         finally:
             result['wall_seconds'] = time.monotonic() - started
+            if chunk_variant in CACHE_VARIANTS:
+                result['backup_runtime_limit_seconds'] = backup_guard.limit
+                result['backup_runtime_guard_finished'] = backup_guard.finished
             result['owned_process_exit_code'] = None if process is None else process.returncode
             pilot.write_json(root / 'outcome.json', result)
     print(json.dumps(result), flush=True)
     return 0 if result['accepted'] else 1
 
 
+def validate_cache_preflight(receipt):
+    if (receipt['accepted'] is not True or receipt['sampled_records'] != 64
+            or not 0 < receipt['source_device'] <= 0xffffffff
+            or receipt['source_fsid'] != receipt['source_device']):
+        raise ValueError('cache source current-pointer identity preflight differs')
+    if receipt['snapshot_format'] == 'legacy-tree':
+        if any(receipt[name] != 0 for name in ('snapshot_fsid', 'snapshot_root_inode', 'snapshot_commit_sequence', 'snapshot_root_revision')):
+            raise ValueError('legacy cache snapshot has normalized identity fields')
+    elif receipt['snapshot_format'] == 'normalized':
+        if receipt['snapshot_commit_sequence'] <= 0 or receipt['snapshot_root_revision'] <= 0:
+            raise ValueError('normalized cache snapshot scope is incomplete')
+    else:
+        raise ValueError('unknown cache snapshot format')
+
+
+def cache_parent_file_count(parent, source):
+    if (parent['entries'] != source['entries'] or parent['regular_files'] != source['regular_files']
+            or parent['source_unchanged'] is not True or parent['input_sha256'] != source['sha256']
+            or parent['bytes'] != source['bytes'] or not 0 < source['files'] <= source['entries']):
+        raise ValueError('cache parent source count binding differs')
+    files = parent.get('files', source['files'])
+    if files != source['files']:
+        raise ValueError('cache parent file count differs')
+    return files
+
+
 def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None):
     outcome = json.loads((root / 'outcome.json').read_text())
     measured = json.loads((root / 'group-64/forced/result.json').read_text())
-    settings = profile_settings(profile)
+    variant = root.name.rsplit('-', 1)[-1] if inode_limit == 400000 and root.parent in (RECONCILE_ROOT, CACHE_ROOT) else None
+    settings = cache_profile_settings(profile, variant)
     if not outcome['accepted'] or not outcome['db_settings_verified'] or outcome['exit_code'] != 0:
         raise ValueError('follow-up capture or live settings were not accepted')
     expected_entries, expected_regular, expected_bytes = 50000, 41347, 19493496103
@@ -465,7 +581,8 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
         expected_digest, expected_parent = source['sha256'], parent['snapshot']
         if expected_entries != inode_limit or expected_bytes > 64 << 30 or not parent['restore_verified'] or not parent['reopen_verified']:
             raise ValueError('200k source dimensions or parent acceptance incomplete')
-        if parent['input_sha256'] != expected_digest or parent['files'] != source['files'] or parent['bytes'] != expected_bytes:
+        parent_files = cache_parent_file_count(parent, source) if variant in CACHE_VARIANTS else parent['files']
+        if parent['input_sha256'] != expected_digest or parent_files != source['files'] or parent['bytes'] != expected_bytes:
             raise ValueError('200k parent source identity differs from the frozen source')
     elif inode_limit != 50000 or profile == 'db-scale200k':
         raise ValueError('unapproved follow-up receipt size')
@@ -487,7 +604,6 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
                       f"--metadata-read-concurrency={settings['rpc_limit']}",
                       f"--metadata-batch-delay={settings['batch_delay_ns'] // 1000000}ms",
                       f"--metadata-publication-group-size={settings['publication_group_size']}"]
-    variant = root.name.rsplit('-', 1)[-1] if inode_limit == 400000 and root.parent == RECONCILE_ROOT else None
     expected_flags += reconciliation_flags(variant)
     if measured['metadata_read_flags'] != expected_flags or measured['candidate'] != str(expected_candidate or binaries(profile)[0]) or measured['engine_multi_get'] is not True:
         raise ValueError('follow-up binary, batching, concurrency or engine settings differ')
@@ -511,6 +627,14 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
                 raise ValueError('follow-up encryption counter reset')
             deltas[field] = {name: last[name] - first[name] for name in counters}
     critical = measured['critical_path']
+    if variant in CACHE_VARIANTS:
+        require_cache_reuse(critical['reconciliation'], expected_entries)
+        preflight = json.loads((root / 'group-64/forced/reuse-preflight.json').read_text())
+        validate_cache_preflight(preflight)
+        if not outcome.get('cache_progress_observed'):
+            raise ValueError('cache capture lacks accepted identity preflight or live reuse monitoring')
+        if outcome.get('backup_runtime_limit_seconds') != 600 or outcome.get('backup_runtime_guard_finished') is not True:
+            raise ValueError('cache capture lacks accepted 600-second backup runtime guard')
     stages = critical['reconciliation']['publication_stages']
     if not isinstance(stages, dict) or set(stages) != {'planning', 'commit'}:
         raise ValueError('follow-up publication stage export missing')
@@ -622,11 +746,116 @@ def reconcile_comparison_report(rows):
             'single_pass_sustained_qualified': all(row['single_pass_sustained_qualified'] for row in rows)}
 
 
-def execute_chunk_series(immutable=False, reconcile=False):
-    series = RECONCILE_ROOT if reconcile else (IMMUTABLE_ROOT if immutable else CHUNK_ROOT)
-    schedule = RECONCILE_SCHEDULE if reconcile else (('I', 'I', 'I') if immutable else CHUNK_SCHEDULE)
-    bin_root = RECONCILE_BIN if reconcile else (IMMUTABLE_BIN if immutable else CHUNK_BIN)
-    parent_root, inode_limit, profile = (RECONCILE_PARENT, 400000, 'db-scale400k') if reconcile else (SCALE_ROOT, 200000, 'db-scale200k')
+def require_cache_reuse(metrics, entries):
+    if any(metrics.get(name) != entries for name in ('observed', 'scanned', 'reused')):
+        raise ValueError('cache screen requires complete metadata-record reuse, not fresh publication')
+    if any(metrics.get(name) != 0 for name in ('reconciled', 'changed', 'failed', 'deferred', 'revision_allocation_calls',
+                                             'atomic_group_calls', 'directory_publication_calls')):
+        raise ValueError('cache screen unexpectedly changed or published metadata records')
+    if metrics.get('revision_lookup', {}).get('keys') != entries:
+        raise ValueError('cache screen did not exercise the complete revision lookup workload')
+
+
+def cache_comparison_report(rows):
+    if [row['variant'] for row in rows] != list(CACHE_SCHEDULE):
+        raise ValueError('cache comparison schedule incomplete or reordered')
+    for row in rows:
+        if row['entries'] != 400000 or not math.isfinite(row['main_seconds']) or row['main_seconds'] <= 0:
+            raise ValueError('cache comparison requires positive exact 400k measurements')
+        if row['settings'] != cache_profile_settings('db-scale400k', row['variant']) or row['chunk_settings'] != chunk_settings(row['variant']):
+            raise ValueError('cache comparison settings differ')
+        require_cache_reuse(row['reconciliation'], row['entries'])
+    contrasts = []
+    for offset, candidate in enumerate(('O', 'P', 'Q', 'R', 'S')):
+        bracket = rows[offset * 4:offset * 4 + 4]
+        medians = {}
+        for variant in ('N', candidate):
+            selected = [row for row in bracket if row['variant'] == variant]
+            medians[variant] = {'main_seconds': statistics.median(row['main_seconds'] for row in selected),
+                                'origin_bytes': statistics.median(row['main_encryption']['ciphertext_origin_bytes'] for row in selected),
+                                'chunk_misses': statistics.median(row['main_encryption']['chunk_cache_misses'] for row in selected),
+                                'block_misses_wider_window': statistics.median(row['deltas']['cache_reads']['block']['misses'] for row in selected),
+                                'peak_rss_bytes': statistics.median(row['peak_combined_rss_bytes'] for row in selected)}
+            medians[variant]['entries_per_second'] = 400000 / medians[variant]['main_seconds']
+            medians[variant]['target_met_in_each_replicate'] = all(400000 / row['main_seconds'] >= 1000 for row in selected)
+        contrasts.append({'candidate': candidate, 'control': 'N', 'replicates_per_variant': 2,
+                          'medians': medians,
+                          'observed_speedup': medians['N']['main_seconds'] / medians[candidate]['main_seconds'],
+                          'origin_byte_reduction_fraction': 1 - medians[candidate]['origin_bytes'] / medians['N']['origin_bytes'] if medians['N']['origin_bytes'] else None})
+    return {'accepted': True, 'case': 'dedicated-force/immutable/cache-capacity', 'rows': rows,
+            'throughput_target_entries_per_second': 1000,
+            'performance_target_met': any(contrast['medians'][contrast['candidate']]['target_met_in_each_replicate'] for contrast in contrasts),
+            'contrasts': contrasts, 'causal_speedup_claim': False, 'production_modified': False,
+            'deployment_qualified': False, 'physical_nfs_traffic_measured': False,
+            'single_pass_sustained_qualified': all(row['single_pass_sustained_qualified'] for row in rows),
+            'block_counter_scope': 'writer-before through snapshot validation; wider than exact main encryption counters'}
+
+
+def prepare_cache_parent():
+    previous = Path('/volume2/NASDA2/vaultic-test-m6/cache-read-fme-cae1-20261106-400k-retry1')
+    leg = previous / 'leg-01-N'
+    captured = leg / 'group-64/forced'
+    if CACHE_PARENT.exists() or CACHE_PARENT.parent.resolve() != CACHE_PARENT.parent:
+        raise ValueError('refuse existing or noncanonical current-identity parent')
+    namespace = os.environ.get('VAULTIC_CHUNK_PARENT_MOUNT_NS')
+    if not namespace or os.readlink('/proc/self/ns/mnt') == namespace:
+        raise ValueError('cache parent preparation requires a private mount namespace')
+    if shutil.disk_usage(CACHE_PARENT.parent).free < FLOOR + fixture_ceiling(400000):
+        raise ValueError('cache parent reservation plus shared floor unavailable')
+    protect('db-scale400k', chunk=True, extra_roots=(previous,))
+    for root, manifest in ((previous, 'STOPPED-SHA256SUMS'), (leg, 'FOLLOWUP-SHA256SUMS')):
+        subprocess.run(['sha256sum', '-c', manifest], cwd=root, check=True)
+    measured = json.loads((captured / 'result.json').read_text())
+    source = json.loads((leg / 'source-observation.json').read_text())
+    if (measured['entries'] != 400000 or measured['input_sha256'] != source['sha256']
+            or not all(measured[name] is True for name in ('restore_verified', 'reopen_verified', 'source_unchanged'))
+            or measured['critical_path']['reconciliation']['changed'] != 400000
+            or measured['critical_path']['reconciliation']['failed'] != 0
+            or measured['summary']['data_blobs'] != 0):
+        raise ValueError('current-identity parent requires the verified post-restart publication capture')
+    pilot.private_directory(CACHE_PARENT)
+    with private_output(CACHE_PARENT / '.nobackup') as output:
+        output.write(MARKER)
+    group = CACHE_PARENT / 'group-64'
+    pilot.private_directory(group)
+    for name in ('db', 'repo'):
+        target = group / name
+        pilot.private_directory(target)
+        with private_output(group / ('copy-' + name + '.stdout.log')) as output, private_output(group / ('copy-' + name + '.stderr.log')) as errors:
+            subprocess.run(['rsync', '-a', '--chmod=D700,F600', '--exclude=*.coordination.lock',
+                            str(captured / name) + '/', str(target) + '/'], stdout=output, stderr=errors, check=True, timeout=1800)
+        with private_output(group / ('checksum-' + name + '.stdout.log')) as output, private_output(group / ('checksum-' + name + '.stderr.log')) as errors:
+            subprocess.run(['rsync', '-rcni', '--delete', '--exclude=*.coordination.lock',
+                            str(captured / name) + '/', str(target) + '/'], stdout=output, stderr=errors, check=True, timeout=1800)
+        if (group / ('checksum-' + name + '.stdout.log')).stat().st_size != 0:
+            raise ValueError('cache parent checksum clone differs')
+    for original, target in ((leg / 'source-observation.json', CACHE_PARENT / 'source-observation.json'),
+                             (RECONCILE_PARENT / 'inode-manifest.json', CACHE_PARENT / 'inode-manifest.json'),
+                             (captured / 'backup.stdout.log', group / 'backup.stdout.log'),
+                             (captured / 'backup.stderr.log', group / 'backup.stderr.log')):
+        shutil.copyfile(original, target)
+        os.chmod(target, 0o600)
+    pilot.write_json(group / 'result.json', measured)
+    pilot.write_json(CACHE_PARENT / 'parent-provenance.json', {
+        'capture': str(captured), 'snapshot': measured['snapshot'], 'historical_snapshot': measured['baseline_parent'],
+        'source': str(RECONCILE_PARENT / 'input'), 'source_sha256': source['sha256'], 'source_entries': 400000,
+        'payload_clone_checksum_verified': True, 'reuse_preflight_required': True,
+        'old_parent_modified': False, 'filesystem_ids_rewritten': False})
+    manifest = CACHE_PARENT / 'FOLLOWUP-SHA256SUMS'
+    with private_output(manifest, text=True) as output:
+        for path in sorted(CACHE_PARENT.rglob('*')):
+            if path.is_file() and path != manifest:
+                output.write(pilot.digest(path) + '  ' + str(path.relative_to(CACHE_PARENT)) + '\n')
+    subprocess.run(['sha256sum', '-c', manifest.name], cwd=CACHE_PARENT, check=True)
+    print(json.dumps({'prepared_current_identity_parent': str(CACHE_PARENT), 'snapshot': measured['snapshot']}), flush=True)
+
+
+def execute_chunk_series(immutable=False, reconcile=False, caches=False):
+    series = CACHE_ROOT if caches else (RECONCILE_ROOT if reconcile else (IMMUTABLE_ROOT if immutable else CHUNK_ROOT))
+    schedule = CACHE_SCHEDULE if caches else (RECONCILE_SCHEDULE if reconcile else (('I', 'I', 'I') if immutable else CHUNK_SCHEDULE))
+    bin_root = CACHE_BIN if caches else (RECONCILE_BIN if reconcile else (IMMUTABLE_BIN if immutable else CHUNK_BIN))
+    scale400k = reconcile or caches
+    parent_root, inode_limit, profile = (CACHE_PARENT if caches else RECONCILE_PARENT, 400000, 'db-scale400k') if scale400k else (SCALE_ROOT, 200000, 'db-scale200k')
     if series.exists() or series.parent.resolve() != series.parent:
         raise ValueError('refuse existing or noncanonical chunk comparison series')
     if shutil.disk_usage(series.parent).free < FLOOR + len(schedule) * fixture_ceiling(200000):
@@ -639,20 +868,21 @@ def execute_chunk_series(immutable=False, reconcile=False):
               bin_root / 'build.json', Path(__file__), Path(pilot.__file__),
               WORKSPACE / 'helpers/phase35-m6/observe.py', WORKSPACE / 'cmd/vaultic/working_benchmark_test.go',
               SCALE_ROOT / 'FOLLOWUP-SHA256SUMS', SCALE_ROOT / 'group-64/result.json', SCALE_ROOT / 'source-observation.json')
-    if not immutable and not reconcile:
+    if not immutable and not scale400k:
         inputs += (bin_root / 'old/vaulticdb',)
-    if reconcile:
+    if scale400k:
         inputs = tuple(parent_root / path.relative_to(SCALE_ROOT) if path.is_relative_to(SCALE_ROOT) else path for path in inputs)
     pins = {str(path): pilot.digest(path) for path in inputs}
     pilot.write_json(series / 'launch-pins.json', {'pins': pins, 'schedule': list(schedule),
                      'parent': str(parent_root), 'source_entries': inode_limit, 'production_modified': False,
-                     'baseline_revision': subprocess.check_output(['git', '-C', str(WORKSPACE), 'rev-parse', 'HEAD'], text=True).strip() if reconcile else '01835ca98b1b66d48f176b719fffa8f89ac80c67',
-                     'candidate_revision': subprocess.check_output(['git', '-C', str(WORKSPACE), 'rev-parse', 'HEAD'], text=True).strip() if immutable or reconcile else '931e3a5ef29c632fa483e304abe7b3d1a842865b',
-                     'default_case': chunk_settings('I') if immutable or reconcile else None,
-                     'same_instrumented_binaries': reconcile,
-                     'reconciliation_flags': {variant: reconciliation_flags(variant) for variant in schedule} if reconcile else None,
+                     'baseline_revision': subprocess.check_output(['git', '-C', str(WORKSPACE), 'rev-parse', 'HEAD'], text=True).strip() if scale400k else '01835ca98b1b66d48f176b719fffa8f89ac80c67',
+                     'candidate_revision': subprocess.check_output(['git', '-C', str(WORKSPACE), 'rev-parse', 'HEAD'], text=True).strip() if immutable or scale400k else '931e3a5ef29c632fa483e304abe7b3d1a842865b',
+                     'default_case': chunk_settings('N' if caches else 'I') if immutable or scale400k else None,
+                     'same_instrumented_binaries': scale400k,
+                     'reconciliation_flags': {variant: reconciliation_flags(variant) for variant in schedule} if scale400k else None,
+                     'cache_variants': {variant: {'settings': cache_profile_settings(profile, variant), 'chunk_settings': chunk_settings(variant)} for variant in CACHE_VARIANTS} if caches else None,
                      'single_pass_sustained_required_seconds': 600,
-                     'process_cache_state': 'fresh daemon; identical startup, no cross-leg retained cache',
+                     'process_cache_state': 'fresh daemon; identical untimed 64-record authenticated reuse preflight for cache series; no cross-leg retained cache',
                      'host_cache_state': 'uncontrolled but unchanged; balanced leg ordering',
                      'larger_cache_bracket_bytes': 256 << 20})
     rows = []
@@ -698,7 +928,7 @@ def execute_chunk_series(immutable=False, reconcile=False):
             row = summarize_followup(root, profile, inode_limit, bin_root / 'vaultic')
             row.update({'variant': variant, 'leg': label, 'chunk_settings': chunk_settings(variant)})
             row['cache_evictions_measured'] = variant != 'A'
-            if not (immutable or reconcile) and variant != 'A' and row['deltas']['encryption_reads']['header_validation_calls'] <= 0:
+            if not (immutable or scale400k) and variant != 'A' and row['deltas']['encryption_reads']['header_validation_calls'] <= 0:
                 raise ValueError('new chunk read path was not exercised')
             seal_followup(root, row)
             rows.append(row)
@@ -706,11 +936,11 @@ def execute_chunk_series(immutable=False, reconcile=False):
             print(json.dumps({'accepted': label, 'main_seconds': row['main_seconds'],
                               'entries_per_second': row['entries_per_second'],
                               'encryption': row['deltas']['encryption_reads']}), flush=True)
-        report = reconcile_comparison_report(rows) if reconcile else ({'accepted': True, 'case': 'dedicated-force/immutable', 'rows': rows,
+        report = cache_comparison_report(rows) if caches else (reconcile_comparison_report(rows) if reconcile else ({'accepted': True, 'case': 'dedicated-force/immutable', 'rows': rows,
                'median_main_seconds': statistics.median(row['main_seconds'] for row in rows),
                'causal_speedup_claim': False, 'physical_nfs_traffic_measured': False,
                'single_pass_sustained_qualified': all(row['single_pass_sustained_qualified'] for row in rows)}
-              if immutable else chunk_comparison_report(rows))
+              if immutable else chunk_comparison_report(rows)))
         pilot.write_json(series / 'verified-series.json', report)
         with private_output(series / 'SERIES-SHA256SUMS', text=True) as output:
             artifacts = sorted(path for path in series.iterdir() if path.is_file() and path.name != 'SERIES-SHA256SUMS')
@@ -726,6 +956,105 @@ def execute_chunk_series(immutable=False, reconcile=False):
 
 
 class ChunkComparisonTests(unittest.TestCase):
+    def test_cache_preflight_legacy_and_normalized_identity(self):
+        legacy = {'accepted': True, 'sampled_records': 64, 'source_device': 7, 'source_fsid': 7,
+                  'snapshot_format': 'legacy-tree', 'snapshot_fsid': 0, 'snapshot_root_inode': 0,
+                  'snapshot_commit_sequence': 0, 'snapshot_root_revision': 0}
+        validate_cache_preflight(legacy)
+        normalized = dict(legacy, snapshot_format='normalized', snapshot_commit_sequence=1, snapshot_root_revision=1)
+        validate_cache_preflight(normalized)
+        validate_cache_preflight(dict(normalized, snapshot_fsid=8, snapshot_root_inode=1))
+        with self.assertRaises(ValueError):
+            validate_cache_preflight(dict(normalized, snapshot_commit_sequence=0))
+        for name, value in {'accepted': False, 'sampled_records': 0, 'source_fsid': 8, 'source_device': 0,
+                            'snapshot_format': 'unknown', 'snapshot_fsid': 7, 'snapshot_root_inode': 1}.items():
+            with self.assertRaises(ValueError):
+                validate_cache_preflight(dict(legacy, **{name: value}))
+
+    def test_cache_parent_forced_receipt_counts(self):
+        source = {'entries': 400000, 'files': 355571, 'regular_files': 355389, 'bytes': 123, 'sha256': 'test'}
+        parent = {'entries': 400000, 'regular_files': 355389, 'bytes': 123, 'input_sha256': 'test', 'source_unchanged': True}
+        self.assertEqual(cache_parent_file_count(parent, source), 355571)
+        for name, value in {'entries': 1, 'regular_files': 1, 'bytes': 0, 'input_sha256': 'changed', 'source_unchanged': False, 'files': 0}.items():
+            with self.assertRaises(ValueError):
+                cache_parent_file_count(dict(parent, **{name: value}), source)
+
+    def test_backup_runtime_excludes_preparation_and_restore(self):
+        guard = BackupRuntimeGuard()
+        guard.observe(10000, False)
+        self.assertIsNone(guard.started)
+        guard.observe(20000, True)
+        guard.observe(20599.9, True)
+        guard.observe(20600, True, 600)
+        guard.observe(50000, True)
+        self.assertTrue(guard.finished)
+
+    def test_backup_runtime_stops_hung_and_overbudget_runs(self):
+        guard = BackupRuntimeGuard()
+        guard.observe(10000, True)
+        with self.assertRaisesRegex(ValueError, '600-second limit'):
+            guard.observe(10600, True)
+        with self.assertRaisesRegex(ValueError, '600-second limit'):
+            BackupRuntimeGuard().observe(20000, True, 600.01)
+        for seconds in (-1, float('nan'), float('inf')):
+            with self.assertRaises(ValueError):
+                BackupRuntimeGuard().observe(0, True, seconds)
+
+    def test_cache_progress_stops_publication_early(self):
+        metrics = {name: 0 for name in ('changed', 'failed', 'deferred', 'revision_allocation_calls', 'atomic_group_calls', 'directory_publication_calls')}
+        self.assertTrue(validate_cache_progress({'message_type': 'reconciliation_progress', 'reconciliation': metrics}))
+        self.assertFalse(validate_cache_progress({'message_type': 'status'}))
+        for name in metrics:
+            with self.assertRaises(ValueError):
+                validate_cache_progress({'message_type': 'reconciliation_progress', 'reconciliation': dict(metrics, **{name: 1})})
+
+    def test_cache_reuse_rejects_fresh_publication(self):
+        metrics = {'observed': 400000, 'scanned': 400000, 'reconciled': 0, 'reused': 400000,
+                   'changed': 0, 'failed': 0, 'deferred': 0, 'revision_allocation_calls': 0,
+                   'atomic_group_calls': 0, 'directory_publication_calls': 0,
+                   'revision_lookup': {'keys': 400000}}
+        require_cache_reuse(metrics, 400000)
+        for name in ('reused', 'reconciled', 'changed', 'revision_allocation_calls', 'atomic_group_calls', 'directory_publication_calls'):
+            invalid = dict(metrics)
+            invalid[name] = 0 if name == 'reused' else 1
+            with self.assertRaises(ValueError):
+                require_cache_reuse(invalid, 400000)
+        with self.assertRaises(ValueError):
+            require_cache_reuse(dict(metrics, revision_lookup={'keys': 0}), 400000)
+
+    def test_cache400k_isolated_settings_and_report(self):
+        baseline = cache_profile_settings('db-scale400k', 'N')
+        baseline_chunks = chunk_settings('N')
+        self.assertEqual(baseline_chunks['VAULTICDB_CHUNK_CACHE_ENTRIES'], 16384)
+        rows = []
+        for index, variant in enumerate(CACHE_SCHEDULE, 1):
+            root, runtime = chunk_paths(f'leg-{index:02d}-{variant}')
+            self.assertEqual(root.parent, CACHE_ROOT)
+            self.assertTrue(runtime.name.startswith('vaultic-unchanged-cache400k-'))
+            settings, chunks = cache_profile_settings('db-scale400k', variant), chunk_settings(variant)
+            changed = [key for key in settings if settings[key] != baseline[key]]
+            changed += [key for key in chunks if chunks[key] != baseline_chunks[key]]
+            self.assertEqual(changed, [] if variant == 'N' else (['block_cache_bytes'] if variant in ('O', 'P') else ['VAULTICDB_CHUNK_CACHE_BYTES']))
+            self.assertGreaterEqual(chunks['VAULTICDB_CHUNK_CACHE_ENTRIES'] * (256 << 10), chunks['VAULTICDB_CHUNK_CACHE_BYTES'])
+            rows.append({'variant': variant, 'entries': 400000, 'main_seconds': 400,
+                         'settings': settings, 'chunk_settings': chunks, 'main_encryption': {'ciphertext_origin_bytes': 100, 'chunk_cache_misses': 10},
+                         'reconciliation': {'observed': 400000, 'scanned': 400000, 'reconciled': 0, 'reused': 400000,
+                                            'changed': 0, 'failed': 0, 'deferred': 0, 'revision_allocation_calls': 0,
+                                            'atomic_group_calls': 0, 'directory_publication_calls': 0, 'revision_lookup': {'keys': 400000}},
+                         'deltas': {'cache_reads': {'block': {'misses': 10}}}, 'peak_combined_rss_bytes': 1000,
+                         'single_pass_sustained_qualified': False})
+        report = cache_comparison_report(rows)
+        self.assertTrue(report['performance_target_met'])
+        self.assertEqual(report['throughput_target_entries_per_second'], 1000)
+        self.assertEqual(len(report['contrasts']), 5)
+        self.assertFalse(report['causal_speedup_claim'])
+        self.assertFalse(report['single_pass_sustained_qualified'])
+        rows[1]['settings'] = dict(baseline)
+        with self.assertRaises(ValueError):
+            cache_comparison_report(rows)
+        with self.assertRaises(ValueError):
+            cache_profile_settings('db-scale200k', 'N')
+
     def test_reconcile400k_routes_and_brackets(self):
         self.assertEqual(paths('coalesced', 400000, 'db-scale400k')[0], RECONCILE_PARENT)
         for size, profile in ((200000, 'db-scale400k'), (400000, 'db-scale200k'), (50000, 'db-scale400k')):
@@ -878,25 +1207,31 @@ if __name__ == '__main__':
     parser.add_argument('--chunk-series', action='store_true')
     parser.add_argument('--immutable-series', action='store_true')
     parser.add_argument('--reconcile-series', action='store_true')
+    parser.add_argument('--cache-series', action='store_true')
+    parser.add_argument('--prepare-cache-parent', action='store_true')
     parser.add_argument('--chunk-self-test', action='store_true')
     parser.add_argument('--chunk-leg')
     arguments = parser.parse_args()
     os.umask(0o077)
-    if arguments.chunk_self_test:
+    if arguments.prepare_cache_parent:
+        if (arguments.mode, arguments.inode_limit, arguments.concurrency_profile) != ('coalesced', 400000, 'db-scale400k') or any((arguments.prepare, arguments.series, arguments.chunk_series, arguments.immutable_series, arguments.reconcile_series, arguments.cache_series, arguments.chunk_self_test, arguments.chunk_leg is not None)):
+            raise ValueError('cache parent preparation requires its fixed isolated 400k routing')
+        prepare_cache_parent()
+    elif arguments.chunk_self_test:
         result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(ChunkComparisonTests))
         raise SystemExit(0 if result.wasSuccessful() else 1)
-    elif arguments.chunk_series or arguments.immutable_series or arguments.reconcile_series or arguments.chunk_leg is not None:
-        expected = ('coalesced', 400000, 'db-scale400k') if arguments.reconcile_series or arguments.inode_limit == 400000 else ('coalesced', 200000, 'db-scale200k')
+    elif arguments.chunk_series or arguments.immutable_series or arguments.reconcile_series or arguments.cache_series or arguments.chunk_leg is not None:
+        expected = ('coalesced', 400000, 'db-scale400k') if arguments.reconcile_series or arguments.cache_series or arguments.inode_limit == 400000 else ('coalesced', 200000, 'db-scale200k')
         if (arguments.mode, arguments.inode_limit, arguments.concurrency_profile) != expected or arguments.prepare or arguments.series:
             raise ValueError('chunk series requires its fixed forced-only 200k routing')
-        if arguments.chunk_series or arguments.immutable_series or arguments.reconcile_series:
-            if sum((arguments.chunk_series, arguments.immutable_series, arguments.reconcile_series)) != 1:
+        if arguments.chunk_series or arguments.immutable_series or arguments.reconcile_series or arguments.cache_series:
+            if sum((arguments.chunk_series, arguments.immutable_series, arguments.reconcile_series, arguments.cache_series)) != 1:
                 raise ValueError('cannot select both series')
             if arguments.chunk_leg is not None:
                 raise ValueError('cannot select series and individual leg together')
-            if arguments.reconcile_series != (arguments.inode_limit == 400000):
+            if (arguments.reconcile_series or arguments.cache_series) != (arguments.inode_limit == 400000):
                 raise ValueError('series kind and inode scope differ')
-            execute_chunk_series(immutable=arguments.immutable_series, reconcile=arguments.reconcile_series)
+            execute_chunk_series(immutable=arguments.immutable_series, reconcile=arguments.reconcile_series, caches=arguments.cache_series)
         else:
             raise SystemExit(execute(arguments.mode, arguments.inode_limit, arguments.concurrency_profile, arguments.chunk_leg))
     elif arguments.series:
