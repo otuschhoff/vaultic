@@ -1257,6 +1257,79 @@ func TestPublicationGroupBatchesCurrentLookupsWithoutRetainingCache(t *testing.T
 	}
 }
 
+func TestDirectoryGroupsBatchFreshLookupsWithoutRetainingCache(t *testing.T) {
+	store := &publicationLookupStore{fakeStore: newFakeStore()}
+	reconciler := &Reconciler{ctx: t.Context(), filesystem: testFilesystem(), store: store}
+	directories := make([]preparedItem, 0, 2*publicationConcurrency+1)
+	for index := range 2 * publicationConcurrency {
+		inode := uint64(index + 10)
+		directories = append(directories, preparedItem{
+			workItem: workItem{sourcePath: fmt.Sprintf("/source/d%02d", index), snapshotPath: fmt.Sprintf("/snapshot/d%02d", index)},
+			identity: identity{fsid: 1, inode: inode}, parent: identity{fsid: 1, inode: 1}, stat: dirInfo(1, inode),
+		})
+	}
+	directories = append(directories, preparedItem{
+		workItem: workItem{sourcePath: "/source", snapshotPath: "/snapshot"},
+		identity: identity{fsid: 1, inode: 1}, parent: identity{fsid: 1, inode: 2}, stat: dirInfo(1, 1),
+	})
+	published := make(map[string]publishedItem)
+	reconciler.publishDirectories(directories, published)
+	reconciler.publishDirectories(directories, published)
+	want := []int{publicationConcurrency, publicationConcurrency, 1,
+		publicationConcurrency, publicationConcurrency, publicationConcurrency, publicationConcurrency, 1, 1}
+	if len(reconciler.errors) != 0 || len(published) != len(directories) ||
+		reconciler.Metrics().Reused != uint64(len(directories)) || !slices.Equal(store.sizes, want) {
+		t.Fatalf("directory reuse: lookups=%v metrics=%+v errors=%v", store.sizes, reconciler.Metrics(), reconciler.errors)
+	}
+	for _, item := range directories {
+		if item.existingRecord != nil {
+			t.Fatal("directory cache escaped publication lifetime")
+		}
+	}
+}
+
+func TestDirectoryGroupsHonorConfiguredWidthAndFallback(t *testing.T) {
+	for _, groupSize := range []int{16, daemon.MaxAllocatedPublicationGroupSize} {
+		for _, failBatch := range []bool{false, true} {
+			t.Run(fmt.Sprintf("width-%d/fallback-%t", groupSize, failBatch), func(t *testing.T) {
+				store := &publicationLookupStore{fakeStore: newFakeStore(), failBatch: failBatch}
+				reconciler := &Reconciler{ctx: t.Context(), filesystem: testFilesystem(), store: store,
+					options: Options{PublicationGroupSize: groupSize}}
+				directories := make([]preparedItem, groupSize)
+				for index := range directories {
+					inode := uint64(index + 10)
+					directories[index] = preparedItem{
+						workItem: workItem{sourcePath: fmt.Sprintf("/source/d%02d", index), snapshotPath: fmt.Sprintf("/snapshot/d%02d", index)},
+						identity: identity{fsid: 1, inode: inode}, parent: identity{fsid: 1, inode: 1}, stat: dirInfo(1, inode),
+					}
+				}
+				published := make(map[string]publishedItem)
+				reconciler.publishDirectories(directories, published)
+				reconciler.publishDirectories(directories, published)
+				if len(reconciler.errors) != 0 || len(published) != groupSize || reconciler.Metrics().Reused != uint64(groupSize) {
+					t.Fatalf("directory reuse: metrics=%+v errors=%v", reconciler.Metrics(), reconciler.errors)
+				}
+				if !failBatch && !slices.Equal(store.sizes, []int{groupSize, groupSize, groupSize}) {
+					t.Fatalf("directory batching: %v", store.sizes)
+				}
+				if failBatch {
+					groupCalls := 0
+					for _, size := range store.sizes {
+						if size == groupSize {
+							groupCalls++
+						} else if size != 1 {
+							t.Fatalf("unexpected fallback width %d", size)
+						}
+					}
+					if groupCalls != 2 {
+						t.Fatalf("fallback attempted %d group reads", groupCalls)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestPublicationGroupedLookupFailureFallsBackToIndependentReads(t *testing.T) {
 	store := &publicationLookupStore{fakeStore: newFakeStore(), failBatch: true}
 	reconciler := &Reconciler{ctx: t.Context(), filesystem: testFilesystem(), store: store}
@@ -1947,7 +2020,8 @@ func TestDaemonBackedDirectoryPublication(t *testing.T) {
 	}
 	defer client.Close(context.Background())
 	store := daemon.NewSchemaStore(client)
-	reconciler := &Reconciler{ctx: ctx, filesystem: testFilesystem(), store: store}
+	reconciler := &Reconciler{ctx: ctx, filesystem: testFilesystem(), store: store,
+		options: Options{PublicationGroupSize: daemon.MaxAllocatedPublicationGroupSize}}
 	const siblings = 64
 	directories := make([]preparedItem, 0, siblings+1)
 	for index := range siblings {

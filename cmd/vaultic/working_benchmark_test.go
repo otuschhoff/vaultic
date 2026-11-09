@@ -839,13 +839,106 @@ const publicationRead400kBin = "/root/proj/vaultic/bin/phase35-reconcile400k/lin
 const publicationCache400kRoot = "/volume2/NASDA2/vaultic-test-m6/cache-read-fme-cae1-20261107-400k-retry4"
 const publicationCache400kBin = "/root/proj/vaultic/bin/phase35-cache400k-retry4-guard600/linux-amd64"
 const publicationCache400kParent = "/volume2/NASDA2/vaultic-test-m6/cache-parent-fme-cae1-20261107-400k"
+const publicationPipeline400kRoot = "/volume2/NASDA2/vaultic-test-m6/pipeline-read-fme-cae1-20261108-400k"
+const publicationPipeline400kBin = "/root/proj/vaultic/bin/phase35-pipeline400k-20261108/linux-amd64"
+const publicationRAM16400kRoot = "/volume2/NASDA2/vaultic-test-m6/ram16-read-fme-cae1-20261109-400k"
+const publicationRAM16400kBin = "/root/proj/vaultic/bin/phase35-ram16400k-20261109/linux-amd64"
+
+func publicationRAM16400kVariant(variant string) bool {
+	return variant == "Z" || variant == "AA"
+}
+
+func publicationPipeline400kVariant(variant string) bool {
+	return variant == "T" || variant == "U" || variant == "V" || variant == "W" || variant == "X" || variant == "Y" || publicationRAM16400kVariant(variant)
+}
+
+func publicationPipeline400kTuning(variant string) (publicationDBTuning, error) {
+	if !publicationPipeline400kVariant(variant) {
+		return publicationDBTuning{}, fmt.Errorf("unknown pipeline variant %q", variant)
+	}
+	tuning, err := publicationDBProfile("db-scale400k")
+	if err != nil {
+		return tuning, err
+	}
+	if variant != "T" && variant != "U" {
+		tuning.Flags[3] = "--metadata-publication-group-size=64"
+	}
+	if variant == "W" || variant == "X" || variant == "Y" || publicationRAM16400kVariant(variant) {
+		tuning.Flags = append(tuning.Flags, "--metadata-reconciliation-read-ahead=1")
+	}
+	if variant == "X" || variant == "Y" {
+		tuning.Flags = append(tuning.Flags, "--metadata-reconciliation-batch-size=10000")
+	}
+	if variant == "Y" {
+		tuning.MetaCacheBytes, tuning.BlockCacheBytes = 8<<30, 8<<30
+		tuning.Flags = append(tuning.Flags, "--metadata-cache-mib=8192")
+	}
+	return tuning, nil
+}
+
+func TestPublicationPipelinePolicy(t *testing.T) {
+	schedule := []string{"T", "U", "U", "T", "U", "V", "V", "U", "V", "W", "W", "V", "W", "X", "X", "W", "X", "Y", "Y", "X"}
+	for index, variant := range schedule {
+		root := filepath.Join(publicationPipeline400kRoot, fmt.Sprintf("leg-%02d-%s", index+1, variant))
+		rtest.OK(t, validatePublicationChunkLeg(root, variant))
+		if validatePublicationChunkLeg(root+"/retry", variant) == nil || !publicationBackupRuntimeLimited("backup", variant) {
+			t.Fatal("pipeline scope or backup deadline missing")
+		}
+		tuning, err := publicationPipeline400kTuning(variant)
+		rtest.OK(t, err)
+		group := "16"
+		if variant != "T" && variant != "U" {
+			group = "64"
+		}
+		if tuning.Flags[0] != "--read-concurrency=128" || tuning.Flags[1] != "--metadata-read-concurrency=32" ||
+			tuning.Flags[3] != "--metadata-publication-group-size="+group || tuning.CryptoThreads != 8 {
+			t.Fatal("pipeline reader or group settings differ")
+		}
+		flags := strings.Join(tuning.Flags, " ")
+		if strings.Contains(flags, "--metadata-reconciliation-read-ahead=1") != (variant == "W" || variant == "X" || variant == "Y") ||
+			strings.Contains(flags, "--metadata-reconciliation-batch-size=10000") != (variant == "X" || variant == "Y") ||
+			strings.Contains(flags, "--metadata-cache-mib=8192") != (variant == "Y") {
+			t.Fatal("pipeline collection settings differ")
+		}
+		if variant == "Y" && (tuning.MetaCacheBytes != 8<<30 || tuning.BlockCacheBytes != 8<<30 || publicationCache400kChunkBytes(variant) != "4294967296") {
+			t.Fatal("RAM-heavy pipeline cache settings differ")
+		}
+	}
+	if _, err := publicationPipeline400kTuning("S"); err == nil {
+		t.Fatal("cache-only variant accepted as pipeline tuning")
+	}
+}
 
 func publicationCache400kVariant(variant string) bool {
-	return variant == "N" || variant == "O" || variant == "P" || variant == "Q" || variant == "R" || variant == "S"
+	return variant == "N" || variant == "O" || variant == "P" || variant == "Q" || variant == "R" || variant == "S" || publicationPipeline400kVariant(variant)
+}
+
+func TestPublicationRAM16Policy(t *testing.T) {
+	for index, variant := range []string{"Z", "AA", "AA", "Z", "AA", "Z", "Z", "AA"} {
+		root := filepath.Join(publicationRAM16400kRoot, fmt.Sprintf("leg-%02d-%s", index+1, variant))
+		rtest.OK(t, validatePublicationChunkLeg(root, variant))
+		if validatePublicationChunkLeg(root+"/retry", variant) == nil || validatePublicationChunkLeg(filepath.Join(publicationPipeline400kRoot, filepath.Base(root)), variant) == nil || !publicationBackupRuntimeLimited("backup", variant) || publicationBackupRuntimeLimited("restore", variant) {
+			t.Fatal("RAM16 scope or command deadline differs")
+		}
+		tuning, err := publicationPipeline400kTuning(variant)
+		rtest.OK(t, err)
+		if tuning.MetaCacheBytes != 2<<30 || tuning.BlockCacheBytes != 512<<20 || tuning.CryptoThreads != 8 ||
+			strings.Join(tuning.Flags, " ") != "--read-concurrency=128 --metadata-read-concurrency=32 --metadata-batch-delay=1ms --metadata-publication-group-size=64 --metadata-reconciliation-read-ahead=1" {
+			t.Fatal("RAM16 must change only ciphertext byte capacity")
+		}
+		expected := "4294967296"
+		if variant == "AA" {
+			expected = "17179869184"
+		}
+		if publicationCache400kChunkBytes(variant) != expected {
+			t.Fatal("RAM16 ciphertext capacity differs")
+		}
+	}
 }
 
 func publicationCache400kChunkBytes(variant string) string {
-	return map[string]string{"N": "67108864", "O": "67108864", "P": "67108864", "Q": "536870912", "R": "2147483648", "S": "4294967296"}[variant]
+	return map[string]string{"N": "67108864", "O": "67108864", "P": "67108864", "Q": "536870912", "R": "2147483648", "S": "4294967296",
+		"T": "67108864", "U": "67108864", "V": "67108864", "W": "67108864", "X": "67108864", "Y": "4294967296", "Z": "4294967296", "AA": "17179869184"}[variant]
 }
 
 func publicationRead400kVariant(variant string) bool {
@@ -853,6 +946,22 @@ func publicationRead400kVariant(variant string) bool {
 }
 
 func validatePublicationChunkLeg(root, variant string) error {
+	if publicationRAM16400kVariant(variant) {
+		for index, expected := range []string{"Z", "AA", "AA", "Z", "AA", "Z", "Z", "AA"} {
+			if variant == expected && root == filepath.Join(publicationRAM16400kRoot, fmt.Sprintf("leg-%02d-%s", index+1, expected)) {
+				return nil
+			}
+		}
+		return fmt.Errorf("RAM16 comparison requires its exact scheduled private leg")
+	}
+	if publicationPipeline400kVariant(variant) {
+		for index, expected := range []string{"T", "U", "U", "T", "U", "V", "V", "U", "V", "W", "W", "V", "W", "X", "X", "W", "X", "Y", "Y", "X"} {
+			if variant == expected && root == filepath.Join(publicationPipeline400kRoot, fmt.Sprintf("leg-%02d-%s", index+1, expected)) {
+				return nil
+			}
+		}
+		return fmt.Errorf("pipeline comparison requires its exact scheduled private leg")
+	}
 	if publicationCache400kVariant(variant) {
 		for index, expected := range []string{"N", "O", "O", "N", "N", "P", "P", "N", "N", "Q", "Q", "N", "N", "R", "R", "N", "N", "S", "S", "N"} {
 			if variant == expected && root == filepath.Join(publicationCache400kRoot, fmt.Sprintf("leg-%02d-%s", index+1, expected)) {
@@ -2468,6 +2577,12 @@ func TestPublicationChunk200kComparison(t *testing.T) {
 	if publicationCache400kVariant(variant) {
 		seriesRoot, parentRoot = publicationCache400kRoot, publicationCache400kParent
 	}
+	if publicationPipeline400kVariant(variant) {
+		seriesRoot = publicationPipeline400kRoot
+	}
+	if publicationRAM16400kVariant(variant) {
+		seriesRoot = publicationRAM16400kRoot
+	}
 	if variant == "I" || publicationRead400kVariant(variant) {
 		if variant == "I" {
 			seriesRoot = publicationImmutable200kRoot
@@ -2493,7 +2608,16 @@ func TestPublicationChunk200kComparison(t *testing.T) {
 	if publicationCache400kVariant(variant) {
 		binRoot = publicationCache400kBin
 	}
+	if publicationPipeline400kVariant(variant) {
+		binRoot = publicationPipeline400kBin
+	}
+	if publicationRAM16400kVariant(variant) {
+		binRoot = publicationRAM16400kBin
+	}
 	candidate, binary := filepath.Join(binRoot, "vaultic"), filepath.Join(binRoot, "new/vaulticdb")
+	if variant == "T" {
+		candidate = filepath.Join(binRoot, "control/vaultic")
+	}
 	if variant == "A" {
 		binary = filepath.Join(binRoot, "old/vaulticdb")
 	} else {
@@ -2506,6 +2630,9 @@ func TestPublicationChunk200kComparison(t *testing.T) {
 		entries := "4096"
 		if publicationCache400kVariant(variant) {
 			capacity, entries = publicationCache400kChunkBytes(variant), "16384"
+		}
+		if publicationRAM16400kVariant(variant) {
+			entries = "65536"
 		}
 		for name, expected := range map[string]string{
 			"VAULTICDB_CHUNK_CACHE_BYTES": capacity, "VAULTICDB_CHUNK_CACHE_ENTRIES": entries,
@@ -2597,6 +2724,12 @@ func TestPublicationChunk200kComparison(t *testing.T) {
 	if publicationCache400kVariant(variant) {
 		runtimePrefix = "/run/vaultic-unchanged-cache400k-retry4-"
 	}
+	if publicationPipeline400kVariant(variant) {
+		runtimePrefix = "/run/vaultic-unchanged-pipeline400k-"
+	}
+	if publicationRAM16400kVariant(variant) {
+		runtimePrefix = "/run/vaultic-unchanged-ram16400k-"
+	}
 	if resolved != controlRoot || !strings.HasPrefix(controlRoot, runtimePrefix) || info.Mode().Perm() != 0700 {
 		t.Fatal("chunk comparison requires a private canonical runtime")
 	}
@@ -2617,6 +2750,10 @@ func TestPublicationChunk200kComparison(t *testing.T) {
 		tuning.Flags = append(tuning.Flags, "--metadata-reconciliation-read-ahead=1")
 	} else if variant == "M" {
 		tuning.Flags = append(tuning.Flags, "--metadata-reconciliation-batch-size=500")
+	}
+	if publicationPipeline400kVariant(variant) {
+		tuning, err = publicationPipeline400kTuning(variant)
+		rtest.OK(t, err)
 	}
 	current := daemon.Options{Socket: filepath.Join(control, "db.sock"), RepositoryID: "c4d68689c785d02a28d6eec485c62132823dc9873ff7f627c2bac80258251528",
 		DaemonPath: binary, DataDir: filepath.Join(parentCell, "db"), WALDataDir: filepath.Join(parentCell, "db", "wal"),
@@ -3036,6 +3173,16 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 			args = append(args, "--parent="+parent.String())
 		}
 		args = append(args, source)
+		if publicationPipeline400kVariant(os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT")) {
+			profileRoot := filepath.Join(leg, "cpu")
+			rtest.OK(t, os.Mkdir(profileRoot, 0700))
+			rtest.OK(t, os.Chmod(profileRoot, 0700))
+			profile, err := os.OpenFile(filepath.Join(profileRoot, "cpu.pprof"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+			rtest.OK(t, err)
+			rtest.OK(t, profile.Close())
+			rtest.OK(t, os.Chmod(filepath.Join(profileRoot, "cpu.pprof"), 0600))
+			args = append(args, "--cpu-profile="+profileRoot)
+		}
 		wall, cpu := publicationQualificationCommand(t, leg, "backup", candidate, args...)
 		output, err := os.ReadFile(filepath.Join(leg, "backup.stdout.log"))
 		rtest.OK(t, err)

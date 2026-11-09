@@ -1473,11 +1473,19 @@ mod tests {
             DEFAULT_CHUNK_CACHE_BYTES
         );
         assert_eq!(
-            parse_chunk_cache_bytes("4294967296").unwrap() as u64,
+            parse_chunk_cache_bytes("4294967296").unwrap(),
+            4 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            parse_chunk_cache_bytes("8589934592").unwrap(),
+            8 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            parse_chunk_cache_bytes("17179869184").unwrap() as u64,
             MAX_CHUNK_CACHE_BYTES
         );
         for value in [
-            "4294967297",
+            "17179869185",
             "-1",
             "+1",
             " 1",
@@ -1502,7 +1510,7 @@ mod tests {
             (4096, 64, 16 * 1024 * 1024, 1024 * 1024, 4)
         );
         for (maximum, expected) in [
-            (MAX_CHUNK_CACHE_ENTRIES, 16384),
+            (MAX_CHUNK_CACHE_ENTRIES, 65536),
             (MAX_CHUNK_FLIGHTS, 256),
             (MAX_CHUNK_FLIGHT_BYTES, 64 * 1024 * 1024),
             (MAX_CACHED_CHUNK_BYTES, 4 * 1024 * 1024),

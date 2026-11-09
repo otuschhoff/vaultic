@@ -1092,6 +1092,160 @@ source ceiling, 200 GB combined RSS ceiling, storage reserve and SIGINT-first
 cleanup requirements remain. Main intervals shorter than 600 seconds remain
 short screens; physical NFS and production qualification are separate gates.
 
+### Pipeline And RAM Investigation
+
+The November 8 screen completed all 20 legs at
+`/volume2/NASDA2/vaultic-test-m6/pipeline-read-fme-cae1-20261108-400k`.
+Control and candidate CLIs used identical profiling/build options; the native
+daemon retained its qualified bytes. The parent database occupied 41153154586
+bytes (38.33 GiB). The fixed schedule was
+`TUUT | UVVU | VWWV | WXXW | XYYX`, with two observations per side per bracket.
+All legs reused exactly 400000 records, performed no new revision allocation
+or publication, and passed restore, encrypted reopen, zero-data-blob and
+unchanged-source checks. Main times were 187.459--288.343 seconds, or
+1387.24--2133.79 entries/s; backup commands were 192.823--294.227 seconds.
+Whole-leg peak combined RSS was 40.625--48.692 GB, below the 200 GB ceiling.
+
+| Change | Control Median, s | Candidate Median, s | Observed Time Ratio |
+| --- | ---: | ---: | ---: |
+| T to U: directory prefetch at group 16 | 250.811 | 253.428 | 0.990 |
+| U to V: publication group 64 | 261.919 | 277.284 | 0.945 |
+| V to W: one-batch collection read-ahead | 284.850 | 224.180 | 1.271 |
+| W to X: collection batch 5000 to 10000 | 223.198 | 228.724 | 0.976 |
+| X to Y: RAM-heavy native and CLI caches | 206.885 | 226.438 | 0.914 |
+
+Directory prefetch reduced each pointer/revision call count from about 66689
+to 25047; group 64 reduced it further to about 6300. Neither reduction alone
+improved whole-backup time in its bracket. Read-ahead reduced writer wait for
+prepared work from a median 183.781 to 79.947 seconds, while overlapping batch
+work increased from 83.655 to 126.851 seconds. These are overlapping phases,
+not additive worker CPU measurements. Keep batch 5000 for the next screen;
+batch 10000 did not improve the observed result.
+
+Y used native metadata/block caches of 8/8 GiB, authenticated-chunk retention
+of 4 GiB, and an 8 GiB CLI on-demand cache. Its exact-main logical ciphertext
+origin bytes fell from 49.936 to 41.493 GB (16.91%), with approximately 7.10 GB
+more median whole-leg peak RSS. This is useful work reduction, not a proven
+throughput regression or gain: the final X control had 140.764 accumulated
+origin-worker seconds versus 1658.936 in the preceding X control, despite
+nearly identical logical read volume. Host cache and origin service varied;
+two observations per side cannot settle a marginal RAM benefit.
+
+All 20 matched CLI CPU profiles decoded. They cover the whole backup command,
+not the exact main interval or native-daemon CPU. Representative W/Y profiles
+attribute roughly 28--29% cumulative sampled CPU to the file saver, 18--19%
+to chunk splitting, 15% to SHA-256, and 18% flat to syscalls. Cumulative paths
+overlap. These forced backups still read/chunk/hash source data even though
+they add no data blobs. Metadata RPC counts alone therefore cannot predict
+end-to-end throughput, and no source-read-byte counter was collected.
+
+The CLI lookup cache had zero evictions and a peak 213113 handles: the 64 MiB
+budget already allows 349525 accounted entries. An 8 GiB budget increases
+capacity to 44739242 handles but does not reduce a currently absent eviction
+cost. For planning only, twice this observed handle set needs about 78 MiB
+and ten times needs about 390 MiB at 192 accounted bytes/entry; 128/512 MiB
+are corresponding rounded budgets, not future performance qualifications.
+Native metadata/filter/index and block caches have different working sets;
+do not size them by total database bytes or conflate them with this CLI cache.
+
+Independent post-run validation replayed all 20 rows and report calculations,
+verified 620 leg checksums, 63 series checksums, 21 bundle checksums and all
+12 launch pins. No owned executable processes or private runtimes remained.
+Private decoded profiles and verification are retained in the sibling
+`pipeline-read-fme-cae1-20261108-400k-analysis` directory. The captures remain
+sealed and unchanged. No production defaults were changed. Causal speedup,
+physical NFS traffic, sustained 600-second operation and larger-database
+growth remain unqualified; proportional cache estimates are not a substitute
+for a representative retained-history/growing-live-set experiment.
+
+#### Larger Opt-In Chunk Cache Follow-Up
+
+The existing 4 GiB/16384-entry ceilings prevented testing substantially more
+RAM. The explicit supported ceilings are now 16 GiB/65536 entries, with the
+64 MiB/4096-entry defaults unchanged. All 44 encryption/cache tests, including
+offline cases, passed. Authentication, invalidation, per-cache byte accounting,
+shared budgets, single-flight limits and strict input bounds remain intact.
+
+The follow-up uses fresh native processes and one pinned candidate CLI/native
+pair for all eight legs: `Z AA AA Z | AA Z Z AA` (ABBA then BAAB, four
+observations per capacity). Z retains 4 GiB and AA 16 GiB; both allow 65536
+entries. Group 64, read-ahead 1, collection batch 5000, native metadata 2 GiB,
+block 512 MiB, CLI cache 64 MiB, 128 readers, RPC limit 32, eight crypto workers
+and existing fetch/range limits are fixed. The create-only root is
+`/volume2/NASDA2/vaultic-test-m6/ram16-read-fme-cae1-20261109-400k`.
+The 600-second backup-command deadline and all ownership, source, full-reuse,
+restore/reopen, read-only isolation, RSS and storage gates are unchanged.
+Status: all eight legs completed and were independently accepted. Each reused
+all 400000 records with no new allocation/publication and passed full restore,
+encrypted reopen, source identity and zero-data-blob checks. Main times were
+155.886--203.689 seconds (1963.78--2565.97 entries/s); backup commands took
+161.125--209.304 seconds, with no deadline or cleanup fallback failure.
+
+| Measurement | Z: 4 GiB Median | AA: 16 GiB Median |
+| --- | ---: | ---: |
+| Main seconds | 191.695 | 171.083 |
+| Backup-command seconds | 197.056 | 176.713 |
+| Exact-main logical ciphertext origin, GB | 41.697 | 25.850 |
+| Exact-main origin calls | 156812 | 96301 |
+| Exact-main authenticated-chunk hits / misses | 44574 / 155749 | 104938 / 95304 |
+| Exact-main authenticated-chunk evictions | 139577 | 29981 |
+| Exact-main crypto service, accumulated worker-seconds | 24.433 | 14.984 |
+| Whole-leg peak combined RSS, GB | 47.602 | 61.705 |
+
+The overall median-time ratio is 1.120: approximately 12.0% higher observed
+throughput, or 10.8% less main time. Both orderings favored 16 GiB: the ABBA
+bracket was 195.491 versus 183.477 seconds (ratio 1.065), and BAAB was
+189.360 versus 160.112 seconds (ratio 1.183). Logical ciphertext reads fell
+38.0%, origin calls 38.6%, and crypto-service worker time about 38.7%.
+Additional median whole-leg peak RSS was 14.103 GB, below the 200 GB guard.
+Logical read reduction is not physical NFS traffic measurement. Origin-worker
+times varied substantially, so the balanced short screen supports the RAM
+tradeoff but does not establish a causal speedup or an optimum cache size.
+
+All eight matched CLI profiles decoded. Representative adjacent BAAB profiles
+had nearly equal sampled CPU totals (477.63 and 478.64 seconds), with source
+chunking, hashing, syscalls and path handling still prominent. This is not a
+claim about exact-main or native CPU: the profiles cover whole backup commands.
+Extra chunk retention reduces authenticated-read work, not the forced source
+read/hash requirement. Increasing the unpressured CLI lookup cache is not a
+substitute for authenticated-chunk retention.
+
+Independent verification replayed every row and report calculation, verified
+248 leg checksums, 27 series checksums, 18 bundle checksums, two prelaunch
+checksums, all 13 launch pins and seven build-source pins before updating this
+document. No owned processes or any of the eight private runtimes remained.
+Raw profiles, decoded profiles, measurements and verification are retained in
+the private sibling `ram16-read-fme-cae1-20261109-400k-analysis`; original
+captures and build artifacts remain sealed and unchanged.
+
+#### Recommended Qualification Profile And Growth Gate
+
+Given the preference for RAM over marginal throughput loss, use 16 GiB
+authenticated-chunk retention with a 65536-entry ceiling for the next dedicated
+qualification. Keep group 64, one-batch read-ahead and collection batch 5000;
+the 10000-entry batch and broad 8 GiB CLI/metadata/block increases did not help
+in their brackets. Retain metadata 2 GiB, block 512 MiB and CLI lookup 64 MiB
+until their own occupancy/eviction evidence warrants growth. The opt-in chunk
+settings are `VAULTICDB_CHUNK_CACHE_BYTES=17179869184` and
+`VAULTICDB_CHUNK_CACHE_ENTRIES=65536`. This recommendation is specific to the
+tested dedicated-force/immutable benchmark case; it does not authorize changing
+production backend/freshness policies or bypassing their qualification.
+
+The combined implementation and 28 measured legs are complete, but the
+database remained 38.33 GiB with 400000 source entries. Substantial retained
+history and a larger changing live set were not generated. Larger-database
+performance therefore remains explicitly unqualified. A representative growth
+gate must measure both history-heavy and live-set-heavy databases, retaining
+exact authenticated read/RPC/cache occupancy, command deadlines, correctness
+and combined-RSS evidence under the same workload/order controls. Any increase
+to the explicit source/fixture/entry limits requires a separately bounded
+qualification; do not pad short runs or spoof filesystem identity. Budget
+memory for actual hot chunks, lookup handles, live publication working state
+and concurrent operations, rather than total database bytes alone. The current
+16 GiB ceiling is neither a promise that future working sets fit nor proof
+that a larger cache will be unnecessary. No production defaults, deployment,
+format, or filesystem identity were changed by this investigation.
+
 ### Immutable Dedicated-Force Baseline
 
 The new default benchmark case is explicitly

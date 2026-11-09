@@ -1225,6 +1225,9 @@ func (reconciler *Reconciler) prefetchExistingPublicationRecords(items []prepare
 			return
 		}
 		keys[index] = schema.CurrentInodeKey(item.identity.fsid, item.identity.inode)
+		if item.stat.Mode.IsDir() {
+			keys[index] = schema.CurrentDirectoryKey(item.identity.fsid, item.identity.inode)
+		}
 	}
 	started := time.Now()
 	values, found, err := reconciler.lookup(keys, &reconciler.pointerLookup)
@@ -1402,10 +1405,22 @@ func (reconciler *Reconciler) publishDirectories(directories []preparedItem, pub
 		item  preparedItem
 		value []byte
 	}
-	pending := make([]pendingDirectory, 0, publicationConcurrency)
+	groupSize := reconciler.options.PublicationGroupSize
+	if groupSize == 0 {
+		groupSize = publicationConcurrency
+	}
+	pending := make([]pendingDirectory, 0, groupSize)
 	flush := func() {
 		if len(pending) == 0 {
 			return
+		}
+		items := make([]preparedItem, len(pending))
+		for index, entry := range pending {
+			items[index] = entry.item
+		}
+		reconciler.prefetchExistingPublicationRecords(items)
+		for index := range pending {
+			pending[index].item = items[index]
 		}
 		type result struct {
 			key    []byte
@@ -1532,7 +1547,7 @@ func (reconciler *Reconciler) publishDirectories(directories []preparedItem, pub
 			continue
 		}
 		pending = append(pending, pendingDirectory{item: directory, value: value})
-		if len(pending) == publicationConcurrency {
+		if len(pending) == groupSize {
 			flush()
 		}
 	}
