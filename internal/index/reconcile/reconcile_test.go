@@ -2011,9 +2011,17 @@ func TestDaemonBackedDirectoryPublication(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = os.RemoveAll(root) })
 	}
+	passphrase := filepath.Join(socketDirectory, "recovery-passphrase")
+	if err := os.WriteFile(passphrase, []byte("directory publication latency fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(passphrase, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	client, err := daemon.Ensure(ctx, daemon.Options{
 		Socket: filepath.Join(socketDirectory, "daemon.sock"), RepositoryID: "directory-publication",
 		DaemonPath: reconciliationDaemonBinary(t), DataDir: root, WALFlushInterval: 25 * time.Millisecond,
+		EncryptionMode: "initialize", PassphraseFile: passphrase,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2038,6 +2046,9 @@ func TestDaemonBackedDirectoryPublication(t *testing.T) {
 	before, err := client.WriterStatus(ctx)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if metrics := before.Attribution.EncryptionReads; metrics == nil || metrics.CiphertextOriginLatencyBuckets == nil || metrics.ChunkWaitLatencyBuckets == nil || metrics.ChunkAdmissionLatencyBuckets == nil {
+		t.Fatal("encrypted native latency metrics were lost through authenticated writer status")
 	}
 	beforeRPC := client.CommitRPCStats()
 	published := make(map[string]publishedItem)
@@ -2085,6 +2096,7 @@ func TestDaemonBackedDirectoryPublication(t *testing.T) {
 	reopened, err := daemon.Ensure(ctx, daemon.Options{
 		Socket: filepath.Join(socketDirectory, "reopen.sock"), RepositoryID: "directory-publication",
 		DaemonPath: reconciliationDaemonBinary(t), DataDir: root, WALFlushInterval: 25 * time.Millisecond,
+		EncryptionMode: "required", PassphraseFile: passphrase,
 	})
 	if err != nil {
 		t.Fatal(err)

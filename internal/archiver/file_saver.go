@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/debug"
@@ -16,8 +18,60 @@ import (
 
 const chunkReadBufSize = 512 * 1024 // matches chunker internal read buffer size
 
+type SourceReadMetrics struct {
+	Calls          uint64    `json:"calls"`
+	Bytes          uint64    `json:"bytes"`
+	Nanoseconds    uint64    `json:"read_ns"`
+	Errors         uint64    `json:"errors"`
+	LatencyBuckets [8]uint64 `json:"latency_buckets"`
+}
+
+type sourceReadCounters struct {
+	calls, bytes, nanoseconds, errors atomic.Uint64
+	latencyBuckets                    [8]atomic.Uint64
+}
+
+func (arch *Archiver) SourceReadMetrics() SourceReadMetrics {
+	return arch.sourceReads.snapshot()
+}
+
+func (counters *sourceReadCounters) snapshot() SourceReadMetrics {
+	metrics := SourceReadMetrics{Calls: counters.calls.Load(), Bytes: counters.bytes.Load(), Nanoseconds: counters.nanoseconds.Load(), Errors: counters.errors.Load()}
+	for index := range metrics.LatencyBuckets {
+		metrics.LatencyBuckets[index] = counters.latencyBuckets[index].Load()
+	}
+	return metrics
+}
+
+type measuredSourceReader struct {
+	reader   io.Reader
+	counters *sourceReadCounters
+}
+
+func (reader measuredSourceReader) Read(buffer []byte) (int, error) {
+	started := time.Now()
+	count, err := reader.reader.Read(buffer)
+	elapsed := uint64(time.Since(started))
+	reader.counters.calls.Add(1)
+	reader.counters.bytes.Add(uint64(count))
+	reader.counters.nanoseconds.Add(elapsed)
+	if err != nil && err != io.EOF {
+		reader.counters.errors.Add(1)
+	}
+	bucket := 0
+	for _, upper := range [...]uint64{100_000, 1_000_000, 5_000_000, 20_000_000, 100_000_000, 500_000_000, 2_000_000_000} {
+		if elapsed <= upper {
+			break
+		}
+		bucket++
+	}
+	reader.counters.latencyBuckets[bucket].Add(1)
+	return count, err
+}
+
 // fileSaver concurrently saves incoming files to the repo.
 type fileSaver struct {
+	sourceReads  *sourceReadCounters
 	saveFilePool *bufferPool
 	uploader     vaultic.BlobSaverAsync
 
@@ -43,6 +97,7 @@ func newFileSaver(
 	debug.Log("new file saver with %v file workers", fileWorkers)
 
 	s := &fileSaver{
+		sourceReads:    &sourceReadCounters{},
 		uploader:       uploader,
 		saveFilePool:   newBufferPool(chunkerFactory.MaxChunkSize()),
 		chunkerFactory: chunkerFactory,
@@ -260,10 +315,11 @@ func (s *fileSaver) saveFile(ctx context.Context, params saveFileParams) {
 
 	node.Content = []vaultic.ID{}
 	node.Size = 0
+	reader := measuredSourceReader{reader: params.file, counters: s.sourceReads}
 	var idx int
 	for {
 		buf := s.saveFilePool.Get()
-		chunkData, err := params.chunkState.readNextChunk(params.file, params.chunker, buf.Data)
+		chunkData, err := params.chunkState.readNextChunk(reader, params.chunker, buf.Data)
 		if errors.Is(err, io.EOF) {
 			buf.Release()
 			break

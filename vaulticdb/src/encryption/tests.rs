@@ -1466,11 +1466,36 @@ mod tests {
     }
 
     #[test]
+    fn read_latency_buckets_cover_boundaries_and_overflow() {
+        let histogram = ReadLatencyBuckets::default();
+        for value in [0, 100_000, 100_001, 1_000_001, 5_000_001, 20_000_001, 100_000_001, 500_000_001, 2_000_000_001, u64::MAX] {
+            histogram.record(value);
+        }
+        assert_eq!(histogram.snapshot(), [2, 1, 1, 1, 1, 1, 1, 2]);
+    }
+
+    #[tokio::test]
+    async fn authenticated_reads_export_fetch_and_wait_latency() {
+        let encrypted = store(Arc::new(InMemory::new()), "repo-a");
+        let location = Path::from("compacted/latency.sst");
+        encrypted.put(&location, Bytes::from_static(b"latency fixture").into()).await.unwrap();
+        assert_eq!(encrypted.get_range(&location, 0..7).await.unwrap(), Bytes::from_static(b"latency"));
+        let metrics = &encrypted.read_metrics;
+        assert_eq!(metrics.ciphertext_origin_latency.snapshot().iter().sum::<u64>(), metrics.ciphertext_origin_calls.load(Ordering::Relaxed));
+        assert!(metrics.chunk_wait_latency.snapshot().iter().sum::<u64>() > 0);
+        assert!(metrics.chunk_wait_ns.load(Ordering::Relaxed) > 0);
+        let snapshot = metrics.snapshot();
+        for name in ["ciphertext_origin_latency_buckets", "chunk_wait_latency_buckets", "chunk_admission_latency_buckets"] {
+            assert_eq!(snapshot[name].as_array().unwrap().len(), 8);
+        }
+    }
+
+    #[test]
     fn chunk_cache_configuration_is_bounded() {
         assert_eq!(parse_chunk_cache_bytes("0").unwrap(), 0);
         assert_eq!(
             parse_chunk_cache_bytes("67108864").unwrap(),
-            DEFAULT_CHUNK_CACHE_BYTES
+            64 * 1024 * 1024
         );
         assert_eq!(
             parse_chunk_cache_bytes("4294967296").unwrap(),
@@ -1481,11 +1506,19 @@ mod tests {
             8 * 1024 * 1024 * 1024
         );
         assert_eq!(
-            parse_chunk_cache_bytes("17179869184").unwrap() as u64,
+            parse_chunk_cache_bytes("17179869184").unwrap(),
+            DEFAULT_CHUNK_CACHE_BYTES
+        );
+        assert_eq!(
+            parse_chunk_cache_bytes("34359738368").unwrap(),
+            32 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            parse_chunk_cache_bytes("68719476736").unwrap() as u64,
             MAX_CHUNK_CACHE_BYTES
         );
         for value in [
-            "17179869185",
+            "68719476737",
             "-1",
             "+1",
             " 1",
@@ -1507,10 +1540,10 @@ mod tests {
                 defaults.chunk_bytes,
                 defaults.range_chunks
             ),
-            (4096, 64, 16 * 1024 * 1024, 1024 * 1024, 4)
+            (65536, 64, 16 * 1024 * 1024, 1024 * 1024, 4)
         );
         for (maximum, expected) in [
-            (MAX_CHUNK_CACHE_ENTRIES, 65536),
+            (MAX_CHUNK_CACHE_ENTRIES, 262144),
             (MAX_CHUNK_FLIGHTS, 256),
             (MAX_CHUNK_FLIGHT_BYTES, 64 * 1024 * 1024),
             (MAX_CACHED_CHUNK_BYTES, 4 * 1024 * 1024),

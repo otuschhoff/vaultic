@@ -51,6 +51,10 @@ RAM16_BIN = WORKSPACE / 'bin/phase35-ram16400k-20261109/linux-amd64'
 RAM16_VARIANTS = {'Z': (512 << 20, 4 << 30), 'AA': (512 << 20, 16 << 30)}
 RAM16_SCHEDULE = ('Z', 'AA', 'AA', 'Z', 'AA', 'Z', 'Z', 'AA')
 CACHE_VARIANTS.update(RAM16_VARIANTS)
+SCALE800K_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/bottleneck-parent-fme-cae1-20261109-800k')
+SCALE800K_BIN = WORKSPACE / 'bin/phase35-bottleneck800k-20261109/linux-amd64'
+SCALE800K_RUNTIME = Path('/run/vaultic-unchanged-bottleneck800k-20261109')
+SCALE800K_CHUNKS = {'VAULTICDB_CHUNK_CACHE_BYTES': 16 << 30, 'VAULTICDB_CHUNK_CACHE_ENTRIES': 65536}
 ACCEPTED = Path('/volume2/NASDA2/vaultic-test-m6/critical-path-fme_cae1-20261102-production-cap100k/group-64')
 SEED = Path('/ncl1-1-vs-50/fme_dump/amakura/db.begin-readiness-20261001-fuU56R')
 CANDIDATE = WORKSPACE / 'bin/phase35-metadata-read/linux-amd64/vaultic'
@@ -69,6 +73,7 @@ DB_OVERRIDES = {
     'db-control-end': {},
 }
 FOLLOWUP_OVERRIDES = {
+    'db-scale800k': {'meta_cache_bytes': 2 << 30, 'readers': 128, 'publication_group_size': 64},
     'db-scale400k': {'meta_cache_bytes': 2 << 30, 'readers': 128, 'publication_group_size': 16},
     'db-scale200k': {'meta_cache_bytes': 2 << 30, 'readers': 128, 'publication_group_size': 16},
     'db-cache2g-start': {'meta_cache_bytes': 2 << 30},
@@ -102,6 +107,8 @@ DB_OVERRIDES.update(FOLLOWUP_OVERRIDES)
 
 
 def binaries(profile):
+    if profile == 'db-scale800k':
+        return SCALE800K_BIN / 'vaultic', SCALE800K_BIN / 'vaulticdb'
     if profile == 'db-scale400k':
         return RECONCILE_BIN / 'vaultic', RECONCILE_BIN / 'vaulticdb'
     candidate = (WORKSPACE / 'bin/phase35-forced-followup/linux-amd64/vaultic'
@@ -174,6 +181,8 @@ def observe_db_settings(group, settings, native=NATIVE, chunk_variant=None):
                 expected.update(chunk_settings(chunk_variant))
                 if chunk_variant == 'A' and any(name.encode() in values for name in chunk_settings('C')):
                     raise ValueError('baseline unexpectedly inherited chunk configuration')
+            if settings.get('sample_entries') == 800000:
+                expected.update(SCALE800K_CHUNKS)
             if any(values.get(name.encode()) != str(value).encode() for name, value in expected.items()):
                 raise ValueError('owned daemon tuning environment differs')
             workers = sum(task.joinpath('comm').read_text().strip().startswith('vaulticdb-crypt')
@@ -187,6 +196,8 @@ def observe_db_settings(group, settings, native=NATIVE, chunk_variant=None):
 
 def cache_profile_settings(profile, variant=None):
     settings = profile_settings(profile)
+    if profile == 'db-scale800k':
+        settings['sample_entries'] = 800000
     if variant in CACHE_VARIANTS:
         if profile != 'db-scale400k':
             raise ValueError('cache variant requires the exact 400k profile')
@@ -204,6 +215,12 @@ def cache_profile_settings(profile, variant=None):
 def paths(mode, inode_limit=10000, profile=None):
     if mode not in ('parallel', 'coalesced', 'catalog'):
         raise ValueError('unknown metadata-read mode')
+    if inode_limit == 800000:
+        if (mode, profile) != ('coalesced', 'db-scale800k'):
+            raise ValueError('800k requires its explicit forced-only scale profile')
+        return SCALE800K_ROOT, SCALE800K_RUNTIME
+    if profile == 'db-scale800k':
+        raise ValueError('800k profile requires exactly 800000 entries')
     if inode_limit == 400000:
         if (mode, profile) != ('coalesced', 'db-scale400k'):
             raise ValueError('400k requires its explicit forced-only scale profile')
@@ -266,7 +283,7 @@ def protect(profile=None, chunk=False, cache=False, extra_roots=()):
     protected = [SEED, ACCEPTED, Path('/volume2/NASDA2/rustic'), WORKSPACE, PREVIOUS / 'group-64', PREVIOUS / 'input']
     if profile is not None:
         protected.append(FIFTY)
-    if profile in ('db-scale200k', 'db-scale400k'):
+    if profile in ('db-scale200k', 'db-scale400k', 'db-scale800k'):
         protected.append(SCALE_SOURCE)
     if chunk:
         protected.append(RECONCILE_PARENT if profile == 'db-scale400k' else SCALE_ROOT)
@@ -343,10 +360,14 @@ class BackupRuntimeGuard:
             if self.started is None or not math.isfinite(finished_seconds) or finished_seconds < 0:
                 raise ValueError('invalid backup runtime completion receipt')
             if finished_seconds > self.limit:
-                raise ValueError('backup runtime exceeded the 600-second limit; stop owned process group')
+                raise ValueError(f'backup runtime exceeded the {self.limit}-second limit; stop owned process group')
             self.finished = True
         elif self.started is not None and now - self.started >= self.limit:
-            raise ValueError('backup runtime exceeded the 600-second limit; stop owned process group')
+            raise ValueError(f'backup runtime exceeded the {self.limit}-second limit; stop owned process group')
+
+
+def runtime_limits(inode_limit):
+    return (1200, 57600, '15h40m') if inode_limit == 800000 else (600, 28800, '7h50m')
 
 
 def validate_cache_progress(event):
@@ -363,6 +384,7 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
     root, runtime = paths(mode, inode_limit, profile) if chunk_leg is None else chunk_paths(chunk_leg)
     candidate, native = binaries(profile)
     chunk_variant = None
+    backup_limit, total_limit, test_timeout = runtime_limits(inode_limit)
     if chunk_leg is not None:
         expected_profile = 'db-scale400k' if inode_limit == 400000 else 'db-scale200k'
         if mode != 'coalesced' or profile != expected_profile or inode_limit not in (200000, 400000):
@@ -409,11 +431,11 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
                      'read_concurrency': settings['readers'] if settings is not None else None,
                      'metadata_read_concurrency': settings['rpc_limit'] if settings is not None else None,
                      'rss_ceiling_bytes': RSS_CEILING, 'disk_floor_bytes': FLOOR, 'fixture_ceiling_bytes': ceiling,
-                     'managed_ram_limit': '160GiB', 'scratch_limit': '2GiB', 'total_timeout_seconds': 28800,
-                     'backup_runtime_limit_seconds': 600 if chunk_variant in CACHE_VARIANTS else None,
+                     'managed_ram_limit': '160GiB', 'scratch_limit': '2GiB', 'total_timeout_seconds': total_limit,
+                     'backup_runtime_limit_seconds': backup_limit if chunk_variant in CACHE_VARIANTS or inode_limit == 800000 else None,
                      'backup_runtime_scope': 'CLI backup only; excludes cloning, preflight, restore and reopen',
-                     'schedule': (['parent-clone', 'forced', 'restore', 'reopen'] if chunk_leg is not None else (['source-freeze', 'parent-setup', 'forced'] if inode_limit in (200000, 400000) else (['forced'] if profile is not None else (['unforced', 'forced'] if inode_limit == 10000 else ['parent-setup', 'unforced', 'forced'])))), 'production_repository_writable': False,
-                     'source': str((RECONCILE_PARENT if inode_limit == 400000 else SCALE_ROOT) / 'input') if chunk_leg is not None else (str(root / 'input') if inode_limit in (200000, 400000) else (str(FIFTY / 'input') if profile is not None else (str(PREVIOUS / 'input') if inode_limit == 10000 else str(ACCEPTED / 'restore/ncl1-1-vs-50/fme_cae1')))), 'toolchains': {
+                     'schedule': (['parent-clone', 'forced', 'restore', 'reopen'] if chunk_leg is not None else (['source-freeze', 'parent-setup', 'forced'] if inode_limit in (200000, 400000, 800000) else (['forced'] if profile is not None else (['unforced', 'forced'] if inode_limit == 10000 else ['parent-setup', 'unforced', 'forced'])))), 'production_repository_writable': False,
+                     'source': str((RECONCILE_PARENT if inode_limit == 400000 else SCALE_ROOT) / 'input') if chunk_leg is not None else (str(root / 'input') if inode_limit in (200000, 400000, 800000) else (str(FIFTY / 'input') if profile is not None else (str(PREVIOUS / 'input') if inode_limit == 10000 else str(ACCEPTED / 'restore/ncl1-1-vs-50/fme_cae1')))), 'toolchains': {
                          name: subprocess.check_output(command, text=True).strip() for name, command in
                          [('go', ['go', 'version']), ('rust', ['rustc', '--version']), ('cargo', ['cargo', '--version'])]}})
     environment = {key: value for key, value in os.environ.items()
@@ -432,8 +454,8 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
                             'VAULTIC_PHASE35_METADATA_READ_CONCURRENCY_PROFILE': profile})
         if db_screen:
             environment['VAULTICDB_CRYPTO_THREADS'] = str(settings['crypto_threads'])
-        if inode_limit in (200000, 400000):
-            test_name = 'TestPublicationScale400kQualification' if inode_limit == 400000 else 'TestPublicationScale200kQualification'
+        if inode_limit in (200000, 400000, 800000):
+            test_name = f'TestPublicationScale{inode_limit // 1000}kQualification'
             environment.pop('VAULTIC_PHASE35_METADATA_READ_INODE_LIMIT')
             environment.pop('VAULTIC_PHASE35_THROUGHPUT_FORCE_COMPARE_RETRY')
             environment.update({'VAULTIC_PHASE35_SCALE_INODE_LIMIT': str(inode_limit),
@@ -442,6 +464,8 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
                                 'VAULTIC_PHASE35_THROUGHPUT_SOURCE': str(root / 'input'),
                                 'VAULTIC_PHASE35_THROUGHPUT_CANDIDATE': str(candidate),
                                 'VAULTIC_PHASE35_THROUGHPUT_NATIVE': str(native)})
+            if inode_limit == 800000:
+                environment.update({key: str(value) for key, value in SCALE800K_CHUNKS.items()})
     elif inode_limit == 50000:
         test_name = 'TestPublicationBackupQualification'
         environment.pop('VAULTIC_PHASE35_THROUGHPUT_FORCE_COMPARE_RETRY')
@@ -462,7 +486,7 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
               'concurrency_profile': profile, 'forced_only': profile is not None, 'db_settings_verified': False}
     started = time.monotonic()
     progress_offset, progress_pending = 0, b''
-    backup_guard = BackupRuntimeGuard()
+    backup_guard = BackupRuntimeGuard(backup_limit)
     try:
         with private_output(driver / 'observer.stdout.log') as observer_output, private_output(driver / 'observer.stderr.log') as observer_errors:
             observer = subprocess.Popen([sys.executable, str(WORKSPACE / 'helpers/phase35-m6/observe.py'), '--root', str(root),
@@ -474,7 +498,7 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
                     raise ValueError('observer readiness failed')
                 threading.Event().wait(0.05)
             with private_output(driver / 'stdout.log') as output, private_output(driver / 'stderr.log') as errors, private_output(driver / 'rss.jsonl', text=True) as samples:
-                process = subprocess.Popen([str(root / 'qualifier.test'), '-test.run=^' + test_name + '$', '-test.v', '-test.timeout=7h50m'],
+                process = subprocess.Popen([str(root / 'qualifier.test'), '-test.run=^' + test_name + '$', '-test.v', '-test.timeout=' + test_timeout],
                                            stdout=output, stderr=errors, env=environment, cwd=WORKSPACE / 'cmd/vaultic', start_new_session=True)
                 last_storage = 0
                 while True:
@@ -483,7 +507,7 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
                     if actual_settings:
                         result['db_settings_verified'] = True
                     elapsed = time.monotonic() - started
-                    if chunk_variant in CACHE_VARIANTS:
+                    if chunk_variant in CACHE_VARIANTS or inode_limit == 800000:
                         stage = root / 'group-64/forced'
                         completed = stage / 'backup.runtime-finished.json'
                         seconds = None
@@ -514,7 +538,7 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
                         if storage_bytes(root) > ceiling:
                             raise ValueError('fixture byte ceiling reached')
                         last_storage = elapsed
-                    if observer.poll() is not None or rss > RSS_CEILING or elapsed >= 28800 or shutil.disk_usage(root).free < FLOOR:
+                    if observer.poll() is not None or rss > RSS_CEILING or elapsed >= total_limit or shutil.disk_usage(root).free < FLOOR:
                         raise ValueError('observer, RSS, time or disk safety limit reached')
                     try:
                         process.wait(timeout=0.25)
@@ -534,7 +558,7 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
                     raise ValueError('pin or fixture ceiling differs')
                 if db_screen and not result['db_settings_verified']:
                     raise ValueError('actual owned daemon tuning was not verified')
-                if chunk_variant in CACHE_VARIANTS and not backup_guard.finished:
+                if (chunk_variant in CACHE_VARIANTS or inode_limit == 800000) and not backup_guard.finished:
                     raise ValueError('cache backup lacks completed runtime guard receipt')
                 result['accepted'] = True
     except BaseException as error:
@@ -550,7 +574,7 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
             result['failure'] = 'cleanup: ' + type(error).__name__ + ': ' + str(error)
         finally:
             result['wall_seconds'] = time.monotonic() - started
-            if chunk_variant in CACHE_VARIANTS:
+            if chunk_variant in CACHE_VARIANTS or inode_limit == 800000:
                 result['backup_runtime_limit_seconds'] = backup_guard.limit
                 result['backup_runtime_guard_finished'] = backup_guard.finished
             result['owned_process_exit_code'] = None if process is None else process.returncode
@@ -585,6 +609,133 @@ def cache_parent_file_count(parent, source):
     return files
 
 
+def latency_summary(buckets, nanoseconds=None):
+    if buckets is None:
+        return None
+    if not isinstance(buckets, list) or len(buckets) != 8 or any(type(value) is not int or value < 0 for value in buckets):
+        raise ValueError('invalid bounded latency histogram')
+    count = sum(buckets)
+    upper_ms = [0.1, 1, 5, 20, 100, 500, 2000, None]
+    result = {'samples': count, 'samples_over_2s': buckets[-1], 'bucket_counts': buckets,
+              'mean_ms': nanoseconds / count / 1000000 if count and nanoseconds is not None else None}
+    for percentile in (50, 95, 99):
+        target, accumulated, bound = math.ceil(count * percentile / 100), 0, None
+        if count:
+            for index, value in enumerate(buckets):
+                accumulated += value
+                if accumulated >= target:
+                    bound = upper_ms[index]
+                    break
+        result[f'p{percentile}_upper_bound_ms'] = bound
+    return result
+
+
+def encryption_counter_deltas(first, last):
+    result = {}
+    for name, before in first.items():
+        if name == 'read_windows':
+            continue
+        after = last[name]
+        if name.endswith('latency_buckets'):
+            latency_summary(before)
+            latency_summary(after)
+            if any(now < earlier for now, earlier in zip(after, before)):
+                raise ValueError('follow-up latency counter reset')
+            result[name] = [now - earlier for now, earlier in zip(after, before)]
+        else:
+            if after < before:
+                raise ValueError('follow-up encryption counter reset')
+            result[name] = after - before
+    return result
+
+
+def bottleneck_report(critical):
+    encryption, source = critical.get('encryption_reads') or {}, critical.get('source_reads')
+    reconciliation = critical.get('reconciliation') or {}
+    latencies = {}
+    for name, buckets, timing in (('origin_fetch', 'ciphertext_origin_latency_buckets', 'ciphertext_origin_ns'),
+                                 ('chunk_result_wait', 'chunk_wait_latency_buckets', 'chunk_wait_ns'),
+                                 ('fetch_admission_wait', 'chunk_admission_latency_buckets', 'chunk_admission_wait_ns')):
+        latencies[name] = latency_summary(encryption.get(buckets), encryption.get(timing))
+    latencies['source_read'] = None if source is None else latency_summary(source.get('latency_buckets'), source.get('read_ns'))
+    return {'latency': latencies, 'source_reads': source,
+            'origin_logical_bytes': encryption.get('ciphertext_origin_bytes'),
+            'chunk_misses': encryption.get('chunk_cache_misses'), 'chunk_evictions': encryption.get('chunk_cache_evictions'),
+            'pipeline_seconds': {name: reconciliation[name] / 1000000000 for name in
+                                 ('writer_wait_prepared_ns', 'writer_batch_ns', 'stat_worker_ns', 'prepare_blocked_worker_ns')
+                                 if name in reconciliation},
+            'timing_scope': 'main-interval accumulated worker/caller durations; overlap, not additive wall time',
+            'physical_nfs_traffic_measured': False, 'critical_path_blocked_time_qualified': False,
+            'limits': ['source bytes count actual reader returns, including retries; not NAS disk bytes',
+                       'chunk-result waits include fetch/decrypt and coalesced followers, not storage alone',
+                       'NFS mount intervals remain shared; temporal correlation does not prove attribution',
+                       'percentiles are fixed-bucket upper bounds; overflow and unavailable bounds are null']}
+
+
+def bottleneck_windows(path):
+    windows, previous, dropped = [], None, 0
+    nfs = {name: 0 for name in ('calls', 'rtt_ms', 'execute_ms', 'received_bytes')}
+    with path.open() as stream:
+        while line := stream.readline(2 << 20):
+            if not line.endswith('\n'):
+                raise ValueError('observation exceeds bounded parser limit or is incomplete')
+            record = json.loads(line)
+            for mount in record.get('host_shared', {}).get('nfs_mount_intervals', []):
+                read = mount.get('operations', {}).get('READ', {})
+                for name in nfs:
+                    nfs[name] += read.get(name, 0)
+            for event in record.get('new_operation_telemetry', []):
+                if event['source'] != 'group-64/forced/backup.stdout.log':
+                    continue
+                current = event['snapshot']
+                seconds = current.get('critical_path_seconds_elapsed')
+                if seconds is None or previous is not None and seconds == previous['critical_path_seconds_elapsed']:
+                    continue
+                if previous is not None:
+                    elapsed = seconds - previous['critical_path_seconds_elapsed']
+                    if not math.isfinite(elapsed) or elapsed <= 0:
+                        raise ValueError('critical-path observation time reset')
+                    first, last = previous.get('encryption_reads'), current.get('encryption_reads')
+                    encryption = encryption_counter_deltas(first, last) if first is not None and last is not None else {}
+                    first, last = previous.get('source_reads'), current.get('source_reads')
+                    source = encryption_counter_deltas(first, last) if first is not None and last is not None else None
+                    first, last = previous.get('reconciliation', {}), current.get('reconciliation', {})
+                    reconciliation = {}
+                    for name in ('scanned', 'writer_wait_prepared_ns', 'writer_batch_ns', 'stat_worker_ns', 'prepare_blocked_worker_ns'):
+                        if name in first and name in last:
+                            if last[name] < first[name]:
+                                raise ValueError('reconciliation observation counter reset')
+                            reconciliation[name] = last[name] - first[name]
+                    window = bottleneck_report({'encryption_reads': encryption, 'source_reads': source, 'reconciliation': reconciliation})
+                    window.update(start_seconds=previous['critical_path_seconds_elapsed'], end_seconds=seconds,
+                                  interval_seconds=elapsed, scanned_per_second=reconciliation.get('scanned', 0) / elapsed if 'scanned' in reconciliation else None,
+                                  shared_nfs_read_mean_rtt_ms=nfs['rtt_ms'] / nfs['calls'] if nfs['calls'] else None,
+                                  shared_nfs_read_rpc_bytes=nfs['received_bytes'] if nfs['calls'] else None)
+                    if len(windows) == 2048:
+                        windows.pop(0)
+                        dropped += 1
+                    windows.append(window)
+                previous = current
+                nfs = {name: 0 for name in nfs}
+    correlations = {}
+    for name, value in (('source_read_mean_ms', lambda window: (window['latency']['source_read'] or {}).get('mean_ms')),
+                        ('origin_fetch_mean_ms', lambda window: (window['latency']['origin_fetch'] or {}).get('mean_ms')),
+                        ('prepared_wait_seconds', lambda window: window['pipeline_seconds'].get('writer_wait_prepared_ns')),
+                        ('shared_nfs_read_mean_rtt_ms', lambda window: window['shared_nfs_read_mean_rtt_ms'])):
+        pairs = [(window['scanned_per_second'], value(window)) for window in windows
+                 if window['scanned_per_second'] is not None and value(window) is not None]
+        correlation = None
+        if len(pairs) >= 3:
+            try:
+                correlation = statistics.correlation([pair[0] for pair in pairs], [pair[1] for pair in pairs])
+            except statistics.StatisticsError:
+                pass
+        correlations[name] = {'paired_windows': len(pairs), 'pearson_r': correlation}
+    return {'windows': windows, 'windows_dropped': dropped, 'correlations_with_scanned_rate': correlations,
+            'scope': 'approximate observer-aligned intervals; NFS mount counters are shared',
+            'causal_attribution_qualified': False}
+
+
 def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None):
     outcome = json.loads((root / 'outcome.json').read_text())
     measured = json.loads((root / 'group-64/forced/result.json').read_text())
@@ -595,7 +746,7 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
     expected_entries, expected_regular, expected_bytes = 50000, 41347, 19493496103
     expected_digest = '8f32883b02c37ae550a0375fa6abfe79ec52d830ef0d9cff1053522687a41e87'
     expected_parent = '60dfb46069fb4e18b603d69caf61dc3ca1db76099089ab18396985aa8c9f8e2b'
-    if inode_limit in (200000, 400000):
+    if inode_limit in (200000, 400000, 800000):
         if profile != f'db-scale{inode_limit // 1000}k':
             raise ValueError('scale receipt requires its explicit scale profile')
         source = json.loads((root / 'source-observation.json').read_text())
@@ -628,6 +779,8 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
                       f"--metadata-batch-delay={settings['batch_delay_ns'] // 1000000}ms",
                       f"--metadata-publication-group-size={settings['publication_group_size']}"]
     expected_flags += reconciliation_flags(variant)
+    if inode_limit == 800000:
+        expected_flags += ['--metadata-collection-batch-size=5000', '--metadata-collection-read-ahead=1']
     if measured['metadata_read_flags'] != expected_flags or measured['candidate'] != str(expected_candidate or binaries(profile)[0]) or measured['engine_multi_get'] is not True:
         raise ValueError('follow-up binary, batching, concurrency or engine settings differ')
     before, after = measured['writer_before'], measured['writer_after']
@@ -645,11 +798,15 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
                         raise ValueError('follow-up cache counter reset')
                     deltas[field][kind][name] = last[kind][name] - first[kind][name]
         else:
-            counters = [name for name in first if name != 'read_windows']
-            if any(last[name] < first[name] for name in counters):
-                raise ValueError('follow-up encryption counter reset')
-            deltas[field] = {name: last[name] - first[name] for name in counters}
+            deltas[field] = encryption_counter_deltas(first, last)
     critical = measured['critical_path']
+    if inode_limit == 800000:
+        require_cache_reuse(critical['reconciliation'], expected_entries)
+        cpu = root / 'group-64/forced/cpu/cpu.pprof'
+        if not cpu.is_file() or not 0 < cpu.stat().st_size <= 32 << 20 or cpu.stat().st_mode & 0o777 != 0o600:
+            raise ValueError('800k CPU profile lacks private bounded capture')
+        if outcome.get('backup_runtime_limit_seconds') != 1200 or outcome.get('backup_runtime_guard_finished') is not True:
+            raise ValueError('800k capture lacks accepted 1200-second backup runtime guard')
     if variant in CACHE_VARIANTS:
         require_cache_reuse(critical['reconciliation'], expected_entries)
         preflight = json.loads((root / 'group-64/forced/reuse-preflight.json').read_text())
@@ -668,6 +825,8 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
             'command_seconds': measured['command_seconds'], 'entries': expected_entries, 'entries_per_second': expected_entries / main,
             'cli_cpu_seconds': measured['cli_cpu_seconds'], 'publication_stages': stages,
             'reconciliation': critical['reconciliation'], 'deltas': deltas,
+            'bottlenecks': bottleneck_report(critical),
+            'bottleneck_windows': bottleneck_windows(root / 'observations.jsonl') if inode_limit == 800000 else None,
             'main_encryption': critical.get('encryption_reads'),
             'read_windows': read_window_deltas(before['attribution']['encryption_reads'], critical.get('encryption_reads') or {}),
             'peak_combined_rss_bytes': outcome['peak_combined_rss_bytes'],
@@ -1070,6 +1229,71 @@ def execute_chunk_series(immutable=False, reconcile=False, caches=False, pipelin
 
 
 class ChunkComparisonTests(unittest.TestCase):
+    def test_bottleneck_windows_align_rates_and_latency(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'observations.jsonl'
+            records = []
+            for seconds in (5, 10, 15, 20):
+                snapshot = {'critical_path_seconds_elapsed': seconds,
+                            'reconciliation': {'scanned': seconds * 100, 'writer_wait_prepared_ns': seconds * 1000000},
+                            'source_reads': {'bytes': seconds * 1000, 'calls': seconds, 'read_ns': seconds * 1000000,
+                                             'latency_buckets': [0, seconds, 0, 0, 0, 0, 0, 0]},
+                            'encryption_reads': {'ciphertext_origin_ns': seconds * 1000000,
+                                                  'ciphertext_origin_latency_buckets': [0, seconds, 0, 0, 0, 0, 0, 0]}}
+                records.append({'new_operation_telemetry': [{'source': 'group-64/forced/backup.stdout.log', 'snapshot': snapshot}],
+                                'host_shared': {'nfs_mount_intervals': [{'operations': {'READ': {'calls': 10, 'rtt_ms': 50, 'received_bytes': 1000}}}]}})
+            path.write_text(''.join(json.dumps(record) + '\n' for record in records))
+            report = bottleneck_windows(path)
+            self.assertEqual(len(report['windows']), 3)
+            self.assertEqual(report['windows'][0]['scanned_per_second'], 100)
+            self.assertEqual(report['windows'][0]['source_reads']['bytes'], 5000)
+            self.assertEqual(report['windows'][0]['shared_nfs_read_mean_rtt_ms'], 5)
+            self.assertIsNone(report['correlations_with_scanned_rate']['source_read_mean_ms']['pearson_r'])
+            self.assertFalse(report['causal_attribution_qualified'])
+
+    def test_latency_deltas_and_bottleneck_report(self):
+        first = {'reads': 1, 'ciphertext_origin_latency_buckets': [1, 1, 1, 1, 1, 1, 1, 1]}
+        last = {'reads': 3, 'ciphertext_origin_latency_buckets': [2, 2, 2, 2, 2, 2, 2, 2]}
+        delta = encryption_counter_deltas(first, last)
+        self.assertEqual(delta['ciphertext_origin_latency_buckets'], [1] * 8)
+        self.assertEqual(first['ciphertext_origin_latency_buckets'], [1] * 8)
+        with self.assertRaises(ValueError):
+            encryption_counter_deltas(last, first)
+        for invalid in ([], [0] * 7, [0] * 9, [0] * 7 + [-1], [0] * 7 + [True]):
+            with self.assertRaises(ValueError):
+                latency_summary(invalid)
+        summary = latency_summary([0, 50, 45, 4, 1, 0, 0, 0], 100000000)
+        self.assertEqual(summary['p50_upper_bound_ms'], 1)
+        self.assertEqual(summary['p95_upper_bound_ms'], 5)
+        self.assertEqual(summary['p99_upper_bound_ms'], 20)
+        self.assertIsNone(latency_summary([0] * 8)['p50_upper_bound_ms'])
+        report = bottleneck_report({'encryption_reads': dict(delta, ciphertext_origin_ns=8000000),
+                                    'source_reads': {'bytes': 123, 'read_ns': 1000000, 'latency_buckets': [0, 1, 0, 0, 0, 0, 0, 0]},
+                                    'reconciliation': {'writer_wait_prepared_ns': 2000000000}})
+        self.assertEqual(report['latency']['origin_fetch']['samples'], 8)
+        self.assertEqual(report['source_reads']['bytes'], 123)
+        self.assertEqual(report['pipeline_seconds']['writer_wait_prepared_ns'], 2)
+        self.assertFalse(report['physical_nfs_traffic_measured'])
+        self.assertFalse(report['critical_path_blocked_time_qualified'])
+        self.assertIsNone(bottleneck_report({})['latency']['origin_fetch'])
+
+    def test_scale800k_routes_and_deadlines(self):
+        self.assertEqual(paths('coalesced', 800000, 'db-scale800k'), (SCALE800K_ROOT, SCALE800K_RUNTIME))
+        self.assertEqual(binaries('db-scale800k'), (SCALE800K_BIN / 'vaultic', SCALE800K_BIN / 'vaulticdb'))
+        self.assertEqual(runtime_limits(800000), (1200, 57600, '15h40m'))
+        self.assertEqual(runtime_limits(400000), (600, 28800, '7h50m'))
+        for size, profile in ((400000, 'db-scale800k'), (800000, 'db-scale400k')):
+            with self.assertRaises(ValueError):
+                paths('coalesced', size, profile)
+        guard = BackupRuntimeGuard(1200)
+        guard.observe(0, True)
+        guard.observe(1199, True)
+        with self.assertRaisesRegex(ValueError, '1200-second limit'):
+            guard.observe(1200, True)
+        self.assertEqual(SCALE800K_CHUNKS, {'VAULTICDB_CHUNK_CACHE_BYTES': 17179869184,
+                                         'VAULTICDB_CHUNK_CACHE_ENTRIES': 65536})
+
     def test_ram16_routes_capacity_and_report(self):
         rows = []
         for index, variant in enumerate(RAM16_SCHEDULE, 1):
@@ -1364,7 +1588,7 @@ def execute_series():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', required=True, choices=('parallel', 'coalesced', 'catalog'))
-    parser.add_argument('--inode-limit', type=int, choices=(10000, 50000, 200000, 400000), default=10000)
+    parser.add_argument('--inode-limit', type=int, choices=(10000, 50000, 200000, 400000, 800000), default=800000)
     parser.add_argument('--concurrency-profile', choices=('baseline', 'rpcs', 'readers', *DB_OVERRIDES))
     parser.add_argument('--prepare', action='store_true')
     parser.add_argument('--series', action='store_true')
@@ -1378,6 +1602,8 @@ if __name__ == '__main__':
     parser.add_argument('--chunk-self-test', action='store_true')
     parser.add_argument('--chunk-leg')
     arguments = parser.parse_args()
+    if arguments.inode_limit == 800000 and arguments.concurrency_profile is None:
+        arguments.concurrency_profile = 'db-scale800k'
     os.umask(0o077)
     if arguments.prepare_cache_parent:
         if (arguments.mode, arguments.inode_limit, arguments.concurrency_profile) != ('coalesced', 400000, 'db-scale400k') or any((arguments.prepare, arguments.series, arguments.chunk_series, arguments.immutable_series, arguments.reconcile_series, arguments.cache_series, arguments.pipeline_series, arguments.ram16_series, arguments.chunk_self_test, arguments.chunk_leg is not None)):
@@ -1408,7 +1634,7 @@ if __name__ == '__main__':
         prepare(arguments.mode, arguments.inode_limit, arguments.concurrency_profile)
     else:
         status = execute(arguments.mode, arguments.inode_limit, arguments.concurrency_profile)
-        if status == 0 and arguments.inode_limit in (200000, 400000):
+        if status == 0 and arguments.inode_limit in (200000, 400000, 800000):
             root, runtime = paths(arguments.mode, arguments.inode_limit, arguments.concurrency_profile)
             try:
                 row = summarize_followup(root, arguments.concurrency_profile, arguments.inode_limit)

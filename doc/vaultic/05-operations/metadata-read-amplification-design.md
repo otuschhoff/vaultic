@@ -559,13 +559,15 @@ byte-bounded LRU. A cancelled caller does not cancel a load needed by other
 callers. Errors are shared, never retained as cache entries, and failed or
 panicking loads release admission so later reads can retry.
 
-Experimental maxima are four times the original caps; all operational defaults
-are unchanged. Byte settings accept exact decimal byte counts, not unit suffixes.
+As of November 9, authenticated-chunk retention defaults to 16 GiB and permits
+up to 64 GiB. Other fetch/range defaults remain unchanged. Byte settings accept
+exact decimal byte counts, not unit suffixes. Earlier qualification sections
+retain their historical settings and do not describe the current defaults.
 
 | Environment Variable | Default | Maximum |
 | --- | ---: | ---: |
-| `VAULTICDB_CHUNK_CACHE_BYTES` | 67,108,864 (64 MiB) | 4,294,967,296 (4 GiB) |
-| `VAULTICDB_CHUNK_CACHE_ENTRIES` | 4,096 | 16,384 |
+| `VAULTICDB_CHUNK_CACHE_BYTES` | 17,179,869,184 (16 GiB) | 68,719,476,736 (64 GiB) |
+| `VAULTICDB_CHUNK_CACHE_ENTRIES` | 65,536 | 262,144 |
 | `VAULTICDB_CHUNK_FETCH_LIMIT` | 64 | 256 |
 | `VAULTICDB_CHUNK_FETCH_BYTES` | 16,777,216 (16 MiB) | 67,108,864 (64 MiB) |
 | `VAULTICDB_CHUNK_MAX_BYTES` | 1,048,576 (1 MiB) | 4,194,304 (4 MiB) |
@@ -1091,6 +1093,77 @@ source/restore/reopen/zero-data checks, read-only child mount isolation, 64 GiB
 source ceiling, 200 GB combined RSS ceiling, storage reserve and SIGINT-first
 cleanup requirements remain. Main intervals shorter than 600 seconds remain
 short screens; physical NFS and production qualification are separate gates.
+
+### Default Cache And 800k Bottleneck Diagnostics
+
+The November 9 follow-up promotes 16 GiB/65536 entries to the native
+authenticated-chunk cache default and raises the supported ceilings to
+64 GiB/262144 entries. At the usual 256 KiB chunk size these entry budgets
+match the byte budgets. Larger opt-in budgets must raise both settings:
+
+```sh
+VAULTICDB_CHUNK_CACHE_BYTES=68719476736
+VAULTICDB_CHUNK_CACHE_ENTRIES=262144
+```
+
+Capacity is a ceiling, not an eager 16/64 GiB allocation. Accounting remains
+shared across backing-store wrappers of one encryption template; independent
+daemon processes have independent budgets. Authentication, freshness policy,
+invalidation, crypto concurrency and in-flight fetch/range limits are unchanged.
+The default change does not deploy or restart a production daemon. Existing
+explicit environment overrides continue to win.
+
+The supervisor now defaults to 800000 entries and selects `db-scale800k` for
+the default coalesced route. It uses a new create-only parent root,
+`bottleneck-parent-fme-cae1-20261109-800k`, and a separately built bundle,
+`bin/phase35-bottleneck800k-20261109/linux-amd64`. Prepare a fresh 800k frozen
+source; do not relabel, overwrite, or extend the sealed 400k parents. Tuning
+is group 64, collection batch 5000, one-batch read-ahead, 128 readers, RPC limit
+32, metadata 2 GiB, block 512 MiB, eight crypto workers, and explicit
+16 GiB/65536 chunk retention. Historical routes retain their original settings.
+
+The measured forced-backup deadline doubles from 600 to 1200 seconds. It
+excludes source preparation, parent creation, restore and reopen. The whole-leg
+ceiling doubles from 28800 to 57600 seconds and the Go qualifier timeout from
+7h50m to 15h40m; individual setup command timeouts double from four to eight
+hours. The 600-second minimum for a sustained main interval is unchanged.
+Source size remains capped at 64 GiB, fixture size at 350 GiB, combined owned
+RSS at 200000000000 bytes, and the established shared free-space floor remains
+enforced. An 800k selection that cannot fit these guards fails closed; raising
+the sample count is not authorization to expand unrelated resource ceilings.
+
+New diagnostics separate:
+
+- Origin object fetch service, including body consumption and failed requests.
+- Caller waits for authenticated chunks, including coalesced followers and
+   decryption, separately from waiting for fetch admission.
+- Actual source reader calls, returned bytes, errors and time inside `Read`,
+   excluding chunk-splitting and hash CPU.
+- Existing source stat/preparation and writer queue waits.
+- Shared per-mount NFS READ/metadata RPC counts, received protocol bytes,
+   queue time, RTT and execution time alongside process CPU/I/O/pressure.
+
+Read durations use eight bounded, non-cumulative buckets: at most 100 us,
+1 ms, 5 ms, 20 ms, 100 ms, 500 ms, 2 seconds, and above 2 seconds. The Go
+authenticated transport preserves the histograms and rejects malformed arrays.
+Main-interval subtraction rejects resets, copies arrays without mutating
+baselines, and leaves missing older-daemon histograms unavailable.
+
+Accepted 800k captures require all three DB latency histograms, source-read
+coverage, and private nonempty CPU profiles bounded to 32 MiB. The supervisor
+emits `bottlenecks` and `bottleneck_windows` in the verified receipt. The latter
+retains at most 2048 approximately aligned windows, explicit truncation counts,
+scan rates and correlations with source/fetch latency, preparation waits and
+shared NFS READ RTT. Constant or unavailable series have null correlations.
+CPU profiles cover the whole backup command, not native CPU or exact-main CPU.
+
+These measurements support choosing the next optimization, not declaring
+NFS the dominant bottleneck in advance. Worker/caller timers overlap and must
+not be added to estimate wall time. NFS mount counters are shared and measure
+RPC traffic, not exclusive backup traffic or physical NAS disk reads. Temporal
+correlation is not causal attribution. A larger live sample does not by itself
+qualify retained-history growth. The new 800k workload has not yet been measured;
+prior 400k results below remain historical evidence, not new 800k results.
 
 ### Pipeline And RAM Investigation
 

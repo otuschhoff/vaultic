@@ -102,6 +102,7 @@ type Archiver struct {
 	Options         Options
 
 	fileSaver         *fileSaver
+	sourceReads       sourceReadCounters
 	treeSaver         *treeSaver
 	validationJobs    chan func(context.Context)
 	validationWorkers sync.WaitGroup
@@ -1127,6 +1128,7 @@ func (arch *Archiver) runWorkers(ctx context.Context, wg *errgroup.Group, upload
 		arch.Options.ReadConcurrency)
 	arch.fileSaver.CompleteBlob = arch.CompleteBlob
 	arch.fileSaver.NodeFromFileInfo = arch.nodeFromFileInfo
+	arch.fileSaver.sourceReads = &arch.sourceReads
 	if arch.Options.UnchangedReadConcurrency > 0 {
 		jobs := make(chan func(context.Context))
 		arch.validationJobs = jobs

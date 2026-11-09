@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 import threading
@@ -14,6 +15,62 @@ def optional_text(path):
         return path.read_text()
     except OSError:
         return None
+
+
+def nfs_mount_samples(text, paths):
+    mounts, current = [], None
+    for line in (text or '').splitlines():
+        if line.startswith('device '):
+            match = re.fullmatch(r'device (.+) mounted on (.+) with fstype (nfs4?)\b.*', line)
+            current = None
+            if match:
+                current = {'device': match[1], 'mount': match[2], 'fstype': match[3], 'operations': {}}
+                mounts.append(current)
+        elif current is not None:
+            stripped = line.strip()
+            if stripped.startswith('age:'):
+                current['age_seconds'] = int(stripped.split(':', 1)[1])
+            elif stripped.startswith('bytes:'):
+                values = [int(value) for value in stripped.split(':', 1)[1].split()]
+                if len(values) == 8:
+                    current['bytes'] = dict(zip(('normal_read', 'normal_write', 'direct_read', 'direct_write',
+                                                 'server_read', 'server_write', 'read_pages', 'write_pages'), values))
+            elif re.match(r'^[A-Z_]+:', stripped):
+                name, values = stripped.split(':', 1)
+                counters = values.split()
+                if name in ('READ', 'WRITE', 'GETATTR', 'LOOKUP', 'ACCESS', 'READDIR', 'READDIRPLUS') and len(counters) >= 8:
+                    current['operations'][name] = dict(zip(('calls', 'transmissions', 'timeouts', 'sent_bytes',
+                                                            'received_bytes', 'queue_ms', 'rtt_ms', 'execute_ms'),
+                                                           map(int, counters[:8])))
+    selected = {}
+    for path in paths:
+        matches = [mount for mount in mounts if Path(mount['mount']) == path or Path(mount['mount']) in path.parents]
+        if matches:
+            mount = max(matches, key=lambda value: len(Path(value['mount']).parts))
+            selected[mount['mount']] = mount
+    return list(selected.values())
+
+
+def nfs_mount_deltas(current, previous, seconds):
+    results = []
+    old = {(mount['device'], mount['mount'], mount['fstype']): mount for mount in previous}
+    for mount in current:
+        prior = old.get((mount['device'], mount['mount'], mount['fstype']))
+        if prior is None or seconds <= 0 or mount.get('age_seconds', 0) < prior.get('age_seconds', 0):
+            continue
+        operations = {}
+        for name, counters in mount['operations'].items():
+            before = prior['operations'].get(name)
+            if before is None or any(value < before[key] for key, value in counters.items()):
+                continue
+            delta = {key: value - before[key] for key, value in counters.items()}
+            count = delta['calls']
+            operations[name] = dict(delta, calls_per_second=count / seconds,
+                                    mean_rtt_ms=delta['rtt_ms'] / count if count else None,
+                                    mean_execute_ms=delta['execute_ms'] / count if count else None)
+        results.append({'mount': mount['mount'], 'device': mount['device'], 'interval_seconds': seconds,
+                        'operations': operations, 'scope': 'shared NFS mount RPCs; not backup-exclusive or NAS disk I/O'})
+    return results
 
 
 def process_sample(pid, diagnostics=True):
@@ -86,6 +143,7 @@ class TelemetryTail:
     def __init__(self):
         self.offsets = {}
         self.reconciliation = {}
+        self.critical = {}
 
     def read(self, path):
         offset = self.offsets.get(str(path), 0)
@@ -109,12 +167,17 @@ class TelemetryTail:
                                'total_duration', 'data_added', 'data_added_packed')
                     result = {key: value[key] for key in allowed if key in value}
                 elif isinstance(value, dict) and value.get('message_type') in ('reconciliation_progress', 'backup_critical_path'):
-                    result = {key: value[key] for key in ('message_type', 'seconds_elapsed', 'reconciliation', 'encryption_reads') if key in value}
+                    result = {key: value[key] for key in ('message_type', 'seconds_elapsed', 'reconciliation', 'encryption_reads', 'source_reads') if key in value}
+                    if value.get('message_type') == 'backup_critical_path':
+                        self.critical[str(path)] = {key: value[key] for key in ('encryption_reads', 'source_reads', 'reconciliation') if key in value}
+                        self.critical[str(path)]['critical_path_seconds_elapsed'] = value.get('seconds_elapsed')
                     if 'reconciliation' in value:
                         self.reconciliation[str(path)] = (value.get('seconds_elapsed'), value['reconciliation'])
         self.offsets[str(path)] = offset
         if result is not None and str(path) in self.reconciliation:
             result['reconciliation_seconds_elapsed'], result['reconciliation'] = self.reconciliation[str(path)]
+        if result is not None and str(path) in self.critical:
+            result.update(self.critical[str(path)])
         return result
 
 
@@ -125,6 +188,7 @@ def observe(root, cgroup, output, interval):
     previous_time = None
     tail = TelemetryTail()
     previous_telemetry = {}
+    previous_nfs = []
     stop = threading.Event()
     started = time.monotonic()
     with open(output, 'x') as stream:
@@ -163,6 +227,7 @@ def observe(root, cgroup, output, interval):
                             telemetry.append({'source': mode + '/' + name, 'snapshot': value,
                                               'counter_rates': counter_rates(value, previous_telemetry.get(str(path)))})
                             previous_telemetry[str(path)] = value
+            nfs = nfs_mount_samples(optional_text(Path('/proc/self/mountstats')), (root, Path('/ncl1-1-vs-50/fme_cae1')))
             record = {'schema': 'phase35-m6-observation-v1', 'unix_seconds': time.time(),
                       'elapsed_seconds': now - started, 'interval_seconds': elapsed,
                       'active_stages': stages, 'processes': processes, 'process_unavailable': unavailable,
@@ -170,6 +235,8 @@ def observe(root, cgroup, output, interval):
                                  ('cpu.stat', 'cpu.pressure', 'io.stat', 'io.pressure', 'memory.current',
                                   'memory.stat', 'memory.events', 'memory.pressure')},
                       'host_shared': {'nfs_rpc': optional_text(Path('/proc/net/rpc/nfs')),
+                                      'nfs_mounts': nfs,
+                                      'nfs_mount_intervals': nfs_mount_deltas(nfs, previous_nfs, elapsed),
                                       'cpu_pressure': optional_text(Path('/proc/pressure/cpu')),
                                       'io_pressure': optional_text(Path('/proc/pressure/io')),
                                       'memory_pressure': optional_text(Path('/proc/pressure/memory'))},
@@ -182,10 +249,38 @@ def observe(root, cgroup, output, interval):
             stream.flush()
             previous = {value['pid']: value for value in processes}
             previous_time = now
+            previous_nfs = nfs
             stop.wait(interval)
 
 
 class ObservationTests(unittest.TestCase):
+    def test_nfs_mount_selection_rates_and_reset(self):
+        text = ('device nas:/db mounted on /fixture with fstype nfs statvers=1.1\n'
+                ' age: 100\n bytes: 1 2 3 4 5 6 7 8\n'
+                ' READ: 10 10 0 400 1000 5 20 30 0\n'
+                'device other:/data mounted on /other with fstype nfs4 statvers=1.1\n age: 100\n')
+        first = nfs_mount_samples(text, (Path('/fixture/input'),))
+        self.assertEqual(len(first), 1)
+        self.assertEqual(first[0]['bytes']['server_read'], 5)
+        last = nfs_mount_samples(text.replace('age: 100', 'age: 102').replace('10 10 0 400 1000 5 20 30', '12 12 0 500 2000 7 40 60'), (Path('/fixture'),))
+        interval = nfs_mount_deltas(last, first, 2)[0]['operations']['READ']
+        self.assertEqual(interval['calls_per_second'], 1)
+        self.assertEqual(interval['mean_rtt_ms'], 10)
+        self.assertEqual(interval['received_bytes'], 1000)
+        self.assertEqual(nfs_mount_deltas(first, last, 2), [])
+        self.assertEqual(nfs_mount_deltas(first, [], 2), [])
+
+    def test_tail_preserves_source_and_fetch_latency(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'backup.stdout.log'
+            path.write_text(json.dumps({'message_type': 'backup_critical_path', 'seconds_elapsed': 5,
+                                        'source_reads': {'bytes': 123}, 'encryption_reads': {'chunk_wait_ns': 456}}) + '\n' +
+                            json.dumps({'message_type': 'status', 'seconds_elapsed': 6}) + '\n')
+            sample = TelemetryTail().read(path)
+            self.assertEqual(sample['source_reads']['bytes'], 123)
+            self.assertEqual(sample['encryption_reads']['chunk_wait_ns'], 456)
+            self.assertEqual(sample['critical_path_seconds_elapsed'], 5)
+
     def test_tail_keeps_reconciliation_through_frequent_status_lines(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'backup.stdout.log'

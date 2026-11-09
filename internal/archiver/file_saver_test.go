@@ -3,10 +3,13 @@ package archiver
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/otuschhoff/vaultic/internal/data"
 	"github.com/otuschhoff/vaultic/internal/fs"
@@ -45,6 +48,27 @@ func startFileSaver(ctx context.Context, t testing.TB, _ fs.FS) (*fileSaver, *mo
 	return s, saver, ctx, wg
 }
 
+func TestMeasuredSourceReader(t *testing.T) {
+	counters := &sourceReadCounters{}
+	reader := measuredSourceReader{reader: iotest.OneByteReader(strings.NewReader("source")), counters: counters}
+	contents, err := io.ReadAll(reader)
+	if err != nil || string(contents) != "source" {
+		t.Fatalf("measured reader changed contents: %q, %v", contents, err)
+	}
+	metrics := counters.snapshot()
+	var histogramCalls uint64
+	for _, count := range metrics.LatencyBuckets {
+		histogramCalls += count
+	}
+	if metrics.Bytes != 6 || metrics.Calls != 7 || metrics.Errors != 0 || histogramCalls != metrics.Calls {
+		t.Fatalf("incorrect source-read counters: %+v", metrics)
+	}
+	reader.reader = iotest.ErrReader(fmt.Errorf("source failure"))
+	if _, err := reader.Read(make([]byte, 1)); err == nil || counters.snapshot().Errors != 1 {
+		t.Fatal("source read error was lost")
+	}
+}
+
 func TestFileSaver(t *testing.T) {
 	ctx := t.Context()
 
@@ -76,6 +100,13 @@ func TestFileSaver(t *testing.T) {
 	}
 
 	test.Assert(t, len(saver.saved) == len(files), "expected %d saved files, got %d", len(files), len(saver.saved))
+	var expectedBytes uint64
+	for _, filename := range files {
+		expectedBytes += uint64(len(filepath.Base(filename)))
+	}
+	if metrics := s.sourceReads.snapshot(); metrics.Bytes != expectedBytes || metrics.Calls < uint64(len(files)) || metrics.Errors != 0 {
+		t.Fatalf("file saver source reads were not measured: %+v", metrics)
+	}
 
 	s.TriggerShutdown()
 

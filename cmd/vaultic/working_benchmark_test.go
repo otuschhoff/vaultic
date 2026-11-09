@@ -543,6 +543,38 @@ func publicationBackupRuntimeLimited(name, variant string) bool {
 	return name == "backup" && publicationCache400kVariant(variant)
 }
 
+func publicationBackupRuntimeSeconds(name, variant, profile, stage string) int {
+	if name == "backup" && profile == "db-scale800k" && stage == "forced" {
+		return 1200
+	}
+	if publicationBackupRuntimeLimited(name, variant) {
+		return 600
+	}
+	return 0
+}
+
+func TestPublicationScale800kPolicy(t *testing.T) {
+	for _, stage := range []string{"backup", "copy-db", "restore", "reopen", "preflight"} {
+		want := 0
+		if stage == "backup" {
+			want = 1200
+		}
+		if got := publicationBackupRuntimeSeconds(stage, "", "db-scale800k", "forced"); got != want {
+			t.Fatalf("800k stage %s deadline = %d, want %d", stage, got, want)
+		}
+	}
+	if publicationBackupRuntimeSeconds("backup", "", "db-scale800k", "parent-setup") != 0 {
+		t.Fatal("800k parent setup incorrectly consumes the measured backup deadline")
+	}
+	tuning, err := publicationDBProfile("db-scale800k")
+	rtest.OK(t, err)
+	for _, flag := range []string{"--read-concurrency=128", "--metadata-publication-group-size=64", "--metadata-collection-read-ahead=1", "--metadata-collection-batch-size=5000"} {
+		if !slices.Contains(tuning.Flags, flag) {
+			t.Fatalf("800k tuning lacks %s", flag)
+		}
+	}
+}
+
 func TestPublicationBackupRuntimeScope(t *testing.T) {
 	for _, variant := range []string{"N", "O", "P", "Q", "R", "S"} {
 		if !publicationBackupRuntimeLimited("backup", variant) {
@@ -576,7 +608,12 @@ func publicationRuntimeReceipt(t *testing.T, path string, value any) {
 
 func publicationQualificationCommand(t *testing.T, directory, name, binary string, args ...string) (time.Duration, float64) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 4*time.Hour)
+	stageTimeout := 4 * time.Hour
+	profile := os.Getenv("VAULTIC_PHASE35_METADATA_READ_CONCURRENCY_PROFILE")
+	if profile == "db-scale800k" {
+		stageTimeout *= 2
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), stageTimeout)
 	defer cancel()
 	stdout, err := os.OpenFile(filepath.Join(directory, name+".stdout.log"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	rtest.OK(t, err)
@@ -590,9 +627,10 @@ func publicationQualificationCommand(t *testing.T, directory, name, binary strin
 	command.Env = append(os.Environ(), "VAULTIC_FEATURES=slatedb-authoritative=true")
 	command.Stdout, command.Stderr = stdout, stderr
 	command.WaitDelay = 5 * time.Second
-	guarded := publicationBackupRuntimeLimited(name, os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT"))
+	limit := publicationBackupRuntimeSeconds(name, os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT"), profile, filepath.Base(directory))
+	guarded := limit > 0
 	if guarded {
-		publicationRuntimeReceipt(t, filepath.Join(directory, "backup.runtime-start.json"), map[string]any{"limit_seconds": 600})
+		publicationRuntimeReceipt(t, filepath.Join(directory, "backup.runtime-start.json"), map[string]any{"limit_seconds": limit})
 	}
 	started := time.Now()
 	if err := command.Run(); err != nil {
@@ -601,8 +639,8 @@ func publicationQualificationCommand(t *testing.T, directory, name, binary strin
 	elapsed := time.Since(started)
 	if guarded {
 		publicationRuntimeReceipt(t, filepath.Join(directory, "backup.runtime-finished.json"), map[string]any{"seconds": elapsed.Seconds()})
-		if elapsed > 600*time.Second {
-			t.Fatal("backup runtime exceeded the 600-second limit")
+		if elapsed > time.Duration(limit)*time.Second {
+			t.Fatalf("backup runtime exceeded the %d-second limit", limit)
 		}
 	}
 	return elapsed, (command.ProcessState.UserTime() + command.ProcessState.SystemTime()).Seconds()
@@ -834,6 +872,8 @@ const publicationChunk200kRoot = "/volume2/NASDA2/vaultic-test-m6/chunk-compare-
 const publicationImmutable200kRoot = "/volume2/NASDA2/vaultic-test-m6/immutable-default-fme-cae1-20261105-200k-retry1"
 
 const publicationScale400kRoot = "/volume2/NASDA2/vaultic-test-m6/reconcile-parent-fme-cae1-20261105-400k"
+const publicationScale800kRoot = "/volume2/NASDA2/vaultic-test-m6/bottleneck-parent-fme-cae1-20261109-800k"
+const publicationScale800kBin = "/root/proj/vaultic/bin/phase35-bottleneck800k-20261109/linux-amd64"
 const publicationRead400kRoot = "/volume2/NASDA2/vaultic-test-m6/reconcile-read-fme-cae1-20261105-400k"
 const publicationRead400kBin = "/root/proj/vaultic/bin/phase35-reconcile400k/linux-amd64"
 const publicationCache400kRoot = "/volume2/NASDA2/vaultic-test-m6/cache-read-fme-cae1-20261107-400k-retry4"
@@ -1034,6 +1074,9 @@ func publicationScaleInodeLimit(selector, root string) (uint64, error) {
 	if selector == "" {
 		return 100_000, nil
 	}
+	if selector == "800000" && root == publicationScale800kRoot {
+		return 800_000, nil
+	}
 	if selector == "400000" && root == publicationScale400kRoot {
 		return 400_000, nil
 	}
@@ -1080,6 +1123,10 @@ func TestPublicationScaleInodeLimit(t *testing.T) {
 		{"", "legacy", 100_000},
 		{"200000", publicationScale200kRoot, 200_000},
 		{"400000", publicationScale400kRoot, 400_000},
+		{"800000", publicationScale800kRoot, 800_000},
+		{"800000", publicationScale400kRoot, 0},
+		{"400000", publicationScale800kRoot, 0},
+		{"800000", publicationScale800kRoot + "/retry", 0},
 		{"400000", publicationScale200kRoot, 0},
 		{"200000", publicationScale400kRoot, 0},
 		{"400000", publicationScale400kRoot + "/retry", 0},
@@ -1353,6 +1400,16 @@ func TestPublicationForceInodeLimit(t *testing.T) {
 	}
 }
 
+func TestPublicationScale800kQualification(t *testing.T) {
+	if os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT") != "800000" {
+		t.Skip("800k scaling qualification not selected")
+	}
+	if !t.Run("prepare", TestPrepareFmeCAE1Qualification) {
+		return
+	}
+	t.Run("backup", TestPublicationBackupQualification)
+}
+
 func TestPublicationScale400kQualification(t *testing.T) {
 	if os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT") != "400000" {
 		t.Skip("400k scaling qualification not selected")
@@ -1391,11 +1448,14 @@ func TestPublicationBackupQualification(t *testing.T) {
 	forceCompare := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_FORCE_COMPARE")
 	scaleLimit, err := publicationScaleInodeLimit(os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT"), root)
 	rtest.OK(t, err)
-	scale200k := scaleLimit == 200_000 || scaleLimit == 400_000
+	scale200k := scaleLimit == 200_000 || scaleLimit == 400_000 || scaleLimit == 800_000
 	scaleProfile := fmt.Sprintf("db-scale%dk", scaleLimit/1000)
 	scaleBuild := "/root/proj/vaultic/bin/phase35-forced-followup/linux-amd64"
 	if scaleLimit == 400_000 {
 		scaleBuild = publicationRead400kBin
+	}
+	if scaleLimit == 800_000 {
+		scaleBuild = publicationScale800kBin
 	}
 	if scale200k && (onDemand != "1" || unchanged != "" || forceCompare != "" || resumeVerification != "" ||
 		os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ORDER") != "64" || os.Getenv("VAULTIC_PHASE35_METADATA_READ_FORCE_ONLY") != "1" ||
@@ -2181,6 +2241,10 @@ func publicationDBProfile(profile string) (publicationDBTuning, error) {
 		tuning.MetaCacheBytes = 2 << 30
 		tuning.Flags[0] = "--read-concurrency=128"
 		tuning.Flags[3] = "--metadata-publication-group-size=16"
+	case "db-scale800k":
+		tuning.MetaCacheBytes = 2 << 30
+		tuning.Flags[0] = "--read-concurrency=128"
+		tuning.Flags = append(tuning.Flags, "--metadata-collection-batch-size=5000", "--metadata-collection-read-ahead=1")
 	case "db-group64", "db-group64-end", "db-hot-control", "db-hot-control-end", "db-read64-end":
 		tuning.MetaCacheBytes = 2 << 30
 	case "db-group16", "db-group32":
@@ -3046,6 +3110,7 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 	chunk200k := os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT") != "" && validatePublicationChunkLeg(os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT"), os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT")) == nil
 	scale200k := len(paths) == 200_000 && os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT") == "200000" && (os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT") == publicationScale200kRoot || chunk200k)
 	scale200k = scale200k || len(paths) == 400_000 && os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT") == "400000" && (os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT") == publicationScale400kRoot || chunk200k && publicationRead400kVariant(os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT")))
+	scale200k = scale200k || len(paths) == 800_000 && os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT") == "800000" && os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT") == publicationScale800kRoot
 	if len(paths) != 10000 && len(paths) != 50000 && !scale200k {
 		t.Fatal("force comparison requires exactly 10000 or 50000 entries")
 	}
@@ -3173,7 +3238,7 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 			args = append(args, "--parent="+parent.String())
 		}
 		args = append(args, source)
-		if publicationPipeline400kVariant(os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT")) {
+		if publicationPipeline400kVariant(os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT")) || len(paths) == 800_000 {
 			profileRoot := filepath.Join(leg, "cpu")
 			rtest.OK(t, os.Mkdir(profileRoot, 0700))
 			rtest.OK(t, os.Chmod(profileRoot, 0700))
@@ -3208,6 +3273,16 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 			}
 		}
 		rtest.OK(t, validateForceComparisonMeasurement(summary, measurement, regularFiles, uint64(len(paths)), forced))
+		var captured struct {
+			SourceReads *struct {
+				Bytes uint64 `json:"bytes"`
+			} `json:"source_reads"`
+			EncryptionReads *daemon.EncryptionReadMetrics `json:"encryption_reads"`
+		}
+		rtest.OK(t, json.Unmarshal(critical, &captured))
+		if len(paths) == 800_000 && (captured.SourceReads == nil || captured.SourceReads.Bytes < size || captured.EncryptionReads == nil || captured.EncryptionReads.CiphertextOriginLatencyBuckets == nil || captured.EncryptionReads.ChunkWaitLatencyBuckets == nil || captured.EncryptionReads.ChunkAdmissionLatencyBuckets == nil) {
+			t.Fatal("800k capture lacks complete source-read and DB wait telemetry")
+		}
 		id, err := vaultic.ParseID(snapshotID)
 		rtest.OK(t, err)
 		snapshot := testLoadSnapshot(t, legOptions, id)
@@ -3252,7 +3327,7 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 			"entries": len(paths), "regular_files": regularFiles, "bytes": size, "input_sha256": digest, "entries_per_second": float64(len(paths)) / measurement.SecondsElapsed,
 			"cli_cpu_seconds": cpu, "summary": summary, "critical_path": critical, "writer_before": before, "writer_after": after,
 			"baseline_parent": parent.String(), "parent_setup_summary": parentSummary, "snapshot": id.String(), "restore_verified": true, "reopen_verified": true, "source_unchanged": true,
-			"source_payload_reads_measured": false, "production_repository_modified": false, "qualification_limit": "single pair; frozen restored-source NFS fixture, not original source paths/inodes"}, "", "  ")
+			"source_payload_reads_measured": captured.SourceReads != nil, "production_repository_modified": false, "qualification_limit": "single pair; frozen restored-source NFS fixture, not original source paths/inodes"}, "", "  ")
 		rtest.OK(t, err)
 		file, err := os.OpenFile(filepath.Join(leg, "result.json"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 		rtest.OK(t, err)

@@ -61,6 +61,40 @@ func TestEncryptionReadMetricsCompatibility(test *testing.T) {
 	}
 }
 
+func TestEncryptionReadLatencyCompatibility(test *testing.T) {
+	encoded, err := json.Marshal(EncryptionReadMetrics{})
+	if err != nil {
+		test.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		test.Fatal(err)
+	}
+	for _, name := range []string{"ciphertext_origin_latency_buckets", "chunk_wait_latency_buckets", "chunk_admission_latency_buckets"} {
+		for _, invalid := range []string{"null", "[]", "[1]", "[0,0,0,0,0,0,0,0,0]", "[0,0,0,0,0,0,0,null]", "[0,0,0,0,0,0,0,-1]", "[0,0,0,0,0,0,0,18446744073709551616]"} {
+			fields[name] = json.RawMessage(invalid)
+			payload, err := json.Marshal(fields)
+			if err != nil || encryptionReadMetrics(payload) != nil {
+				test.Fatalf("accepted malformed latency metric %s=%s", name, invalid)
+			}
+		}
+		fields[name] = json.RawMessage("[1,2,3,4,5,6,7,8]")
+	}
+	payload, err := json.Marshal(fields)
+	if err != nil {
+		test.Fatal(err)
+	}
+	status := writerStatus(&vaulticdbv1.WriterStatusResponse{Attribution: &vaulticdbv1.AttributionSnapshot{EncryptionReadMetricsJson: payload}})
+	metrics := status.Attribution.EncryptionReads
+	if metrics == nil || metrics.CiphertextOriginLatencyBuckets == nil || *metrics.CiphertextOriginLatencyBuckets != [8]uint64{1, 2, 3, 4, 5, 6, 7, 8} || metrics.ChunkWaitLatencyBuckets == nil || metrics.ChunkAdmissionLatencyBuckets == nil {
+		test.Fatal("latency histograms lost through writer status")
+	}
+	older := encryptionReadMetrics(encoded)
+	if older == nil || older.CiphertextOriginLatencyBuckets != nil || older.ChunkWaitLatencyBuckets != nil {
+		test.Fatal("older daemon latency became available zero")
+	}
+}
+
 func TestEncryptionReadWindowsCompatibility(test *testing.T) {
 	encoded, err := json.Marshal(EncryptionReadMetrics{})
 	if err != nil {

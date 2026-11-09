@@ -42,9 +42,9 @@ const MAX_CRYPTO_THREADS: usize = 64;
 const PARALLEL_CRYPTO_CHUNKS: usize = 4;
 const HEADER_CACHE_ENTRIES: usize = 16 * 1024;
 const IMMUTABLE_SST_FRESHNESS: std::time::Duration = std::time::Duration::from_secs(1);
-const DEFAULT_CHUNK_CACHE_BYTES: usize = 64 * 1024 * 1024;
-const MAX_CHUNK_CACHE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
-const MAX_CHUNK_CACHE_ENTRIES: usize = 65536;
+const DEFAULT_CHUNK_CACHE_BYTES: usize = 16 * 1024 * 1024 * 1024;
+const MAX_CHUNK_CACHE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+const MAX_CHUNK_CACHE_ENTRIES: usize = 262144;
 const MAX_CHUNK_FLIGHTS: usize = 256;
 const MAX_CHUNK_FLIGHT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CACHED_CHUNK_BYTES: usize = 4 * 1024 * 1024;
@@ -130,6 +130,11 @@ struct EncryptionReadMetrics {
     ciphertext_origin_calls: AtomicU64,
     ciphertext_origin_bytes: AtomicU64,
     ciphertext_origin_ns: AtomicU64,
+    ciphertext_origin_latency: ReadLatencyBuckets,
+    chunk_wait_ns: AtomicU64,
+    chunk_wait_latency: ReadLatencyBuckets,
+    chunk_admission_wait_ns: AtomicU64,
+    chunk_admission_latency: ReadLatencyBuckets,
     header_decode_ns: AtomicU64,
     header_cache_hits: AtomicU64,
     header_cache_misses: AtomicU64,
@@ -168,8 +173,34 @@ struct EncryptionReadWindow {
     ciphertext_origin_bytes: u64,
 }
 
+#[derive(Default)]
+struct ReadLatencyBuckets {
+    counts: [AtomicU64; 8],
+}
+
+impl ReadLatencyBuckets {
+    fn record(&self, nanoseconds: u64) {
+        let upper = [
+            100_000,
+            1_000_000,
+            5_000_000,
+            20_000_000,
+            100_000_000,
+            500_000_000,
+            2_000_000_000,
+        ];
+        let bucket = upper.partition_point(|limit| nanoseconds > *limit);
+        self.counts[bucket].fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> [u64; 8] {
+        std::array::from_fn(|index| self.counts[index].load(Ordering::Relaxed))
+    }
+}
+
 struct ReadTiming<'counter> {
     counter: &'counter AtomicU64,
+    histogram: Option<&'counter ReadLatencyBuckets>,
     started: Instant,
 }
 
@@ -177,21 +208,29 @@ impl<'counter> ReadTiming<'counter> {
     fn new(counter: &'counter AtomicU64) -> Self {
         Self {
             counter,
+            histogram: None,
             started: Instant::now(),
         }
+    }
+
+    fn with_histogram(mut self, histogram: &'counter ReadLatencyBuckets) -> Self {
+        self.histogram = Some(histogram);
+        self
     }
 }
 
 impl Drop for ReadTiming<'_> {
     fn drop(&mut self) {
-        self.counter.fetch_add(
-            self.started
-                .elapsed()
-                .as_nanos()
-                .try_into()
-                .unwrap_or(u64::MAX),
-            Ordering::Relaxed,
-        );
+        let elapsed = self
+            .started
+            .elapsed()
+            .as_nanos()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        self.counter.fetch_add(elapsed, Ordering::Relaxed);
+        if let Some(histogram) = self.histogram {
+            histogram.record(elapsed);
+        }
     }
 }
 
@@ -238,6 +277,11 @@ impl EncryptionReadMetrics {
             "ciphertext_origin_calls": self.ciphertext_origin_calls.load(Ordering::Relaxed),
             "ciphertext_origin_bytes": self.ciphertext_origin_bytes.load(Ordering::Relaxed),
             "ciphertext_origin_ns": self.ciphertext_origin_ns.load(Ordering::Relaxed),
+            "ciphertext_origin_latency_buckets": self.ciphertext_origin_latency.snapshot(),
+            "chunk_wait_ns": self.chunk_wait_ns.load(Ordering::Relaxed),
+            "chunk_wait_latency_buckets": self.chunk_wait_latency.snapshot(),
+            "chunk_admission_wait_ns": self.chunk_admission_wait_ns.load(Ordering::Relaxed),
+            "chunk_admission_latency_buckets": self.chunk_admission_latency.snapshot(),
             "header_decode_ns": self.header_decode_ns.load(Ordering::Relaxed),
             "header_cache_hits": self.header_cache_hits.load(Ordering::Relaxed),
             "header_cache_misses": self.header_cache_misses.load(Ordering::Relaxed),
@@ -359,7 +403,7 @@ struct ChunkCacheLimits {
 impl Default for ChunkCacheLimits {
     fn default() -> Self {
         Self {
-            entries: 4096,
+            entries: 65536,
             flights: 64,
             flight_bytes: 16 * 1024 * 1024,
             chunk_bytes: 1024 * 1024,
@@ -1462,7 +1506,8 @@ impl EncryptedObjectStore {
         self.read_metrics
             .ciphertext_origin_calls
             .fetch_add(1, Ordering::Relaxed);
-        let timing = ReadTiming::new(&self.read_metrics.ciphertext_origin_ns);
+        let timing = ReadTiming::new(&self.read_metrics.ciphertext_origin_ns)
+            .with_histogram(&self.read_metrics.ciphertext_origin_latency);
         let encrypted = self.inner.get_opts(location, options).await?;
         if encrypted.meta != expected {
             self.invalidate_header(location);
@@ -1553,6 +1598,8 @@ impl EncryptedObjectStore {
                 }
             };
             let Some(flight) = flight else {
+                let _admission = ReadTiming::new(&self.read_metrics.chunk_admission_wait_ns)
+                    .with_histogram(&self.read_metrics.chunk_admission_latency);
                 notified.await;
                 continue;
             };
@@ -1582,6 +1629,8 @@ impl EncryptedObjectStore {
                     drop(guard);
                 });
             }
+            let _wait = ReadTiming::new(&self.read_metrics.chunk_wait_ns)
+                .with_histogram(&self.read_metrics.chunk_wait_latency);
             let mut result = flight.result.clone();
             loop {
                 let completed = result.borrow_and_update().clone();
@@ -1616,7 +1665,8 @@ impl EncryptedObjectStore {
         self.read_metrics
             .ciphertext_origin_calls
             .fetch_add(1, Ordering::Relaxed);
-        let fetch = ReadTiming::new(&self.read_metrics.ciphertext_origin_ns);
+        let fetch = ReadTiming::new(&self.read_metrics.ciphertext_origin_ns)
+            .with_histogram(&self.read_metrics.ciphertext_origin_latency);
         let result = self.inner.get_opts(location, options).await?;
         let meta = result.meta.clone();
         let attributes = result.attributes.clone();
@@ -1828,7 +1878,8 @@ impl ObjectStore for EncryptedObjectStore {
             self.read_metrics
                 .ciphertext_origin_calls
                 .fetch_add(1, Ordering::Relaxed);
-            let fetch = ReadTiming::new(&self.read_metrics.ciphertext_origin_ns);
+            let fetch = ReadTiming::new(&self.read_metrics.ciphertext_origin_ns)
+                .with_histogram(&self.read_metrics.ciphertext_origin_latency);
             let encrypted = self.inner.get_opts(location, options).await?;
             if cached_meta
                 .as_ref()

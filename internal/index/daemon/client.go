@@ -420,6 +420,11 @@ type ReadCacheStatus struct {
 }
 
 type EncryptionReadMetrics struct {
+	CiphertextOriginLatencyBuckets *[8]uint64             `json:"ciphertext_origin_latency_buckets,omitempty"`
+	ChunkWaitLatencyBuckets        *[8]uint64             `json:"chunk_wait_latency_buckets,omitempty"`
+	ChunkAdmissionLatencyBuckets   *[8]uint64             `json:"chunk_admission_latency_buckets,omitempty"`
+	ChunkWaitNanoseconds           uint64                 `json:"chunk_wait_ns"`
+	ChunkAdmissionWaitNanoseconds  uint64                 `json:"chunk_admission_wait_ns"`
 	ReadWindows                    []EncryptionReadWindow `json:"read_windows,omitempty"`
 	ReadWindowsDropped             uint64                 `json:"read_windows_dropped"`
 	Reads                          uint64                 `json:"reads"`
@@ -481,6 +486,19 @@ func encryptionReadMetrics(encoded []byte) *EncryptionReadMetrics {
 	if err := json.Unmarshal(encoded, &fields); err != nil {
 		return nil
 	}
+	for _, name := range []string{"ciphertext_origin_latency_buckets", "chunk_wait_latency_buckets", "chunk_admission_latency_buckets"} {
+		if raw, present := fields[name]; present {
+			var buckets []json.RawMessage
+			if json.Unmarshal(raw, &buckets) != nil || len(buckets) != 8 {
+				return nil
+			}
+			for _, bucket := range buckets {
+				if bytes.Equal(bytes.TrimSpace(bucket), []byte("null")) {
+					return nil
+				}
+			}
+		}
+	}
 	if raw, present := fields["read_windows"]; present {
 		var windows []map[string]json.RawMessage
 		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &windows) != nil {
@@ -506,7 +524,7 @@ func encryptionReadMetrics(encoded []byte) *EncryptionReadMetrics {
 		"chunk_cache_misses", "chunk_cache_evictions", "chunk_coalesced_reads",
 		"chunk_sampled_first_fetches", "chunk_sampled_refetches", "chunk_sampled_history_evictions",
 		"chunk_sampled_reuse_ns", "chunk_sampled_reuse_bytes", "chunk_sampled_refetch_within_64m",
-		"chunk_sampled_refetch_within_256m", "chunk_sampled_refetch_within_1g", "read_windows_dropped"} {
+		"chunk_sampled_refetch_within_256m", "chunk_sampled_refetch_within_1g", "read_windows_dropped", "chunk_wait_ns", "chunk_admission_wait_ns"} {
 		if value, found := fields[name]; found && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 			return nil
 		}

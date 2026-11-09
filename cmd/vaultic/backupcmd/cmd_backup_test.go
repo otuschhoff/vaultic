@@ -154,6 +154,29 @@ func TestBackupEncryptionReadDelta(test *testing.T) {
 	}
 }
 
+func TestBackupEncryptionLatencyDelta(test *testing.T) {
+	for _, name := range []string{"CiphertextOriginLatencyBuckets", "ChunkWaitLatencyBuckets", "ChunkAdmissionLatencyBuckets"} {
+		baseline, current := &daemon.EncryptionReadMetrics{}, &daemon.EncryptionReadMetrics{}
+		first, last := &[8]uint64{1, 2, 3, 4, 5, 6, 7, 8}, &[8]uint64{2, 4, 6, 8, 10, 12, 14, 16}
+		reflect.ValueOf(baseline).Elem().FieldByName(name).Set(reflect.ValueOf(first))
+		reflect.ValueOf(current).Elem().FieldByName(name).Set(reflect.ValueOf(last))
+		actual := backupEncryptionReadDelta(current, baseline)
+		if actual == nil || !reflect.DeepEqual(reflect.ValueOf(actual).Elem().FieldByName(name).Interface(), first) || last[7] != 16 || first[7] != 8 {
+			test.Fatalf("invalid or destructive histogram delta for %s", name)
+		}
+		last[7] = 0
+		if backupEncryptionReadDelta(current, baseline) != nil {
+			test.Fatal("histogram reset became a valid interval")
+		}
+		last[7] = 16
+		reflect.ValueOf(baseline).Elem().FieldByName(name).SetZero()
+		actual = backupEncryptionReadDelta(current, baseline)
+		if actual == nil || !reflect.ValueOf(actual).Elem().FieldByName(name).IsNil() {
+			test.Fatal("missing histogram baseline became available zero")
+		}
+	}
+}
+
 func TestBackupRPCWaitDelta(test *testing.T) {
 	current := daemon.RPCWaitStats{Method: "Get", Active: 2, OldestActiveNS: 3}
 	baseline := daemon.RPCWaitStats{Method: "Get", Active: 99, OldestActiveNS: 99}

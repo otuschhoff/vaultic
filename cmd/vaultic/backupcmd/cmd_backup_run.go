@@ -360,6 +360,7 @@ type backupCriticalPath struct {
 	DBCounterReset       bool                          `json:"db_counter_reset"`
 	DBEngineBackpressure uint64                        `json:"db_engine_backpressure"`
 	EncryptionReads      *daemon.EncryptionReadMetrics `json:"encryption_reads,omitempty"`
+	SourceReads          *archiver.SourceReadMetrics   `json:"source_reads,omitempty"`
 }
 
 func backupDBStages(state daemon.WriterStatus) map[string]daemon.TimingSnapshot {
@@ -394,6 +395,8 @@ func backupEncryptionReadDelta(current, baseline *daemon.EncryptionReadMetrics) 
 		{&result.CiphertextOriginCalls, &baseline.CiphertextOriginCalls},
 		{&result.CiphertextOriginBytes, &baseline.CiphertextOriginBytes},
 		{&result.CiphertextOriginNanoseconds, &baseline.CiphertextOriginNanoseconds},
+		{&result.ChunkWaitNanoseconds, &baseline.ChunkWaitNanoseconds},
+		{&result.ChunkAdmissionWaitNanoseconds, &baseline.ChunkAdmissionWaitNanoseconds},
 		{&result.HeaderDecodeNanoseconds, &baseline.HeaderDecodeNanoseconds},
 		{&result.HeaderCacheHits, &baseline.HeaderCacheHits},
 		{&result.HeaderCacheMisses, &baseline.HeaderCacheMisses},
@@ -426,6 +429,27 @@ func backupEncryptionReadDelta(current, baseline *daemon.EncryptionReadMetrics) 
 			return nil
 		}
 		*field[0] -= *field[1]
+	}
+	for _, histogram := range []struct {
+		current, baseline *[8]uint64
+		output            **[8]uint64
+	}{
+		{current.CiphertextOriginLatencyBuckets, baseline.CiphertextOriginLatencyBuckets, &result.CiphertextOriginLatencyBuckets},
+		{current.ChunkWaitLatencyBuckets, baseline.ChunkWaitLatencyBuckets, &result.ChunkWaitLatencyBuckets},
+		{current.ChunkAdmissionLatencyBuckets, baseline.ChunkAdmissionLatencyBuckets, &result.ChunkAdmissionLatencyBuckets},
+	} {
+		if histogram.current == nil || histogram.baseline == nil {
+			*histogram.output = nil
+			continue
+		}
+		buckets := new([8]uint64)
+		for index := range buckets {
+			if histogram.current[index] < histogram.baseline[index] {
+				return nil
+			}
+			buckets[index] = histogram.current[index] - histogram.baseline[index]
+		}
+		*histogram.output = buckets
 	}
 	return &result
 }
@@ -488,11 +512,27 @@ func (run *backupRun) startCriticalPathReporting() func() {
 	}
 	dbBaseline, baselineErr := status()
 	stagesBaseline := backupDBStages(dbBaseline)
+	sourceArchiver := run.archiver
+	var sourceBaseline archiver.SourceReadMetrics
+	if sourceArchiver != nil {
+		sourceBaseline = sourceArchiver.SourceReadMetrics()
+	}
 	started := time.Now()
 	report := func() {
 		sample := backupCriticalPath{
 			MessageType: "backup_critical_path", Phase: "main_backup", SecondsElapsed: time.Since(started).Seconds(),
 			Reconciliation: run.reconciler.Metrics(), DBScope: "daemon_all_clients",
+		}
+		if sourceArchiver != nil {
+			metrics := sourceArchiver.SourceReadMetrics()
+			metrics.Calls -= sourceBaseline.Calls
+			metrics.Bytes -= sourceBaseline.Bytes
+			metrics.Nanoseconds -= sourceBaseline.Nanoseconds
+			metrics.Errors -= sourceBaseline.Errors
+			for index := range metrics.LatencyBuckets {
+				metrics.LatencyBuckets[index] -= sourceBaseline.LatencyBuckets[index]
+			}
+			sample.SourceReads = &metrics
 		}
 		for client, connection := range clients {
 			for _, stats := range client.RPCWaitStats() {
