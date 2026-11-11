@@ -1862,18 +1862,95 @@ func TestPublicationsJoinOnCancellationAndFailure(t *testing.T) {
 func TestPublicationConflictsPreserveIdentityAndPathOrder(t *testing.T) {
 	first := preparedItem{identity: identity{fsid: 1, inode: 1}, workItem: workItem{sourcePath: "/source/a", snapshotPath: "/snapshot/a"}}
 	independent := preparedItem{identity: identity{fsid: 1, inode: 2}, workItem: workItem{sourcePath: "/source/b", snapshotPath: "/snapshot/b"}}
-	if publicationConflicts([]preparedItem{first}, independent) {
+	var set publicationConflictSet
+	if !set.add(first) || !set.add(independent) {
 		t.Fatal("independent inode conflicts")
 	}
 	for _, conflict := range []preparedItem{
 		{identity: first.identity, workItem: independent.workItem},
 		{identity: independent.identity, workItem: workItem{sourcePath: first.sourcePath, snapshotPath: independent.snapshotPath}},
 		{identity: independent.identity, workItem: workItem{sourcePath: independent.sourcePath, snapshotPath: "snapshot/a"}},
+		{identity: independent.identity, workItem: workItem{sourcePath: independent.sourcePath, snapshotPath: "/snapshot/x/../a"}},
 	} {
-		if !publicationConflicts([]preparedItem{first}, conflict) {
+		set.clear()
+		if !set.add(first) || set.add(conflict) {
 			t.Fatalf("conflicting publication accepted: %+v", conflict)
 		}
 	}
+	set.clear()
+	if !set.add(first) || !set.add(independent) {
+		t.Fatal("flushed group retained conflicts")
+	}
+}
+
+func publicationConflictsReference(pending []preparedItem, item preparedItem) bool {
+	for _, previous := range pending {
+		if previous.identity == item.identity || previous.sourcePath == item.sourcePath ||
+			normalizeSnapshotPath(previous.snapshotPath) == normalizeSnapshotPath(item.snapshotPath) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestPublicationConflictSetMatchesReference(t *testing.T) {
+	var set publicationConflictSet
+	var pending []preparedItem
+	for index := 0; index < 8192; index++ {
+		path := fmt.Sprintf("/snapshot/%d", index%71)
+		if index%3 == 0 {
+			path = fmt.Sprintf("snapshot/discard/../%d", index%71)
+		}
+		item := preparedItem{identity: identity{fsid: uint32(index % 5), inode: uint64(index % 83)},
+			workItem: workItem{sourcePath: fmt.Sprintf("/source/%d", index%97), snapshotPath: path}}
+		conflict := publicationConflictsReference(pending, item)
+		if added := set.add(item); added == conflict {
+			t.Fatalf("indexed conflict differs from reference at %d: added=%t conflict=%t", index, added, conflict)
+		}
+		if conflict {
+			set.clear()
+			pending = pending[:0]
+			if !set.add(item) {
+				t.Fatal("item conflicts after group reset")
+			}
+		}
+		pending = append(pending, item)
+		if len(pending) == 64 {
+			set.clear()
+			pending = pending[:0]
+		}
+	}
+}
+
+func BenchmarkPublicationConflicts(benchmark *testing.B) {
+	items := make([]preparedItem, 64)
+	for index := range items {
+		path := strings.Repeat("/directory", 20) + fmt.Sprintf("/file-%d", index)
+		items[index] = preparedItem{identity: identity{fsid: 1, inode: uint64(index + 1)},
+			workItem: workItem{sourcePath: path, snapshotPath: path}}
+	}
+	benchmark.Run("pairwise", func(benchmark *testing.B) {
+		benchmark.ReportAllocs()
+		for iteration := 0; iteration < benchmark.N; iteration++ {
+			for index, item := range items {
+				if publicationConflictsReference(items[:index], item) {
+					benchmark.Fatal("unexpected conflict")
+				}
+			}
+		}
+	})
+	benchmark.Run("indexed", func(benchmark *testing.B) {
+		benchmark.ReportAllocs()
+		var set publicationConflictSet
+		for iteration := 0; iteration < benchmark.N; iteration++ {
+			set.clear()
+			for _, item := range items {
+				if !set.add(item) {
+					benchmark.Fatal("unexpected conflict")
+				}
+			}
+		}
+	})
 }
 
 func (filesystem *countedParentFS) Dir(sourcePath string) string {

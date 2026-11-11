@@ -54,7 +54,15 @@ pub(crate) struct BeginRecord {
 
 #[derive(Default)]
 pub(crate) struct BeginReconciliations {
-    entries: Mutex<HashMap<String, (i64, Arc<Mutex<BeginRecord>>)>>,
+    entries: Mutex<BeginReconciliationEntries>,
+}
+
+const MAX_BEGIN_RECONCILIATIONS: usize = 65_536;
+
+#[derive(Default)]
+struct BeginReconciliationEntries {
+    records: HashMap<String, (i64, Arc<Mutex<BeginRecord>>)>,
+    next_prune_ms: i64,
 }
 
 impl BeginReconciliations {
@@ -75,10 +83,23 @@ impl BeginReconciliations {
         }
         let entry = {
             let mut entries = self.entries.lock().await;
-            entries.retain(|_, (deadline, entry)| {
-                Arc::strong_count(entry) > 1 || deadline.saturating_add(60_000) >= now_ms
-            });
-            if let Some((deadline, entry)) = entries.get(request_id) {
+            let expired_request =
+                entries
+                    .records
+                    .get(request_id)
+                    .is_some_and(|(deadline, entry)| {
+                        Arc::strong_count(entry) == 1 && deadline.saturating_add(60_000) < now_ms
+                    });
+            if now_ms >= entries.next_prune_ms
+                || entries.records.len() >= MAX_BEGIN_RECONCILIATIONS
+                || expired_request
+            {
+                entries.records.retain(|_, (deadline, entry)| {
+                    Arc::strong_count(entry) > 1 || deadline.saturating_add(60_000) >= now_ms
+                });
+                entries.next_prune_ms = now_ms.saturating_add(1_000);
+            }
+            if let Some((deadline, entry)) = entries.records.get(request_id) {
                 if *deadline != deadline_ms {
                     return Err(Status::invalid_argument(
                         "Begin request identity reused with another deadline",
@@ -91,13 +112,15 @@ impl BeginReconciliations {
                         "Begin reconciliation history expired",
                     ));
                 }
-                if entries.len() >= 4096 {
+                if entries.records.len() >= MAX_BEGIN_RECONCILIATIONS {
                     return Err(Status::resource_exhausted(
                         "Begin reconciliation ledger is full",
                     ));
                 }
                 let entry = Arc::new(Mutex::new(BeginRecord::default()));
-                entries.insert(request_id.to_owned(), (deadline_ms, entry.clone()));
+                entries
+                    .records
+                    .insert(request_id.to_owned(), (deadline_ms, entry.clone()));
                 entry
             }
         };
@@ -107,8 +130,22 @@ impl BeginReconciliations {
 
 #[cfg(test)]
 mod finalization_tests {
-    use super::{BeginReconciliations, FinalizationLocks};
+    use super::{BeginReconciliations, FinalizationLocks, MAX_BEGIN_RECONCILIATIONS};
     use std::{sync::Arc, time::Duration};
+
+    #[tokio::test]
+    async fn begin_reconciliation_accepts_directory_publication_burst() {
+        let ledger = BeginReconciliations::default();
+        for index in 0..8192 {
+            drop(
+                ledger
+                    .lock(&format!("{index:032x}"), 10_000, 0)
+                    .await
+                    .unwrap(),
+            );
+        }
+        assert_eq!(ledger.entries.lock().await.records.len(), 8192);
+    }
 
     #[tokio::test]
     async fn begin_reconciliation_serializes_creation_and_cancellation() {
@@ -136,14 +173,14 @@ mod finalization_tests {
         cancellation.canceled = true;
         drop(cancellation);
         let _expired = ledger.lock(&"c".repeat(32), 80_000, 70_001).await.unwrap();
-        assert_eq!(ledger.entries.lock().await.len(), 1);
+        assert_eq!(ledger.entries.lock().await.records.len(), 1);
         assert!(ledger.lock(&request_id, 10_000, 70_001).await.is_err());
     }
 
     #[tokio::test]
     async fn begin_reconciliation_bounds_and_retired_history() {
         let ledger = BeginReconciliations::default();
-        for index in 0..4096 {
+        for index in 0..MAX_BEGIN_RECONCILIATIONS {
             drop(
                 ledger
                     .lock(&format!("{index:032x}"), 10_000, 0)
@@ -165,7 +202,7 @@ mod finalization_tests {
             .await
             .unwrap();
         let new = ledger.lock(&"f".repeat(32), 80_000, 70_001).await.unwrap();
-        assert_eq!(ledger.entries.lock().await.len(), 2);
+        assert_eq!(ledger.entries.lock().await.records.len(), 2);
         drop(new);
         drop(active);
         assert_eq!(

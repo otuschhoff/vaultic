@@ -1113,11 +1113,13 @@ invalidation, crypto concurrency and in-flight fetch/range limits are unchanged.
 The default change does not deploy or restart a production daemon. Existing
 explicit environment overrides continue to win.
 
-The supervisor now defaults to 800000 entries and selects `db-scale800k` for
-the default coalesced route. It uses a new create-only parent root,
-`bottleneck-parent-fme-cae1-20261109-800k`, and a separately built bundle,
-`bin/phase35-bottleneck800k-20261109/linux-amd64`. Prepare a fresh 800k frozen
-source; do not relabel, overwrite, or extend the sealed 400k parents. Tuning
+The supervisor defaults to 800000 entries and selects `db-scale800k` for
+the default coalesced route. The current create-only follow-up root is
+`bottleneck-parent-fme-cae1-20261109-800k-retry3`, using the qualified parent
+`bottleneck-parent-fme-cae1-20261109-800k-retry2` read-only and the bundle
+`bin/phase35-bottleneck800k-20261109-retry3-final/linux-amd64`. The parent has
+its own real frozen-source identities and successful full restore and encrypted
+reopen receipts. Do not relabel, overwrite, or extend sealed parents. Tuning
 is group 64, collection batch 5000, one-batch read-ahead, 128 readers, RPC limit
 32, metadata 2 GiB, block 512 MiB, eight crypto workers, and explicit
 16 GiB/65536 chunk retention. Historical routes retain their original settings.
@@ -1162,8 +1164,166 @@ NFS the dominant bottleneck in advance. Worker/caller timers overlap and must
 not be added to estimate wall time. NFS mount counters are shared and measure
 RPC traffic, not exclusive backup traffic or physical NAS disk reads. Temporal
 correlation is not causal attribution. A larger live sample does not by itself
-qualify retained-history growth. The new 800k workload has not yet been measured;
-prior 400k results below remain historical evidence, not new 800k results.
+qualify retained-history growth. Prior 400k results below remain historical
+evidence, separate from the accepted 800k measurement below.
+
+### 800k Qualification Results
+
+The accepted forced-only follow-up is retained at
+`/volume2/NASDA2/vaultic-test-m6/bottleneck-parent-fme-cae1-20261109-800k-retry3`.
+Independent analysis and matched CLI CPU profiles are sealed in the sibling
+`bottleneck-parent-fme-cae1-20261109-800k-retry3-analysis` directory. Verification
+checked all capture/bundle checksums, 19 build-source pins, 14 launch pins,
+receipt replay, no surviving owned processes, and removal of the private runtime.
+
+| Measurement | Result |
+| --- | --- |
+| Traversal | 800000 inodes; 677957 regular files; 54715539376 source bytes |
+| Main interval | 392.191 seconds; 2039.82 inodes/second |
+| Whole backup command | 398.336 seconds |
+| Whole qualification including setup and verification | 7172.241 seconds |
+| Peak combined owned RSS across qualification | 68669112320 bytes (63.95 GiB) |
+| Reuse | 800000 reused; zero changed/failed/reconciled records |
+| Publication | Zero revision allocations, directory publications or atomic groups; zero new data blobs |
+| Integrity | Full selected-source restore, unchanged source, and encrypted reopen verified |
+
+The CLI summary's 1470 added bytes are metadata, not new file-data blobs. Forced
+traversal still reread all 54.72 GB of selected file contents. The CLI profile
+covers the complete command: 1077.40 sampled CPU-seconds over 398.10 seconds,
+not an exact-main or native CPU profile.
+
+Remaining costs are mixed:
+
+- Source reads: 2742821 calls, no errors, mean 0.778 ms; bucket upper bounds
+   p50 0.1 ms, p95 5 ms, p99 20 ms. Across 11 usable aligned windows, source-read
+   mean latency and scanned throughput had Pearson correlation -0.781.
+- DB origin fetches: 152466 calls and 40.39 GB logical ciphertext; mean
+   10.30 ms, p50 at most 5 ms, p95 100 ms, p99 500 ms. Chunk-result waits averaged
+   11.80 ms. Fetch-admission waits were zero, so raising admission limits is not
+   supported by this run. Origin latency/throughput correlation was -0.269 over
+   13 windows; shared NFS READ RTT correlation was -0.107.
+- Retention pressure remains: 206093 chunk hits, 150763 misses and 85282
+   evictions with the 16 GiB/65536-entry limit. This prompted the paired
+   16-versus-32 GiB screen below, not an assumed gain from raising the default.
+- CLI CPU: chunk splitting accounts for 17.71% cumulatively, SHA-256's block
+   implementation 13.63% flat, syscalls 20.46% flat, and path cleaning 12.13%
+   cumulatively. Repeated normalization in reconciliation conflict checks was
+   subsequently optimized as described below, without altering chunk/hash semantics.
+   These CPU percentages are not
+   wall-time savings or proof of host-wide CPU saturation.
+- Pipeline reporting records 158.95 seconds waiting for prepared work and
+   189.14 seconds in writer batches. Source/DB accumulated worker times overlap
+   these intervals; do not add them. Write-side durability was not dominant in
+   this reuse run: only 13 commit RPCs and about 1.11 accumulated durable-wait
+   seconds, unlike fresh parent creation.
+
+Only 13 approximately aligned windows are available. Correlations are descriptive,
+not causal; source reads may hit OS/NAS caches, and no physical NAS disk traffic
+or backup-exclusive NFS traffic was measured. One 392-second pass does not meet
+the unchanged 600-second sustained-main gate. No retained-history-growth or
+production-throughput claim follows from this single capture.
+
+The investigation also repaired a fresh-publication blocker: retained Begin
+reconciliation history filled its old 4096-entry bound. The bound is now 65536,
+with amortized expiry scans and unchanged cancellation/ownership retention rules;
+burst, hard-bound, expiry and serialization tests passed. The patched parent
+backup completed in 7417.118 seconds, followed by full verified restore and
+encrypted reopen. Earlier flag-rejection, ledger-exhaustion and storage-limit
+attempts remain preserved as failures, not benchmark wins.
+
+The storage-limit failure occurred while retaining a full parent restore plus
+duplicate comparison copies. The follow-up borrows the parent input/database/
+repository read-only and charges their 193492423421 bytes against the original
+350 GiB active-fixture ceiling along with its writable copy. Full restore
+coverage is retained by verifying and releasing one top-level subtree at a time;
+the failed captures remain unchanged. The ceiling, shared free-space floor,
+200 GB RSS guard and 1200-second measured-backup deadline were not raised.
+
+### 800k 16 Versus 32 GiB Cache Results
+
+The November 10 screen completed all eight legs at
+`/volume2/NASDA2/vaultic-test-m6/ram32-read-fme-cae1-20261110-800k`, with sealed
+independent verification in its sibling `ram32-read-fme-cae1-20261110-800k-analysis`.
+The fixed schedule was `16/32/32/16 | 32/16/16/32`, four observations per capacity.
+Both byte and entry budgets changed: 16 GiB/65536 entries versus 32 GiB/131072
+entries. All other settings and optimized CLI/native bytes were identical.
+Each leg started a fresh daemon; host caches were not dropped or controlled.
+Ordinary backend policies were retained, without historical benchmark-only
+`dedicated-force` or `immutable` policies.
+
+| Leg | Cache, GiB | Main Interval, Seconds |
+| --- | ---: | ---: |
+| 1 | 16 | 399.770 |
+| 2 | 32 | 405.355 |
+| 3 | 32 | 402.362 |
+| 4 | 16 | 396.602 |
+| 5 | 32 | 391.485 |
+| 6 | 16 | 396.373 |
+| 7 | 16 | 398.739 |
+| 8 | 32 | 394.440 |
+
+| Median Measurement | 16 GiB | 32 GiB |
+| --- | ---: | ---: |
+| Main interval, seconds | 397.670 | 398.401 |
+| Logical ciphertext origin bytes | 40389727676 | 28630409796 |
+| Main-interval chunk evictions | 85276.5 | 0 |
+| Peak combined owned RSS across qualification, GiB | 63.64 | 75.12 |
+| Whole-command CLI CPU, seconds | 1012.986 | 1029.727 |
+| Mean source-read latency, ms | 0.753 | 0.764 |
+| Mean origin-fetch latency, ms | 11.234 | 15.332 |
+
+32 GiB reduced logical origin reads by 29.11%, eliminated measured main-interval
+evictions, and used 11.48 GiB more peak combined RSS. It did not consistently
+improve throughput: its overall median elapsed time was 0.18% longer. The first
+balanced bracket was 1.42% longer at 32 GiB; the second was 1.16% shorter.
+Fewer origin requests do not imply lower mean latency among the remaining
+requests, which can have a different composition. These observations do not
+establish a causal slowdown or speedup.
+
+All eight legs reused exactly 800000 records, with zero changed/failed/reconciled
+records, revision allocations, directory publications, atomic groups or new data
+blobs. Every leg passed full restore verification, unchanged-source checking and
+encrypted reopen. Independent verification replayed every leg and the complete
+comparison, checked capture/bundle seals and current source/artifact/parent pins,
+confirmed actual native cache settings, and found no owned processes or private
+runtimes remaining. The shared floor, active-fixture cap, read-only parent/source
+guards, RSS limit and deadlines remained unchanged.
+
+Before this screen, publication conflict checks were changed from pairwise
+repeated normalization to bounded per-group identity/source/normalized-path
+indexes. Identity and path conflict decisions, ordering and normalization rules
+are unchanged. Reference-equivalence and race tests, the full reconciliation
+suite and the actual encrypted native publication/reuse/reopen fixture passed.
+A three-repeat 64-item microbenchmark fell from approximately 2.1 ms to 45 us
+per group, about 46 times less CPU time, not a whole-backup speedup.
+Matched profiles in this screen show conflict-set insertion at 3.72--4.34 sampled
+CPU-seconds and reconciliation path normalization at 16.76--17.81 CPU-seconds;
+the earlier unoptimized capture showed 88.30 seconds in pairwise conflict checks
+and 101.55 seconds in normalization. This historical comparison is descriptive,
+not an optimized/unoptimized paired throughput experiment.
+
+Remaining costs are mixed. A representative 16 GiB profile attributes 18.96%
+cumulative CPU to chunk splitting, 14.60% flat CPU to SHA-256's block function,
+and 22.63% flat CPU to syscalls. Source reads still return all 54.72 GB per leg,
+with no observed read errors. Writer waiting for prepared work ranges from
+249.39 to 271.53 seconds, while writer-batch time ranges from 91.70 to 109.15
+seconds. These accumulated intervals overlap other work and are not additive
+wall-time attribution. Fetch-admission waits remain zero in all eight legs.
+
+Keep the 16 GiB throughput default. 32 GiB is an optional logical-origin-load
+reduction, not a demonstrated throughput improvement for this fixture. Before
+raising concurrency, run a separate paired content-reader-concurrency screen
+with cache and metadata concurrency held fixed, preserving source-read latency,
+CPU and correctness checks. Retained-history/database-growth qualification is
+still required before extrapolating either cache size to a larger database.
+
+This source was the frozen NASDA2 copy, not the original `ncl1` source mount.
+Logical origin bytes are not physical NAS disk traffic, shared NFS counters are
+not backup-exclusive, and profiles cover whole CLI commands, not exact-main or
+native CPU. No pass reached the unchanged 600-second sustained-main threshold.
+No production configuration was changed. Documentation was updated only after
+independent pin verification; its pre-update bytes remain in the pinned build
+archive at `/run/vaultic-ram32800k-build-20261110/candidate`.
 
 ### Pipeline And RAM Investigation
 

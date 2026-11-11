@@ -952,10 +952,12 @@ func (reconciler *Reconciler) processBatch(
 		groupSize = publicationConcurrency
 	}
 	pending := make([]preparedItem, 0, groupSize)
+	var conflicts publicationConflictSet
 	allocate := reconciler.inodeRevisionAllocator(uint64(len(batch)))
 	flush := func() {
 		reconciler.publishInodesWithAllocator(pending, published, allocate)
 		pending = pending[:0]
+		conflicts.clear()
 	}
 	for _, item := range batch {
 		if item.deferred {
@@ -983,8 +985,9 @@ func (reconciler *Reconciler) processBatch(
 			hardlinks[item.identity] = append(hardlinks[item.identity], item)
 			continue
 		}
-		if publicationConflicts(pending, item) {
+		if !conflicts.add(item) {
 			flush()
+			conflicts.add(item)
 		}
 		pending = append(pending, item)
 		if len(pending) == groupSize {
@@ -994,14 +997,38 @@ func (reconciler *Reconciler) processBatch(
 	flush()
 }
 
-func publicationConflicts(pending []preparedItem, item preparedItem) bool {
-	for _, previous := range pending {
-		if previous.identity == item.identity || previous.sourcePath == item.sourcePath ||
-			normalizeSnapshotPath(previous.snapshotPath) == normalizeSnapshotPath(item.snapshotPath) {
-			return true
-		}
+type publicationConflictSet struct {
+	identities    map[identity]struct{}
+	sourcePaths   map[string]struct{}
+	snapshotPaths map[string]struct{}
+}
+
+func (set *publicationConflictSet) add(item preparedItem) bool {
+	if _, exists := set.identities[item.identity]; exists {
+		return false
 	}
-	return false
+	if _, exists := set.sourcePaths[item.sourcePath]; exists {
+		return false
+	}
+	path := normalizeSnapshotPath(item.snapshotPath)
+	if _, exists := set.snapshotPaths[path]; exists {
+		return false
+	}
+	if set.identities == nil {
+		set.identities = make(map[identity]struct{})
+		set.sourcePaths = make(map[string]struct{})
+		set.snapshotPaths = make(map[string]struct{})
+	}
+	set.identities[item.identity] = struct{}{}
+	set.sourcePaths[item.sourcePath] = struct{}{}
+	set.snapshotPaths[path] = struct{}{}
+	return true
+}
+
+func (set *publicationConflictSet) clear() {
+	clear(set.identities)
+	clear(set.sourcePaths)
+	clear(set.snapshotPaths)
 }
 
 func (reconciler *Reconciler) publishInodes(items []preparedItem, published map[string]publishedItem) {
@@ -1220,8 +1247,9 @@ func (reconciler *Reconciler) prefetchExistingPublicationRecords(items []prepare
 		return
 	}
 	keys := make([][]byte, len(items))
+	var conflicts publicationConflictSet
 	for index, item := range items {
-		if publicationConflicts(items[:index], item) {
+		if !conflicts.add(item) {
 			return
 		}
 		keys[index] = schema.CurrentInodeKey(item.identity.fsid, item.identity.inode)

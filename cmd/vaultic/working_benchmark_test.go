@@ -568,7 +568,8 @@ func TestPublicationScale800kPolicy(t *testing.T) {
 	}
 	tuning, err := publicationDBProfile("db-scale800k")
 	rtest.OK(t, err)
-	for _, flag := range []string{"--read-concurrency=128", "--metadata-publication-group-size=64", "--metadata-collection-read-ahead=1", "--metadata-collection-batch-size=5000"} {
+	rtest.OK(t, backupcmd.NewCommand(&global.Options{}).ParseFlags(tuning.Flags))
+	for _, flag := range []string{"--read-concurrency=128", "--metadata-publication-group-size=64", "--metadata-reconciliation-read-ahead=1", "--metadata-reconciliation-batch-size=5000"} {
 		if !slices.Contains(tuning.Flags, flag) {
 			t.Fatalf("800k tuning lacks %s", flag)
 		}
@@ -872,8 +873,33 @@ const publicationChunk200kRoot = "/volume2/NASDA2/vaultic-test-m6/chunk-compare-
 const publicationImmutable200kRoot = "/volume2/NASDA2/vaultic-test-m6/immutable-default-fme-cae1-20261105-200k-retry1"
 
 const publicationScale400kRoot = "/volume2/NASDA2/vaultic-test-m6/reconcile-parent-fme-cae1-20261105-400k"
-const publicationScale800kRoot = "/volume2/NASDA2/vaultic-test-m6/bottleneck-parent-fme-cae1-20261109-800k"
-const publicationScale800kBin = "/root/proj/vaultic/bin/phase35-bottleneck800k-20261109/linux-amd64"
+const publicationScale800kParent = "/volume2/NASDA2/vaultic-test-m6/bottleneck-parent-fme-cae1-20261109-800k-retry2"
+const publicationScale800kRoot = "/volume2/NASDA2/vaultic-test-m6/bottleneck-parent-fme-cae1-20261109-800k-retry3"
+const publicationScale800kBin = "/root/proj/vaultic/bin/phase35-bottleneck800k-20261109-retry3-final/linux-amd64"
+const publicationRAM32800kRoot = "/volume2/NASDA2/vaultic-test-m6/ram32-read-fme-cae1-20261110-800k"
+const publicationRAM32800kBin = "/root/proj/vaultic/bin/phase35-ram32800k-20261110/linux-amd64"
+
+func validatePublicationRAM32Leg(root, label string) error {
+	for index, gib := range []int{16, 32, 32, 16, 32, 16, 16, 32} {
+		expected := fmt.Sprintf("leg-%02d-%dg", index+1, gib)
+		if label == expected && root == filepath.Join(publicationRAM32800kRoot, expected) {
+			return nil
+		}
+	}
+	return fmt.Errorf("RAM32 comparison requires its exact scheduled private leg")
+}
+
+func TestPublicationRAM32Policy(t *testing.T) {
+	for index, gib := range []int{16, 32, 32, 16, 32, 16, 16, 32} {
+		label := fmt.Sprintf("leg-%02d-%dg", index+1, gib)
+		root := filepath.Join(publicationRAM32800kRoot, label)
+		rtest.OK(t, validatePublicationRAM32Leg(root, label))
+		if validatePublicationRAM32Leg(root+"/retry", label) == nil || validatePublicationRAM32Leg(root, "leg-09-16g") == nil {
+			t.Fatal("RAM32 scope accepted an unscheduled path or label")
+		}
+	}
+}
+
 const publicationRead400kRoot = "/volume2/NASDA2/vaultic-test-m6/reconcile-read-fme-cae1-20261105-400k"
 const publicationRead400kBin = "/root/proj/vaultic/bin/phase35-reconcile400k/linux-amd64"
 const publicationCache400kRoot = "/volume2/NASDA2/vaultic-test-m6/cache-read-fme-cae1-20261107-400k-retry4"
@@ -2244,7 +2270,7 @@ func publicationDBProfile(profile string) (publicationDBTuning, error) {
 	case "db-scale800k":
 		tuning.MetaCacheBytes = 2 << 30
 		tuning.Flags[0] = "--read-concurrency=128"
-		tuning.Flags = append(tuning.Flags, "--metadata-collection-batch-size=5000", "--metadata-collection-read-ahead=1")
+		tuning.Flags = append(tuning.Flags, "--metadata-reconciliation-batch-size=5000", "--metadata-reconciliation-read-ahead=1")
 	case "db-group64", "db-group64-end", "db-hot-control", "db-hot-control-end", "db-read64-end":
 		tuning.MetaCacheBytes = 2 << 30
 	case "db-group16", "db-group32":
@@ -2431,9 +2457,17 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 		if strings.HasPrefix(profile, "db-") {
 			expectedRoot = previous + "-forced-db-" + strings.TrimPrefix(profile, "db-")
 		}
-		if mode != "coalesced" || os.Getenv("VAULTIC_PHASE35_METADATA_READ_INODE_LIMIT") != "50000" ||
+		expectedLimit := "50000"
+		if profile == "db-scale800k" {
+			previous, expectedRoot, expectedLimit = publicationScale800kParent, publicationScale800kRoot, "800000"
+			if label := os.Getenv("VAULTIC_PHASE35_RAM32_LEG"); label != "" {
+				rtest.OK(t, validatePublicationRAM32Leg(root, label))
+				expectedRoot = root
+			}
+		}
+		if mode != "coalesced" || os.Getenv("VAULTIC_PHASE35_METADATA_READ_INODE_LIMIT") != expectedLimit ||
 			os.Getenv("VAULTIC_PHASE35_METADATA_READ_FORCE_ONLY") != "1" || root != expectedRoot {
-			t.Fatal("concurrency screen requires a fresh allowlisted forced-only 50k coalesced cell")
+			t.Fatal("concurrency screen requires a fresh allowlisted forced-only coalesced cell")
 		}
 		var err error
 		if strings.HasPrefix(profile, "db-") {
@@ -2449,6 +2483,10 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 		rtest.OK(t, err)
 		entries, expectedRegular, expectedFiles, expectedBytes = 50000, 41347, 41372, 19493496103
 		expectedDigest = "8f32883b02c37ae550a0375fa6abfe79ec52d830ef0d9cff1053522687a41e87"
+		if profile == "db-scale800k" {
+			entries, expectedRegular, expectedFiles, expectedBytes = 800000, 677957, 679972, 54715539376
+			expectedDigest = "7bc6b227e07a216d7b54f34671b73f41c24f03d4afe05b4eb79af2d35f57a851"
+		}
 	} else if (mode == "" && root != previous+"/retry") || (mode != "" && root != "/volume2/NASDA2/vaultic-test-m6/metadata-read-fme-cae1-20261103-10k-"+mode) {
 		t.Fatal("retry requires the new private child of the retained failed capture")
 	}
@@ -2495,6 +2533,12 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 	if publicationDBFollowupProfile(profile) {
 		candidate = "/root/proj/vaultic/bin/phase35-forced-followup/linux-amd64/vaultic"
 		binary = "/root/proj/vaultic/bin/phase35-forced-followup/linux-amd64/vaulticdb"
+	}
+	if profile == "db-scale800k" {
+		candidate, binary = filepath.Join(publicationScale800kBin, "vaultic"), filepath.Join(publicationScale800kBin, "vaulticdb")
+		if os.Getenv("VAULTIC_PHASE35_RAM32_LEG") != "" {
+			candidate, binary = filepath.Join(publicationRAM32800kBin, "vaultic"), filepath.Join(publicationRAM32800kBin, "vaulticdb")
+		}
 	}
 	for path, expected := range map[string]string{candidate: os.Getenv("VAULTIC_PHASE35_THROUGHPUT_CANDIDATE_SHA256"), binary: os.Getenv("VAULTIC_PHASE35_THROUGHPUT_NATIVE_SHA256")} {
 		contents, err := os.ReadFile(path)
@@ -3110,7 +3154,9 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 	chunk200k := os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT") != "" && validatePublicationChunkLeg(os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT"), os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT")) == nil
 	scale200k := len(paths) == 200_000 && os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT") == "200000" && (os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT") == publicationScale200kRoot || chunk200k)
 	scale200k = scale200k || len(paths) == 400_000 && os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT") == "400000" && (os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT") == publicationScale400kRoot || chunk200k && publicationRead400kVariant(os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT")))
-	scale200k = scale200k || len(paths) == 800_000 && os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT") == "800000" && os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT") == publicationScale800kRoot
+	rawRoot := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT")
+	ram32 := os.Getenv("VAULTIC_PHASE35_RAM32_LEG") != "" && validatePublicationRAM32Leg(rawRoot, os.Getenv("VAULTIC_PHASE35_RAM32_LEG")) == nil
+	scale200k = scale200k || len(paths) == 800_000 && os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT") == "800000" && (rawRoot == publicationScale800kRoot || ram32)
 	if len(paths) != 10000 && len(paths) != 50000 && !scale200k {
 		t.Fatal("force comparison requires exactly 10000 or 50000 entries")
 	}
@@ -3309,8 +3355,34 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 			}
 		}
 		restored := filepath.Join(leg, "restore")
-		rtest.OK(t, testRunRestoreAssumeFailure(t, id.String(), restoreOptions{Target: restored, Verify: true}, legOptions))
-		actual, actualFiles, actualBytes := m5FilesSelected(t, filepath.Join(restored, strings.TrimPrefix(source, "/")), false, paths)
+		actual, actualFiles, actualBytes := digest, uint64(0), uint64(0)
+		if len(paths) == 800_000 {
+			groups, err := publicationRestoreGroups(paths)
+			rtest.OK(t, err)
+			for _, group := range groups {
+				selected := map[string]bool{".": true}
+				for path := range paths {
+					if path == group || strings.HasPrefix(path, group+"/") {
+						selected[path] = true
+					}
+				}
+				restore := restoreOptions{Target: restored, Verify: true}
+				restore.Includes = []string{filepath.Join(source, group)}
+				rtest.OK(t, testRunRestoreAssumeFailure(t, id.String(), restore, legOptions))
+				got, gotFiles, gotBytes := m5FilesSelected(t, filepath.Join(restored, strings.TrimPrefix(source, "/")), false, selected)
+				want, wantFiles, wantBytes := m5FilesSelected(t, source, false, selected)
+				if got != want || gotFiles != wantFiles || gotBytes != wantBytes {
+					t.Fatal("comparison restore subtree differs", group)
+				}
+				actualFiles += gotFiles
+				actualBytes += gotBytes
+				rtest.OK(t, os.RemoveAll(restored))
+				t.Logf("verified and released restore subtree %s files=%d bytes=%d", group, gotFiles, gotBytes)
+			}
+		} else {
+			rtest.OK(t, testRunRestoreAssumeFailure(t, id.String(), restoreOptions{Target: restored, Verify: true}, legOptions))
+			actual, actualFiles, actualBytes = m5FilesSelected(t, filepath.Join(restored, strings.TrimPrefix(source, "/")), false, paths)
+		}
 		retained, retainedFiles, retainedBytes := m5FilesSelected(t, source, false, paths)
 		if actual != digest || retained != digest || actualFiles != files || retainedFiles != files || actualBytes != size || retainedBytes != size {
 			t.Fatal("comparison restore or source changed")
@@ -3337,6 +3409,39 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 		t.Logf("qualified_force_comparison forced=%t main_seconds=%.3f entries_per_second=%.3f data_blobs=%d", forced, measurement.SecondsElapsed, float64(len(paths))/measurement.SecondsElapsed, summary.DataBlobs)
 		rtest.OK(t, (*owner).Close(context.Background()))
 		*owner = nil
+	}
+}
+
+func publicationRestoreGroups(paths map[string]bool) ([]string, error) {
+	unique := make(map[string]bool)
+	for path := range paths {
+		if path == "." {
+			continue
+		}
+		if !filepath.IsLocal(path) || filepath.Clean(path) != path {
+			return nil, fmt.Errorf("unsafe restore selection %q", path)
+		}
+		group, _, _ := strings.Cut(path, "/")
+		unique[group] = true
+	}
+	groups := make([]string, 0, len(unique))
+	for group := range unique {
+		groups = append(groups, group)
+	}
+	slices.Sort(groups)
+	return groups, nil
+}
+
+func TestPublicationRestoreGroups(t *testing.T) {
+	groups, err := publicationRestoreGroups(map[string]bool{".": true, "b": true, "a/x": true, "a/y": true})
+	rtest.OK(t, err)
+	if !slices.Equal(groups, []string{"a", "b"}) {
+		t.Fatal("restore groups omitted or duplicated a subtree", groups)
+	}
+	for _, path := range []string{"../escape", "/absolute", "a/../b"} {
+		if _, err := publicationRestoreGroups(map[string]bool{path: true}); err == nil {
+			t.Fatal("unsafe restore selection accepted", path)
+		}
 	}
 }
 
