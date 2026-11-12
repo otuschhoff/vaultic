@@ -878,6 +878,78 @@ const publicationScale800kRoot = "/volume2/NASDA2/vaultic-test-m6/bottleneck-par
 const publicationScale800kBin = "/root/proj/vaultic/bin/phase35-bottleneck800k-20261109-retry3-final/linux-amd64"
 const publicationRAM32800kRoot = "/volume2/NASDA2/vaultic-test-m6/ram32-read-fme-cae1-20261110-800k"
 const publicationRAM32800kBin = "/root/proj/vaultic/bin/phase35-ram32800k-20261110/linux-amd64"
+const publicationReaders800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-readers-fme-cae1-20261111-800k-retry3"
+const publicationReaders800kBin = publicationOriginal800kBin
+const publicationOriginal800kParent = "/volume2/NASDA2/vaultic-test-m6/ncl1-parent-fme-cae1-20261111-800k-retry2"
+const publicationOriginal800kBin = "/root/proj/vaultic/bin/phase35-ncl1-readers800k-20261111-retry3/linux-amd64"
+
+func validatePublicationBackupSource(source string) error {
+	if source != "/ncl1-1-vs-50/fme_cae1" {
+		return fmt.Errorf("backup test source must be the original /ncl1-1-vs-50/fme_cae1 mount; qualify a matching parent first")
+	}
+	return nil
+}
+
+func TestPublicationBackupSourcePolicy(t *testing.T) {
+	rtest.OK(t, validatePublicationBackupSource("/ncl1-1-vs-50/fme_cae1"))
+	for _, source := range []string{publicationScale800kParent + "/input", publicationReaders800kRoot + "/input",
+		"/volume2/NASDA2/restore/ncl1-1-vs-50/fme_cae1", "/ncl1-1-vs-50/fme_cae1/child", "/ncl1-1-vs-50/other"} {
+		if validatePublicationBackupSource(source) == nil {
+			t.Fatalf("accepted substituted backup source %q", source)
+		}
+	}
+}
+
+func publicationReadersLeg(root, label string) (int, error) {
+	if os.Getenv("VAULTIC_PHASE35_RAM32_LEG") != "" {
+		return 0, fmt.Errorf("reader and cache experiments cannot be combined")
+	}
+	for index, readers := range []int{64, 96, 128, 128, 96, 64, 96, 128, 64, 64, 128, 96} {
+		expected := fmt.Sprintf("leg-%02d-r%d", index+1, readers)
+		if label == expected && root == filepath.Join(publicationReaders800kRoot, expected) {
+			return readers, nil
+		}
+	}
+	return 0, fmt.Errorf("reader comparison requires its exact scheduled private leg")
+}
+
+func TestPublicationReadersPolicy(t *testing.T) {
+	t.Setenv("VAULTIC_PHASE35_READERS_LEG", "")
+	t.Setenv("VAULTIC_PHASE35_RAM32_LEG", "")
+	baseline, err := publicationDBProfile("db-scale800k")
+	rtest.OK(t, err)
+	for index, readers := range []int{64, 96, 128, 128, 96, 64, 96, 128, 64, 64, 128, 96} {
+		label := fmt.Sprintf("leg-%02d-r%d", index+1, readers)
+		root := filepath.Join(publicationReaders800kRoot, label)
+		got, err := publicationReadersLeg(root, label)
+		rtest.OK(t, err)
+		if got != readers {
+			t.Fatal("reader routing differs")
+		}
+		if _, err := publicationReadersLeg(root+"/retry", label); err == nil {
+			t.Fatal("reader comparison accepted a child path")
+		}
+		t.Setenv("VAULTIC_PHASE35_READERS_LEG", label)
+		t.Setenv("VAULTIC_PHASE35_THROUGHPUT_ROOT", root)
+		tuning, err := publicationDBProfile("db-scale800k")
+		rtest.OK(t, err)
+		if tuning.Flags[0] != fmt.Sprintf("--read-concurrency=%d", readers) ||
+			!slices.Equal(tuning.Flags[1:], baseline.Flags[1:]) ||
+			tuning.MetaCacheBytes != baseline.MetaCacheBytes || tuning.BlockCacheBytes != baseline.BlockCacheBytes ||
+			tuning.CryptoThreads != baseline.CryptoThreads {
+			t.Fatal("reader comparison changed another setting")
+		}
+		command := backupcmd.NewCommand(&global.Options{})
+		rtest.OK(t, command.ParseFlags(tuning.Flags))
+	}
+	if _, err := publicationReadersLeg(filepath.Join(publicationReaders800kRoot, "leg-13-r64"), "leg-13-r64"); err == nil {
+		t.Fatal("reader comparison accepted an unscheduled leg")
+	}
+	t.Setenv("VAULTIC_PHASE35_RAM32_LEG", "leg-01-16g")
+	if _, err := publicationDBProfile("db-scale800k"); err == nil {
+		t.Fatal("reader comparison accepted simultaneous cache tuning")
+	}
+}
 
 func validatePublicationRAM32Leg(root, label string) error {
 	for index, gib := range []int{16, 32, 32, 16, 32, 16, 16, 32} {
@@ -1100,7 +1172,7 @@ func publicationScaleInodeLimit(selector, root string) (uint64, error) {
 	if selector == "" {
 		return 100_000, nil
 	}
-	if selector == "800000" && root == publicationScale800kRoot {
+	if selector == "800000" && (root == publicationScale800kRoot || root == publicationOriginal800kParent) {
 		return 800_000, nil
 	}
 	if selector == "400000" && root == publicationScale400kRoot {
@@ -1150,6 +1222,8 @@ func TestPublicationScaleInodeLimit(t *testing.T) {
 		{"200000", publicationScale200kRoot, 200_000},
 		{"400000", publicationScale400kRoot, 400_000},
 		{"800000", publicationScale800kRoot, 800_000},
+		{"800000", publicationOriginal800kParent, 800_000},
+		{"800000", publicationOriginal800kParent + "/retry", 0},
 		{"800000", publicationScale400kRoot, 0},
 		{"400000", publicationScale800kRoot, 0},
 		{"800000", publicationScale800kRoot + "/retry", 0},
@@ -1181,6 +1255,9 @@ func TestPrepareFmeCAE1Qualification(t *testing.T) {
 	}
 	limit, err := publicationScaleInodeLimit(os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT"), root)
 	rtest.OK(t, err)
+	if root == publicationOriginal800kParent {
+		rtest.OK(t, validatePublicationBackupSource("/ncl1-1-vs-50/fme_cae1"))
+	}
 	if limit >= 200_000 {
 		rtest.OK(t, validatePublicationQualificationRoot(root, "/volume2/NASDA2/vaultic-test-m6"))
 	} else {
@@ -1206,7 +1283,7 @@ func TestPrepareFmeCAE1Qualification(t *testing.T) {
 	if files == 0 || size > 64<<30 {
 		t.Fatal("selected source is empty or exceeds the 64 GiB logical-byte safety ceiling")
 	}
-	if limit >= 200_000 {
+	if limit >= 200_000 && root != publicationOriginal800kParent {
 		original := manifest.Source
 		manifest.Source = filepath.Join(root, "input")
 		rtest.OK(t, os.Mkdir(manifest.Source, 0700))
@@ -1229,7 +1306,7 @@ func TestPrepareFmeCAE1Qualification(t *testing.T) {
 	}
 	for name, value := range map[string]any{
 		"inode-manifest.json":     manifest,
-		"source-observation.json": map[string]any{"sha256": digest, "files": files, "regular_files": regularFiles, "bytes": size, "entries": len(manifest.Paths)},
+		"source-observation.json": map[string]any{"source": manifest.Source, "sha256": digest, "files": files, "regular_files": regularFiles, "bytes": size, "entries": len(manifest.Paths)},
 	} {
 		encoded, err := json.MarshalIndent(value, "", "  ")
 		rtest.OK(t, err)
@@ -1237,6 +1314,16 @@ func TestPrepareFmeCAE1Qualification(t *testing.T) {
 		rtest.OK(t, os.Chmod(filepath.Join(root, name), 0600))
 	}
 	t.Logf("source=%s entries=%d cap=%d non_directory_entries=%d regular_files=%d bytes=%d sha256=%s", manifest.Source, len(manifest.Paths), manifest.InodeLimit, files, regularFiles, size, digest)
+}
+
+func publicationQualificationPreflightArgs(backupArgs []string) []string {
+	preflightArgs := make([]string, 0, len(backupArgs)+1)
+	for _, argument := range backupArgs {
+		if argument != "--metadata-on-demand" && !strings.HasPrefix(argument, "--metadata-batch-delay=") {
+			preflightArgs = append(preflightArgs, argument)
+		}
+	}
+	return append(preflightArgs, "--dry-run")
 }
 
 func TestBoundedSourceRoundTrip(t *testing.T) {
@@ -1249,11 +1336,23 @@ func TestBoundedSourceRoundTrip(t *testing.T) {
 	rtest.OK(t, os.Link(filepath.Join(source, "dir", "keep"), filepath.Join(source, "dir", "alias")))
 	rtest.OK(t, os.WriteFile(filepath.Join(source, "dir", "omit"), []byte("unselected"), 0600))
 	rtest.OK(t, os.Symlink("dir/keep", filepath.Join(source, "link")))
-	manifest := backupcmd.BoundedInodeManifest{Version: 1, Source: source, InodeLimit: 5, Paths: []string{".", "dir", "dir/keep", "dir/alias", "link"}}
+	manifest := backupcmd.BoundedInodeManifest{Version: 1, Source: source, InodeLimit: 800_000, Paths: []string{".", "dir", "dir/keep", "dir/alias", "link"}}
 	encoded, err := json.Marshal(manifest)
 	rtest.OK(t, err)
 	filename := filepath.Join(t.TempDir(), "manifest.json")
 	rtest.OK(t, os.WriteFile(filename, encoded, 0600))
+	preflightArgs := publicationQualificationPreflightArgs([]string{"--metadata-on-demand", "--metadata-batch-delay=1ms",
+		"--metadata-cache-mib=64", "--bounded-inode-manifest=" + filename, "--force", source})
+	if !slices.Equal(preflightArgs, []string{"--metadata-cache-mib=64", "--bounded-inode-manifest=" + filename, "--force", source, "--dry-run"}) {
+		t.Fatal("bounded dry-run retained on-demand-only flags or changed its selection")
+	}
+	rtest.OK(t, withTermStatus(t, environment.globalOptions, func(ctx context.Context, options global.Options) error {
+		command := backupcmd.NewCommand(&options)
+		command.SetArgs(preflightArgs)
+		command.SetContext(ctx)
+		return command.Execute()
+	}))
+	testListSnapshots(t, environment.globalOptions, 0)
 	testRunBackup(t, "", []string{source}, backupOptions{BoundedInodeManifest: filename, Force: true, UseCWalk: true, CWalkConcurrency: 4}, environment.globalOptions)
 	ids := testListSnapshots(t, environment.globalOptions, 1)
 	snapshot := testLoadSnapshot(t, environment.globalOptions, ids[0])
@@ -1475,6 +1574,7 @@ func TestPublicationBackupQualification(t *testing.T) {
 	scaleLimit, err := publicationScaleInodeLimit(os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT"), root)
 	rtest.OK(t, err)
 	scale200k := scaleLimit == 200_000 || scaleLimit == 400_000 || scaleLimit == 800_000
+	originalParent := root == publicationOriginal800kParent
 	scaleProfile := fmt.Sprintf("db-scale%dk", scaleLimit/1000)
 	scaleBuild := "/root/proj/vaultic/bin/phase35-forced-followup/linux-amd64"
 	if scaleLimit == 400_000 {
@@ -1482,6 +1582,9 @@ func TestPublicationBackupQualification(t *testing.T) {
 	}
 	if scaleLimit == 800_000 {
 		scaleBuild = publicationScale800kBin
+		if originalParent {
+			scaleBuild = publicationOriginal800kBin
+		}
 	}
 	if scale200k && (onDemand != "1" || unchanged != "" || forceCompare != "" || resumeVerification != "" ||
 		os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ORDER") != "64" || os.Getenv("VAULTIC_PHASE35_METADATA_READ_FORCE_ONLY") != "1" ||
@@ -1638,7 +1741,7 @@ func TestPublicationBackupQualification(t *testing.T) {
 		t.Logf("unchanged_fixture entries=%d regular_files=%d bytes=%d sha256=%s", len(paths), regularFiles, size, digest)
 	} else if os.Getenv("VAULTIC_PHASE35_THROUGHPUT_SOURCE") != "" {
 		expectedSource := "/ncl1-1-vs-50/fme_cae1"
-		if scale200k {
+		if scale200k && !originalParent {
 			expectedSource = filepath.Join(root, "input")
 		}
 		if os.Getenv("VAULTIC_PHASE35_THROUGHPUT_SOURCE") != expectedSource || onDemand != "1" || resumeVerification != "" {
@@ -1666,7 +1769,11 @@ func TestPublicationBackupQualification(t *testing.T) {
 			t.Fatal("sealed regular-file count is missing or changed")
 		}
 		if scale200k {
-			paths, err := boundedLiveSourcePaths(source, scaleLimit+1)
+			traversalLimit := scaleLimit + 1
+			if originalParent {
+				traversalLimit = scaleLimit
+			}
+			paths, err := boundedLiveSourcePaths(source, traversalLimit)
 			rtest.OK(t, err)
 			if !slices.Equal(paths, sourceManifest.Paths) || size > 64<<30 {
 				t.Fatal("200k frozen traversal or byte ceiling differs")
@@ -1699,6 +1806,12 @@ func TestPublicationBackupQualification(t *testing.T) {
 			t.Fatal("verification resume requires a digest-pinned frozen input")
 		}
 		digest, files, size = publicationQualificationSample(t, source)
+	}
+	if originalParent {
+		rtest.OK(t, validatePublicationBackupSource(source))
+		if sourceManifest.Source != source || sourceManifest.InodeLimit != 800_000 || len(frozenPaths) != 800_000 {
+			t.Fatal("original-source parent requires its exact bounded manifest")
+		}
 	}
 	var expectedSourceTree vaultic.ID
 	groups := []int{4, 64}
@@ -1902,18 +2015,12 @@ func TestPublicationBackupQualification(t *testing.T) {
 					backupArgs = append(backupArgs, metadataReadFlags...)
 					backupArgs = append(backupArgs, "--metadata-reconciliation-queue-depth=256", "--force")
 				}
-				if sourceManifest.Source != "" && !scale200k {
+				if sourceManifest.Source != "" && (!scale200k || originalParent) {
 					backupArgs = append(backupArgs, "--bounded-inode-manifest="+filepath.Join(root, "inode-manifest.json"), "--metadata-reconciliation-queue-depth=256", "--force")
 				}
 				backupArgs = append(backupArgs, source)
-				if sourceManifest.Source != "" && !scale200k {
-					preflightArgs := make([]string, 0, len(backupArgs)+1)
-					for _, argument := range backupArgs {
-						if argument != "--metadata-on-demand" {
-							preflightArgs = append(preflightArgs, argument)
-						}
-					}
-					preflightArgs = append(preflightArgs, "--dry-run")
+				if sourceManifest.Source != "" && (!scale200k || originalParent) {
+					preflightArgs := publicationQualificationPreflightArgs(backupArgs)
 					publicationQualificationCommand(t, cell, "preflight", candidate, preflightArgs...)
 					output, err := os.ReadFile(filepath.Join(cell, "preflight.stdout.log"))
 					rtest.OK(t, err)
@@ -2102,7 +2209,7 @@ func TestPublicationBackupQualification(t *testing.T) {
 				if snapshot.CrawlPlan != nil {
 					mode = snapshot.CrawlPlan.Mode
 				}
-				rtest.OK(t, validatePublicationCrawlMode(mode, !scale200k))
+				rtest.OK(t, validatePublicationCrawlMode(mode, !scale200k || originalParent))
 				selected = make(map[string]bool, len(sourceManifest.Paths))
 				for _, path := range sourceManifest.Paths {
 					selected[path] = true
@@ -2112,6 +2219,12 @@ func TestPublicationBackupQualification(t *testing.T) {
 			if actual != digest || actualFiles != files || actualBytes != size {
 				t.Fatal("verified restore differs from frozen input")
 			}
+			if originalParent {
+				currentDigest, currentFiles, currentBytes := m5FilesSelected(t, source, false, selected)
+				if currentDigest != digest || currentFiles != files || currentBytes != size {
+					t.Fatal("original source changed during parent qualification")
+				}
+			}
 			started = time.Now()
 			rtest.OK(t, publicationQualificationReopen(t.Context(), &client, daemonOptions))
 			reopenSeconds := time.Since(started).Seconds()
@@ -2120,6 +2233,7 @@ func TestPublicationBackupQualification(t *testing.T) {
 				t.Fatal("snapshot changed after encrypted database reopen")
 			}
 			result := map[string]any{"group_size": groupSize, "files": files, "bytes": size, "input_sha256": digest,
+				"source": source, "entries": len(frozenPaths), "regular_files": regularFiles, "source_unchanged": originalParent,
 				"metadata_on_demand": onDemand == "1",
 				"source_tree":        expectedSourceTree.String(),
 				"snapshot":           id.String(), "tree": snapshot.Tree.String(), "startup_seconds": startupSeconds, "backup_seconds": wall.Seconds(),
@@ -2135,6 +2249,10 @@ func TestPublicationBackupQualification(t *testing.T) {
 			_, err = resultFile.Write(append(encoded, '\n'))
 			rtest.OK(t, errors.Join(err, resultFile.Close()))
 			t.Logf("qualified_backup group=%d files=%d seconds=%.3f files_per_second=%.3f tree=%s", groupSize, files, wall.Seconds(), float64(files)/wall.Seconds(), snapshot.Tree)
+			if originalParent {
+				rtest.OK(t, validatePublicationCrawlMode(snapshot.CrawlPlan.Mode, true))
+				return
+			}
 			if unchanged != "" || scale200k {
 				if snapshot.CrawlPlan == nil || snapshot.CrawlPlan.Mode != "full" || snapshot.CrawlPlan.ReusedSubtrees != 0 {
 					t.Fatal("unchanged benchmark parent is not a complete full traversal")
@@ -2270,6 +2388,13 @@ func publicationDBProfile(profile string) (publicationDBTuning, error) {
 	case "db-scale800k":
 		tuning.MetaCacheBytes = 2 << 30
 		tuning.Flags[0] = "--read-concurrency=128"
+		if label := os.Getenv("VAULTIC_PHASE35_READERS_LEG"); label != "" {
+			readers, err := publicationReadersLeg(os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT"), label)
+			if err != nil {
+				return publicationDBTuning{}, err
+			}
+			tuning.Flags[0] = fmt.Sprintf("--read-concurrency=%d", readers)
+		}
 		tuning.Flags = append(tuning.Flags, "--metadata-reconciliation-batch-size=5000", "--metadata-reconciliation-read-ahead=1")
 	case "db-group64", "db-group64-end", "db-hot-control", "db-hot-control-end", "db-read64-end":
 		tuning.MetaCacheBytes = 2 << 30
@@ -2464,6 +2589,12 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 				rtest.OK(t, validatePublicationRAM32Leg(root, label))
 				expectedRoot = root
 			}
+			if label := os.Getenv("VAULTIC_PHASE35_READERS_LEG"); label != "" {
+				_, err := publicationReadersLeg(root, label)
+				rtest.OK(t, err)
+				previous = publicationOriginal800kParent
+				expectedRoot = root
+			}
 		}
 		if mode != "coalesced" || os.Getenv("VAULTIC_PHASE35_METADATA_READ_INODE_LIMIT") != expectedLimit ||
 			os.Getenv("VAULTIC_PHASE35_METADATA_READ_FORCE_ONLY") != "1" || root != expectedRoot {
@@ -2486,6 +2617,24 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 		if profile == "db-scale800k" {
 			entries, expectedRegular, expectedFiles, expectedBytes = 800000, 677957, 679972, 54715539376
 			expectedDigest = "7bc6b227e07a216d7b54f34671b73f41c24f03d4afe05b4eb79af2d35f57a851"
+			if os.Getenv("VAULTIC_PHASE35_READERS_LEG") != "" {
+				encoded, err := os.ReadFile(filepath.Join(publicationOriginal800kParent, "source-observation.json"))
+				rtest.OK(t, err)
+				var observed struct {
+					Source       string `json:"source"`
+					Entries      uint64 `json:"entries"`
+					RegularFiles uint64 `json:"regular_files"`
+					Files        uint64 `json:"files"`
+					Bytes        uint64 `json:"bytes"`
+					SHA256       string `json:"sha256"`
+				}
+				rtest.OK(t, json.Unmarshal(encoded, &observed))
+				rtest.OK(t, validatePublicationBackupSource(observed.Source))
+				if observed.Entries != 800_000 || observed.RegularFiles == 0 || observed.Files < observed.RegularFiles || observed.Bytes == 0 || observed.Bytes > 64<<30 || len(observed.SHA256) != 64 {
+					t.Fatal("original-source parent dimensions are invalid")
+				}
+				expectedRegular, expectedFiles, expectedBytes, expectedDigest = observed.RegularFiles, observed.Files, observed.Bytes, observed.SHA256
+			}
 		}
 	} else if (mode == "" && root != previous+"/retry") || (mode != "" && root != "/volume2/NASDA2/vaultic-test-m6/metadata-read-fme-cae1-20261103-10k-"+mode) {
 		t.Fatal("retry requires the new private child of the retained failed capture")
@@ -2510,10 +2659,27 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 	parent, err := vaultic.ParseID(receipt.Snapshot)
 	rtest.OK(t, err)
 	source := filepath.Join(previous, "input")
-	selected, err := boundedLiveSourcePaths(source, uint64(entries+1))
+	if os.Getenv("VAULTIC_PHASE35_READERS_LEG") != "" {
+		source = "/ncl1-1-vs-50/fme_cae1"
+	}
+	rtest.OK(t, validatePublicationBackupSource(source))
+	traversalLimit := uint64(entries + 1)
+	if os.Getenv("VAULTIC_PHASE35_READERS_LEG") != "" {
+		traversalLimit = uint64(entries)
+	}
+	selected, err := boundedLiveSourcePaths(source, traversalLimit)
 	rtest.OK(t, err)
 	if len(selected) != entries {
 		t.Fatal("qualified retry source scope changed")
+	}
+	if os.Getenv("VAULTIC_PHASE35_READERS_LEG") != "" {
+		encoded, err := os.ReadFile(filepath.Join(previous, "inode-manifest.json"))
+		rtest.OK(t, err)
+		var manifest backupcmd.BoundedInodeManifest
+		rtest.OK(t, json.Unmarshal(encoded, &manifest))
+		if manifest.Source != source || manifest.InodeLimit != uint64(entries) || !slices.Equal(manifest.Paths, selected) {
+			t.Fatal("original-source parent manifest differs from the selected traversal")
+		}
 	}
 	paths := make(map[string]bool, len(selected))
 	for _, path := range selected {
@@ -2538,6 +2704,9 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 		candidate, binary = filepath.Join(publicationScale800kBin, "vaultic"), filepath.Join(publicationScale800kBin, "vaulticdb")
 		if os.Getenv("VAULTIC_PHASE35_RAM32_LEG") != "" {
 			candidate, binary = filepath.Join(publicationRAM32800kBin, "vaultic"), filepath.Join(publicationRAM32800kBin, "vaulticdb")
+		}
+		if os.Getenv("VAULTIC_PHASE35_READERS_LEG") != "" {
+			candidate, binary = filepath.Join(publicationReaders800kBin, "vaultic"), filepath.Join(publicationReaders800kBin, "vaulticdb")
 		}
 	}
 	for path, expected := range map[string]string{candidate: os.Getenv("VAULTIC_PHASE35_THROUGHPUT_CANDIDATE_SHA256"), binary: os.Getenv("VAULTIC_PHASE35_THROUGHPUT_NATIVE_SHA256")} {
@@ -3151,12 +3320,15 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 	regularFiles, files, size uint64, extraFlags ...string,
 ) {
 	t.Helper()
+	rtest.OK(t, validatePublicationBackupSource(source))
 	chunk200k := os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT") != "" && validatePublicationChunkLeg(os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT"), os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT")) == nil
 	scale200k := len(paths) == 200_000 && os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT") == "200000" && (os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT") == publicationScale200kRoot || chunk200k)
 	scale200k = scale200k || len(paths) == 400_000 && os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT") == "400000" && (os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT") == publicationScale400kRoot || chunk200k && publicationRead400kVariant(os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT")))
 	rawRoot := os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT")
 	ram32 := os.Getenv("VAULTIC_PHASE35_RAM32_LEG") != "" && validatePublicationRAM32Leg(rawRoot, os.Getenv("VAULTIC_PHASE35_RAM32_LEG")) == nil
-	scale200k = scale200k || len(paths) == 800_000 && os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT") == "800000" && (rawRoot == publicationScale800kRoot || ram32)
+	_, readersErr := publicationReadersLeg(rawRoot, os.Getenv("VAULTIC_PHASE35_READERS_LEG"))
+	readers := os.Getenv("VAULTIC_PHASE35_READERS_LEG") != "" && readersErr == nil
+	scale200k = scale200k || len(paths) == 800_000 && os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT") == "800000" && (rawRoot == publicationScale800kRoot || ram32 || readers)
 	if len(paths) != 10000 && len(paths) != 50000 && !scale200k {
 		t.Fatal("force comparison requires exactly 10000 or 50000 entries")
 	}
@@ -3232,6 +3404,13 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 		rtest.OK(t, err)
 		legOptions := publicationQualificationOptions(filepath.Join(leg, "repo"), current.Socket, current.PassphraseFile)
 		rtest.OK(t, publicationQualificationLoadPassword(&legOptions))
+		if readers {
+			receipt, preflightErr := publicationCacheReusePreflight(t.Context(), *owner, parent, source, paths)
+			encoded, err := json.MarshalIndent(receipt, "", "  ")
+			rtest.OK(t, err)
+			rtest.OK(t, os.WriteFile(filepath.Join(leg, "reuse-preflight.json"), append(encoded, '\n'), 0600))
+			rtest.OK(t, preflightErr)
+		}
 		if publicationCache400kVariant(os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT")) {
 			receipt, preflightErr := publicationCacheReusePreflight(t.Context(), *owner, parent, source, paths)
 			provenance, err := os.ReadFile(filepath.Join(publicationCache400kParent, "parent-provenance.json"))
@@ -3283,6 +3462,9 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 		} else {
 			args = append(args, "--parent="+parent.String())
 		}
+		if readers {
+			args = append(args, "--bounded-inode-manifest="+filepath.Join(rawRoot, "inode-manifest.json"))
+		}
 		args = append(args, source)
 		if publicationPipeline400kVariant(os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT")) || len(paths) == 800_000 {
 			profileRoot := filepath.Join(leg, "cpu")
@@ -3332,7 +3514,11 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 		id, err := vaultic.ParseID(snapshotID)
 		rtest.OK(t, err)
 		snapshot := testLoadSnapshot(t, legOptions, id)
-		if snapshot.CrawlPlan == nil || snapshot.CrawlPlan.Mode != "full" || snapshot.CrawlPlan.ReusedSubtrees != 0 || len(snapshot.Paths) != 1 || snapshot.Paths[0] != source {
+		expectedCrawlMode := "full"
+		if readers {
+			expectedCrawlMode = "bounded"
+		}
+		if snapshot.CrawlPlan == nil || snapshot.CrawlPlan.Mode != expectedCrawlMode || snapshot.CrawlPlan.ReusedSubtrees != 0 || len(snapshot.Paths) != 1 || snapshot.Paths[0] != source {
 			t.Fatal("comparison snapshot scope differs")
 		}
 		if (!forced && (snapshot.Parent == nil || *snapshot.Parent != parent)) || (forced && snapshot.Parent != nil) {

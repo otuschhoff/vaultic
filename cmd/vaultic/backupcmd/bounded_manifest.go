@@ -31,7 +31,7 @@ func loadBoundedInodeManifest(filename, source string) (map[string]bool, error) 
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		return nil, fmt.Errorf("bounded inode manifest has trailing data")
 	}
-	if manifest.Version != 1 || manifest.Source != source || !filepath.IsAbs(source) || filepath.Clean(source) != source || manifest.InodeLimit == 0 || manifest.InodeLimit > 200_000 || uint64(len(manifest.Paths)) > manifest.InodeLimit {
+	if manifest.Version != 1 || manifest.Source != source || !filepath.IsAbs(source) || filepath.Clean(source) != source || manifest.InodeLimit == 0 || manifest.InodeLimit > 800_000 || uint64(len(manifest.Paths)) > manifest.InodeLimit {
 		return nil, fmt.Errorf("invalid bounded inode manifest source or limit")
 	}
 	selected := make(map[string]bool, len(manifest.Paths))

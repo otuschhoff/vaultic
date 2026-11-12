@@ -1,11 +1,13 @@
 from pathlib import Path
 import argparse
 import ctypes
+import hashlib
 import json
 import math
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -61,6 +63,11 @@ SCALE800K_CHUNKS = {'VAULTICDB_CHUNK_CACHE_BYTES': 16 << 30, 'VAULTICDB_CHUNK_CA
 RAM32_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ram32-read-fme-cae1-20261110-800k')
 RAM32_BIN = WORKSPACE / 'bin/phase35-ram32800k-20261110/linux-amd64'
 RAM32_SCHEDULE = (16, 32, 32, 16, 32, 16, 16, 32)
+ORIGINAL_PARENT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-parent-fme-cae1-20261111-800k-retry2')
+ORIGINAL_RUNTIME = Path('/run/vaultic-unchanged-ncl1-parent800k-20261111-retry2')
+READERS_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-readers-fme-cae1-20261111-800k-retry3')
+READERS_BIN = WORKSPACE / 'bin/phase35-ncl1-readers800k-20261111-retry3/linux-amd64'
+READERS_SCHEDULE = (64, 96, 128, 128, 96, 64, 96, 128, 64, 64, 128, 96)
 ACCEPTED = Path('/volume2/NASDA2/vaultic-test-m6/critical-path-fme_cae1-20261102-production-cap100k/group-64')
 SEED = Path('/ncl1-1-vs-50/fme_dump/amakura/db.begin-readiness-20261001-fuU56R')
 CANDIDATE = WORKSPACE / 'bin/phase35-metadata-read/linux-amd64/vaultic'
@@ -113,6 +120,8 @@ DB_OVERRIDES.update(FOLLOWUP_OVERRIDES)
 
 
 def ram32_leg(label):
+    if os.environ.get('VAULTIC_PHASE35_READERS_LEG'):
+        raise ValueError('cache and reader experiments cannot be combined')
     for index, gib in enumerate(RAM32_SCHEDULE, 1):
         if label == f'leg-{index:02d}-{gib}g':
             return RAM32_ROOT / label, Path('/run/vaultic-unchanged-ram32800k-' + label), {
@@ -121,12 +130,91 @@ def ram32_leg(label):
     raise ValueError('RAM32 comparison requires its exact scheduled private leg')
 
 
+def readers_leg(label):
+    if os.environ.get('VAULTIC_PHASE35_RAM32_LEG'):
+        raise ValueError('reader and cache experiments cannot be combined')
+    for index, readers in enumerate(READERS_SCHEDULE, 1):
+        if label == f'leg-{index:02d}-r{readers}':
+            return READERS_ROOT / label, Path('/run/vaultic-unchanged-ncl1-readers800k-retry3-' + label), readers
+    raise ValueError('reader comparison requires its exact scheduled private leg')
+
+
 def scale800k_chunks():
+    if os.environ.get('VAULTIC_PHASE35_READERS_LEG'):
+        readers_leg(os.environ['VAULTIC_PHASE35_READERS_LEG'])
+        return dict(SCALE800K_CHUNKS)
     label = os.environ.get('VAULTIC_PHASE35_RAM32_LEG')
     return ram32_leg(label)[2] if label else dict(SCALE800K_CHUNKS)
 
 
+def require_original_backup_source(source):
+    if Path(source) != SCALE_SOURCE:
+        raise ValueError('backup test source must be the original /ncl1-1-vs-50/fme_cae1 mount; qualify a matching parent first')
+
+
+def selected_source_identities(source, paths):
+    if not paths or paths[0] != '.' or len(set(paths)) != len(paths):
+        raise ValueError('source identity selection must contain a unique root and paths')
+    digest = hashlib.sha256()
+    hardlinks = set()
+    hardlink_paths = 0
+    aliases = 0
+    device = source.stat().st_dev
+    for relative in paths:
+        path = Path(relative)
+        if path.is_absolute() or '..' in path.parts or str(path) != relative:
+            raise ValueError('source identity path must be canonical and relative')
+        value = (source / relative).lstat()
+        if value.st_dev != device:
+            raise ValueError('source identity selection crosses filesystems')
+        digest.update((json.dumps([relative, value.st_dev, value.st_ino, stat.S_IFMT(value.st_mode), value.st_nlink]) + '\n').encode())
+        if not stat.S_ISDIR(value.st_mode) and value.st_nlink > 1:
+            hardlink_paths += 1
+            identity = (value.st_dev, value.st_ino)
+            aliases += identity in hardlinks
+            hardlinks.add(identity)
+    return {'source': str(source), 'entries': len(paths), 'metadata_records': len(paths) - aliases,
+            'hardlink_paths': hardlink_paths, 'hardlink_groups': len(hardlinks), 'hardlink_aliases': aliases,
+            'identity_sha256': digest.hexdigest()}
+
+
+def validated_source_identities(root, entries):
+    before = json.loads((root / 'source-identities-before.json').read_text())
+    after = json.loads((root / 'source-identities-after.json').read_text())
+    require_original_backup_source(before['source'])
+    if before != after or before['entries'] != entries:
+        raise ValueError('original-source identity or hardlink topology changed')
+    counts = [before[name] for name in ('entries', 'metadata_records', 'hardlink_paths', 'hardlink_groups', 'hardlink_aliases')]
+    if (any(type(value) is not int or value < 0 for value in counts)
+            or not 0 < before['metadata_records'] <= entries
+            or before['metadata_records'] + before['hardlink_aliases'] != entries
+            or not 0 <= before['hardlink_groups'] <= before['hardlink_paths'] <= entries
+            or before['hardlink_paths'] - before['hardlink_groups'] != before['hardlink_aliases']
+            or len(before['identity_sha256']) != 64
+            or before['manifest_sha256'] != pilot.digest(root / 'inode-manifest.json')):
+        raise ValueError('original-source metadata-record scope is inconsistent')
+    return before
+
+
+def original_parent_selected():
+    value = os.environ.get('VAULTIC_PHASE35_ORIGINAL_PARENT')
+    if value not in (None, '1'):
+        raise ValueError('invalid original-parent selector')
+    if value and any(os.environ.get(key) for key in ('VAULTIC_PHASE35_READERS_LEG', 'VAULTIC_PHASE35_RAM32_LEG')):
+        raise ValueError('parent qualification cannot be combined with a comparison leg')
+    return value == '1'
+
+
 def binaries(profile):
+    if original_parent_selected():
+        if profile != 'db-scale800k':
+            raise ValueError('original parent requires the exact 800k profile')
+        return READERS_BIN / 'vaultic', READERS_BIN / 'vaulticdb'
+    if os.environ.get('VAULTIC_PHASE35_READERS_LEG'):
+        readers_leg(os.environ['VAULTIC_PHASE35_READERS_LEG'])
+        if profile != 'db-scale800k':
+            raise ValueError('reader comparison requires the exact 800k profile')
+        return READERS_BIN / 'vaultic', READERS_BIN / 'vaulticdb'
     if os.environ.get('VAULTIC_PHASE35_RAM32_LEG'):
         ram32_leg(os.environ['VAULTIC_PHASE35_RAM32_LEG'])
         if profile != 'db-scale800k':
@@ -147,6 +235,10 @@ def profile_settings(profile):
                     'block_cache_bytes': 512 << 20, 'crypto_threads': 8, 'batch_delay_ns': 1000000,
                     'publication_group_size': 64}
         settings.update(DB_OVERRIDES[profile])
+        if os.environ.get('VAULTIC_PHASE35_READERS_LEG'):
+            if profile != 'db-scale800k':
+                raise ValueError('reader comparison requires the exact 800k profile')
+            settings['readers'] = readers_leg(os.environ['VAULTIC_PHASE35_READERS_LEG'])[2]
         return settings
     if profile not in ('baseline', 'rpcs', 'readers'):
         raise ValueError('unapproved tuning profile')
@@ -240,12 +332,20 @@ def cache_profile_settings(profile, variant=None):
 def paths(mode, inode_limit=10000, profile=None):
     if mode not in ('parallel', 'coalesced', 'catalog'):
         raise ValueError('unknown metadata-read mode')
+    if original_parent_selected():
+        if (mode, inode_limit, profile) != ('coalesced', 800000, 'db-scale800k'):
+            raise ValueError('original parent requires its exact coalesced 800k route')
+        return ORIGINAL_PARENT, ORIGINAL_RUNTIME
     if inode_limit == 800000:
         if (mode, profile) != ('coalesced', 'db-scale800k'):
             raise ValueError('800k requires its explicit forced-only scale profile')
+        if os.environ.get('VAULTIC_PHASE35_READERS_LEG'):
+            return readers_leg(os.environ['VAULTIC_PHASE35_READERS_LEG'])[:2]
         if os.environ.get('VAULTIC_PHASE35_RAM32_LEG'):
             return ram32_leg(os.environ['VAULTIC_PHASE35_RAM32_LEG'])[:2]
         return SCALE800K_ROOT, SCALE800K_RUNTIME
+    if os.environ.get('VAULTIC_PHASE35_READERS_LEG'):
+        raise ValueError('reader comparison requires exactly 800000 entries')
     if os.environ.get('VAULTIC_PHASE35_RAM32_LEG'):
         raise ValueError('RAM32 comparison requires exactly 800000 entries')
     if profile == 'db-scale800k':
@@ -412,6 +512,7 @@ def validate_cache_progress(event):
 
 
 def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
+    parent_setup = original_parent_selected()
     root, runtime = paths(mode, inode_limit, profile) if chunk_leg is None else chunk_paths(chunk_leg)
     candidate, native = binaries(profile)
     chunk_variant = None
@@ -437,13 +538,29 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
             raise ValueError('unsafe capture root')
     if (root / '.nobackup').read_bytes() != MARKER:
         raise ValueError('ownership marker differs')
-    borrowed_roots = (SCALE800K_PARENT / 'input', SCALE800K_PARENT / 'group-64/db',
-                      SCALE800K_PARENT / 'group-64/repo') if inode_limit == 800000 else ()
+    original_reader = bool(os.environ.get('VAULTIC_PHASE35_READERS_LEG'))
+    parent_root = ORIGINAL_PARENT if original_reader else SCALE800K_PARENT
+    borrowed_roots = ((parent_root / 'group-64/db', parent_root / 'group-64/repo') if original_reader else
+                      (parent_root / 'input', parent_root / 'group-64/db', parent_root / 'group-64/repo')) if inode_limit == 800000 and not parent_setup else ()
+    source = (SCALE_SOURCE if parent_setup or original_reader else (SCALE800K_PARENT / 'input' if inode_limit == 800000 else
+              ((RECONCILE_PARENT if inode_limit == 400000 else SCALE_ROOT) / 'input' if chunk_leg is not None else
+               (root / 'input' if inode_limit in (200000, 400000) else
+                (FIFTY / 'input' if profile is not None else
+                 (PREVIOUS / 'input' if inode_limit == 10000 else ACCEPTED / 'restore/ncl1-1-vs-50/fme_cae1'))))))
+    require_original_backup_source(source)
     protect(profile, chunk=chunk_leg is not None, cache=chunk_variant in CACHE_VARIANTS,
-            extra_roots=(SCALE800K_PARENT,) if borrowed_roots else ())
+            extra_roots=(parent_root,) if borrowed_roots else ())
     borrowed_bytes = sum(storage_bytes(path) for path in borrowed_roots)
     if storage_bytes(root) + borrowed_bytes > ceiling:
         raise ValueError('borrowed parent exceeds fixture byte ceiling')
+    if original_reader:
+        manifest_path = root / 'inode-manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        if manifest['source'] != str(source) or manifest['inode_limit'] != inode_limit or len(manifest['paths']) != inode_limit:
+            raise ValueError('original-source identity manifest differs')
+        identities = selected_source_identities(source, manifest['paths'])
+        identities['manifest_sha256'] = pilot.digest(manifest_path)
+        pilot.write_json(root / 'source-identities-before.json', identities)
     if chunk_leg is not None:
         parent_root = CACHE_PARENT if chunk_variant in CACHE_VARIANTS else (RECONCILE_PARENT if inode_limit == 400000 else SCALE_ROOT)
         subprocess.run(['sha256sum', '-c', 'FOLLOWUP-SHA256SUMS'], cwd=parent_root, check=True)
@@ -460,6 +577,9 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
     if profile is not None:
         pins.extend({'path': str(path), 'sha256': pilot.digest(path)} for path in
                     (FIFTY / 'verified-observation.json', FIFTY / 'METADATA-READ-SHA256SUMS', FIFTY / 'group-64/result.json'))
+    if original_reader:
+        pins.extend({'path': str(path), 'sha256': pilot.digest(path)} for path in
+                    (root / 'inode-manifest.json', root / 'source-identities-before.json'))
     pilot.write_json(root / 'launch-pins.json', {'pins': pins, 'mode': mode, 'entries': inode_limit,
                      'concurrency_profile': profile,
                      'chunk_variant': chunk_variant, 'chunk_settings': None if chunk_variant is None else chunk_settings(chunk_variant),
@@ -470,12 +590,15 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
                      'rss_ceiling_bytes': RSS_CEILING, 'disk_floor_bytes': FLOOR, 'fixture_ceiling_bytes': ceiling,
                      'borrowed_read_only_roots': list(map(str, borrowed_roots)), 'borrowed_read_only_bytes': borrowed_bytes,
                      'ram32_leg': os.environ.get('VAULTIC_PHASE35_RAM32_LEG'),
+                     'readers_leg': os.environ.get('VAULTIC_PHASE35_READERS_LEG'),
+                     'original_parent_setup': parent_setup,
+                     'source_device': source.stat().st_dev, 'source_root_inode': source.stat().st_ino,
                      'scale800k_chunk_settings': scale800k_chunks() if inode_limit == 800000 else None,
                      'managed_ram_limit': '160GiB', 'scratch_limit': '2GiB', 'total_timeout_seconds': total_limit,
                      'backup_runtime_limit_seconds': backup_limit if chunk_variant in CACHE_VARIANTS or inode_limit == 800000 else None,
                      'backup_runtime_scope': 'CLI backup only; excludes cloning, preflight, restore and reopen',
                      'schedule': (['parent-clone', 'forced', 'restore', 'reopen'] if chunk_leg is not None or inode_limit == 800000 else (['source-freeze', 'parent-setup', 'forced'] if inode_limit in (200000, 400000) else (['forced'] if profile is not None else (['unforced', 'forced'] if inode_limit == 10000 else ['parent-setup', 'unforced', 'forced'])))), 'production_repository_writable': False,
-                     'source': str(SCALE800K_PARENT / 'input') if inode_limit == 800000 else (str((RECONCILE_PARENT if inode_limit == 400000 else SCALE_ROOT) / 'input') if chunk_leg is not None else (str(root / 'input') if inode_limit in (200000, 400000) else (str(FIFTY / 'input') if profile is not None else (str(PREVIOUS / 'input') if inode_limit == 10000 else str(ACCEPTED / 'restore/ncl1-1-vs-50/fme_cae1'))))), 'toolchains': {
+                     'source': str(source), 'toolchains': {
                          name: subprocess.check_output(command, text=True).strip() for name, command in
                          [('go', ['go', 'version']), ('rust', ['rustc', '--version']), ('cargo', ['cargo', '--version'])]}})
     environment = {key: value for key, value in os.environ.items()
@@ -501,16 +624,21 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
             environment.update({'VAULTIC_PHASE35_SCALE_INODE_LIMIT': str(inode_limit),
                                 'VAULTIC_PHASE35_THROUGHPUT_ON_DEMAND': '1',
                                 'VAULTIC_PHASE35_THROUGHPUT_ORDER': '64',
-                                'VAULTIC_PHASE35_THROUGHPUT_SOURCE': str(root / 'input'),
+                                'VAULTIC_PHASE35_THROUGHPUT_SOURCE': str(source),
                                 'VAULTIC_PHASE35_THROUGHPUT_CANDIDATE': str(candidate),
                                 'VAULTIC_PHASE35_THROUGHPUT_NATIVE': str(native)})
-            if inode_limit == 800000:
+            if inode_limit == 800000 and not parent_setup:
                 test_name = 'TestPublicationForceComparisonRetry'
                 environment.update({'VAULTIC_PHASE35_METADATA_READ_INODE_LIMIT': '800000',
                                     'VAULTIC_PHASE35_THROUGHPUT_FORCE_COMPARE_RETRY': '1'})
                 environment.update({key: str(value) for key, value in scale800k_chunks().items()})
                 if os.environ.get('VAULTIC_PHASE35_RAM32_LEG'):
                     environment['VAULTIC_PHASE35_RAM32_LEG'] = os.environ['VAULTIC_PHASE35_RAM32_LEG']
+                if os.environ.get('VAULTIC_PHASE35_READERS_LEG'):
+                    environment['VAULTIC_PHASE35_READERS_LEG'] = os.environ['VAULTIC_PHASE35_READERS_LEG']
+            elif parent_setup:
+                environment['VAULTIC_PHASE35_ORIGINAL_PARENT'] = '1'
+                environment.update({key: str(value) for key, value in SCALE800K_CHUNKS.items()})
     elif inode_limit == 50000:
         test_name = 'TestPublicationBackupQualification'
         environment.pop('VAULTIC_PHASE35_THROUGHPUT_FORCE_COMPARE_RETRY')
@@ -593,7 +721,14 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
                 result['exit_code'] = process.returncode
                 if process.returncode:
                     raise ValueError('qualifier failed; preserve stage logs')
-                for name in (('forced',) if profile is not None else ('unforced', 'forced')):
+                if parent_setup:
+                    validate_original_parent_receipt(root)
+                if original_reader:
+                    after = selected_source_identities(source, manifest['paths'])
+                    after['manifest_sha256'] = pilot.digest(manifest_path)
+                    pilot.write_json(root / 'source-identities-after.json', after)
+                    validated_source_identities(root, inode_limit)
+                for name in (() if parent_setup else (('forced',) if profile is not None else ('unforced', 'forced'))):
                     measured = json.loads((root / 'group-64' / name / 'result.json').read_text())
                     if measured['entries'] != inode_limit or measured['summary']['data_blobs'] != 0 or not all(measured[key] is True for key in ('restore_verified', 'reopen_verified', 'source_unchanged')):
                         raise ValueError('candidate acceptance incomplete')
@@ -603,7 +738,7 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
                     raise ValueError('pin or fixture ceiling differs')
                 if db_screen and not result['db_settings_verified']:
                     raise ValueError('actual owned daemon tuning was not verified')
-                if (chunk_variant in CACHE_VARIANTS or inode_limit == 800000) and not backup_guard.finished:
+                if (chunk_variant in CACHE_VARIANTS or inode_limit == 800000) and not parent_setup and not backup_guard.finished:
                     raise ValueError('cache backup lacks completed runtime guard receipt')
                 result['accepted'] = True
     except BaseException as error:
@@ -626,6 +761,27 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
             pilot.write_json(root / 'outcome.json', result)
     print(json.dumps(result), flush=True)
     return 0 if result['accepted'] else 1
+
+
+def validate_original_parent_receipt(root):
+    if root != ORIGINAL_PARENT:
+        raise ValueError('original parent receipt requires its exact private root')
+    source = json.loads((root / 'source-observation.json').read_text())
+    manifest = json.loads((root / 'inode-manifest.json').read_text())
+    receipt = json.loads((root / 'group-64/result.json').read_text())
+    require_original_backup_source(source['source'])
+    if (manifest['source'] != str(SCALE_SOURCE) or manifest['inode_limit'] != 800000
+            or len(manifest['paths']) != 800000 or len(set(manifest['paths'])) != 800000
+            or source['entries'] != 800000 or not 0 < source['bytes'] <= 64 << 30
+            or receipt['source'] != str(SCALE_SOURCE) or receipt['entries'] != 800000
+            or any(receipt[name] != source[name] for name in ('regular_files', 'files', 'bytes'))
+            or receipt['input_sha256'] != source['sha256']
+            or not all(receipt[name] is True for name in ('restore_verified', 'reopen_verified', 'source_unchanged'))):
+        raise ValueError('original parent source scope or integrity receipt differs')
+    for stage in ('writer_before', 'writer_after'):
+        if receipt[stage]['active_transactions'] or receipt[stage]['active_write_intents']:
+            raise ValueError('original parent writer was not idle')
+    return receipt
 
 
 def validate_cache_preflight(receipt):
@@ -786,6 +942,16 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
     measured = json.loads((root / 'group-64/forced/result.json').read_text())
     variant = root.name.rsplit('-', 1)[-1] if inode_limit == 400000 and root.parent in (RECONCILE_ROOT, CACHE_ROOT, PIPELINE_ROOT, RAM16_ROOT) else None
     settings = cache_profile_settings(profile, variant)
+    if root.parent == READERS_ROOT:
+        if (profile, inode_limit) != ('db-scale800k', 800000):
+            raise ValueError('reader receipt requires its exact 800k profile')
+        settings['readers'] = readers_leg(root.name)[2]
+        launch = json.loads((root / 'launch-pins.json').read_text())
+        require_original_backup_source(launch['source'])
+        manifest = json.loads((root / 'inode-manifest.json').read_text())
+        if manifest['source'] != str(SCALE_SOURCE) or manifest['inode_limit'] != 800000 or len(manifest['paths']) != 800000:
+            raise ValueError('reader report original-source manifest differs')
+        validate_cache_preflight(json.loads((root / 'group-64/forced/reuse-preflight.json').read_text()))
     if not outcome['accepted'] or not outcome['db_settings_verified'] or outcome['exit_code'] != 0:
         raise ValueError('follow-up capture or live settings were not accepted')
     expected_entries, expected_regular, expected_bytes = 50000, 41347, 19493496103
@@ -845,8 +1011,9 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
         else:
             deltas[field] = encryption_counter_deltas(first, last)
     critical = measured['critical_path']
+    identities = validated_source_identities(root, expected_entries) if root.parent == READERS_ROOT else None
     if inode_limit == 800000:
-        require_cache_reuse(critical['reconciliation'], expected_entries)
+        require_cache_reuse(critical['reconciliation'], expected_entries, None if identities is None else identities['metadata_records'])
         cpu = root / 'group-64/forced/cpu/cpu.pprof'
         if not cpu.is_file() or not 0 < cpu.stat().st_size <= 32 << 20 or cpu.stat().st_mode & 0o777 != 0o600:
             raise ValueError('800k CPU profile lacks private bounded capture')
@@ -867,6 +1034,7 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
     if not main > 0:
         raise ValueError('follow-up main interval invalid')
     return {'profile': profile, 'settings': settings, 'main_seconds': main,
+            'source_identities': identities,
             'command_seconds': measured['command_seconds'], 'entries': expected_entries, 'entries_per_second': expected_entries / main,
             'cli_cpu_seconds': measured['cli_cpu_seconds'], 'publication_stages': stages,
             'reconciliation': critical['reconciliation'], 'deltas': deltas,
@@ -983,13 +1151,16 @@ def reconcile_comparison_report(rows):
             'single_pass_sustained_qualified': all(row['single_pass_sustained_qualified'] for row in rows)}
 
 
-def require_cache_reuse(metrics, entries):
-    if any(metrics.get(name) != entries for name in ('observed', 'scanned', 'reused')):
+def require_cache_reuse(metrics, entries, metadata_records=None):
+    metadata_records = entries if metadata_records is None else metadata_records
+    if type(metadata_records) is not int or not 0 < metadata_records <= entries:
+        raise ValueError('cache screen requires a valid independently counted metadata-record scope')
+    if any(metrics.get(name) != entries for name in ('observed', 'scanned')) or metrics.get('reused') != metadata_records:
         raise ValueError('cache screen requires complete metadata-record reuse, not fresh publication')
     if any(metrics.get(name) != 0 for name in ('reconciled', 'changed', 'failed', 'deferred', 'revision_allocation_calls',
                                              'atomic_group_calls', 'directory_publication_calls')):
         raise ValueError('cache screen unexpectedly changed or published metadata records')
-    if metrics.get('revision_lookup', {}).get('keys') != entries:
+    if metrics.get('revision_lookup', {}).get('keys') != metadata_records:
         raise ValueError('cache screen did not exercise the complete revision lookup workload')
 
 
@@ -1157,47 +1328,107 @@ def ram32_comparison_report(rows):
             'single_pass_sustained_qualified': all(row['main_seconds'] >= 600 for row in rows)}
 
 
-def execute_ram32_series():
-    if RAM32_ROOT.exists() or RAM32_ROOT.parent.resolve() != RAM32_ROOT.parent:
-        raise ValueError('refuse existing or noncanonical RAM32 series')
-    if shutil.disk_usage(RAM32_ROOT.parent).free < FLOOR + len(RAM32_SCHEDULE) * fixture_ceiling(800000):
-        raise ValueError('full RAM32 reservation plus shared free-space floor unavailable')
-    subprocess.run(['sha256sum', '-c', 'SHA256SUMS'], cwd=RAM32_BIN, check=True)
-    build = json.loads((RAM32_BIN / 'build.json').read_text())
+def readers_comparison_report(rows):
+    if [row['readers'] for row in rows] != list(READERS_SCHEDULE):
+        raise ValueError('reader comparison requires its exact balanced schedule')
+    identities = rows[0]['source_identities']
+    if not identities or identities['entries'] != 800000:
+        raise ValueError('reader comparison lacks independently counted original-source identities')
+    require_original_backup_source(identities['source'])
+    baseline = cache_profile_settings('db-scale800k')
+    for index, row in enumerate(rows, 1):
+        if (row['leg'] != f"leg-{index:02d}-r{row['readers']}" or row['entries'] != 800000
+                or not math.isfinite(row['main_seconds']) or row['main_seconds'] <= 0
+                or row['settings'] != dict(baseline, readers=row['readers'])
+                or row['chunk_settings'] != SCALE800K_CHUNKS or row['source_identities'] != identities):
+            raise ValueError('reader comparison changed identity, scope, or another setting')
+    brackets = []
+    for block in (rows, rows[:6], rows[6:]):
+        medians = {}
+        for readers in (64, 96, 128):
+            selected = [row for row in block if row['readers'] == readers]
+            medians[str(readers)] = {
+                'main_seconds': statistics.median(row['main_seconds'] for row in selected),
+                'origin_bytes': statistics.median(row['main_encryption']['ciphertext_origin_bytes'] for row in selected),
+                'evictions': statistics.median(row['main_encryption']['chunk_cache_evictions'] for row in selected),
+                'peak_rss_bytes': statistics.median(row['peak_combined_rss_bytes'] for row in selected),
+                'cli_cpu_seconds': statistics.median(row['cli_cpu_seconds'] for row in selected),
+                'source_read_mean_ms': statistics.median(row['bottlenecks']['latency']['source_read']['mean_ms'] for row in selected),
+                'origin_fetch_mean_ms': statistics.median(row['bottlenecks']['latency']['origin_fetch']['mean_ms'] for row in selected)}
+        brackets.append({'schedule': [row['readers'] for row in block], 'medians': medians,
+                         'observed_speedup_vs_128': {str(value): medians['128']['main_seconds'] / medians[str(value)]['main_seconds']
+                                                     for value in (64, 96, 128)}})
+    return {'accepted': True, 'rows': rows, 'schedule': list(READERS_SCHEDULE), 'replicates_per_readers': 4,
+            'control_readers': 128, 'overall': brackets[0], 'balanced_brackets': brackets[1:],
+            'same_cli_and_native': True, 'cache_and_metadata_settings_fixed': True,
+            'causal_speedup_claim': False, 'physical_nfs_traffic_measured': False,
+            'production_modified': False, 'larger_database_growth_qualified': False,
+            'single_pass_sustained_qualified': all(row['main_seconds'] >= 600 for row in rows)}
+
+
+def execute_ram32_series(readers=False):
+    require_original_backup_source(SCALE_SOURCE if readers else SCALE800K_PARENT / 'input')
+    series, bundle, schedule = (READERS_ROOT, READERS_BIN, READERS_SCHEDULE) if readers else (RAM32_ROOT, RAM32_BIN, RAM32_SCHEDULE)
+    leg_environment = 'VAULTIC_PHASE35_READERS_LEG' if readers else 'VAULTIC_PHASE35_RAM32_LEG'
+    receipt_field = 'readers_leg' if readers else 'ram32_leg'
+    if any(os.environ.get(key) for key in ('VAULTIC_PHASE35_READERS_LEG', 'VAULTIC_PHASE35_RAM32_LEG')):
+        raise ValueError('series launcher must not inherit an individual leg')
+    if series.exists() or series.parent.resolve() != series.parent:
+        raise ValueError('refuse existing or noncanonical 800k series')
+    if shutil.disk_usage(series.parent).free < FLOOR + len(schedule) * fixture_ceiling(800000):
+        raise ValueError('full 800k series reservation plus shared free-space floor unavailable')
+    subprocess.run(['sha256sum', '-c', 'SHA256SUMS'], cwd=bundle, check=True)
+    build = json.loads((bundle / 'build.json').read_text())
     pins = dict(build['source_files'])
     for name in ('vaultic', 'vaulticdb', 'qualifier.test', 'build.json', 'SHA256SUMS'):
-        pins[str(RAM32_BIN / name)] = pilot.digest(RAM32_BIN / name)
-    parent_proof = json.loads((RAM32_BIN / 'validation/qualified-parent.json').read_text())
-    pins.update({str(SCALE800K_PARENT / name): digest for name, digest in parent_proof['files'].items()})
-    pilot.private_directory(RAM32_ROOT)
-    with private_output(RAM32_ROOT / '.nobackup') as output:
+        pins[str(bundle / name)] = pilot.digest(bundle / name)
+    parent_root = ORIGINAL_PARENT if readers else SCALE800K_PARENT
+    proof_path = parent_root / 'qualified-parent.json' if readers else bundle / 'validation/qualified-parent.json'
+    parent_proof = json.loads(proof_path.read_text())
+    if readers:
+        validate_original_parent_receipt(parent_root)
+        if parent_proof['root'] != str(parent_root) or parent_proof['source'] != str(SCALE_SOURCE):
+            raise ValueError('original parent provenance differs')
+        subprocess.run(['sha256sum', '-c', 'PARENT-SHA256SUMS'], cwd=parent_root, check=True)
+        pins[str(proof_path)] = pilot.digest(proof_path)
+    pins.update({str(parent_root / name): digest for name, digest in parent_proof['files'].items()})
+    pilot.private_directory(series)
+    with private_output(series / '.nobackup') as output:
         output.write(MARKER)
-    pilot.write_json(RAM32_ROOT / 'launch-pins.json', {'pins': pins, 'schedule': list(RAM32_SCHEDULE),
-                     'parent': str(SCALE800K_PARENT), 'entries': 800000, 'process_cache_state': 'fresh daemon per leg',
-                     'host_cache_state': 'uncontrolled; balanced ABBA/BAAB ordering; no host cache dropping',
+    pilot.write_json(series / 'launch-pins.json', {'pins': pins, 'schedule': list(schedule),
+                     'experiment': 'content-readers' if readers else 'chunk-cache-capacity',
+                     'parent': str(parent_root), 'entries': 800000, 'process_cache_state': 'fresh daemon per leg',
+                     'host_cache_state': 'uncontrolled; balanced ordering; no host cache dropping',
                      'same_optimized_cli_and_native': True, 'ordinary_backend_policies_unchanged': True,
-                     'source_mount': 'NASDA2 frozen copy, not original ncl1 mount',
+                     'source_mount': str(SCALE_SOURCE) if readers else 'NASDA2 frozen copy, not original ncl1 mount',
                      'cpu_profile_scope': 'whole CLI backup command, not exact-main or native CPU'})
     rows = []
     try:
-        for index, gib in enumerate(RAM32_SCHEDULE, 1):
+        for index, value in enumerate(schedule, 1):
             if any(pilot.digest(Path(path)) != expected for path, expected in pins.items()):
-                raise ValueError('RAM32 source, artifact or parent receipt pin changed')
-            label = f'leg-{index:02d}-{gib}g'
-            root, runtime, chunks = ram32_leg(label)
-            with patch.dict(os.environ, {'VAULTIC_PHASE35_RAM32_LEG': label}):
+                raise ValueError('800k series source, artifact or parent receipt pin changed')
+            label = f'leg-{index:02d}-r{value}' if readers else f'leg-{index:02d}-{value}g'
+            if readers:
+                root, runtime, _ = readers_leg(label)
+                chunks = dict(SCALE800K_CHUNKS)
+            else:
+                root, runtime, chunks = ram32_leg(label)
+            with patch.dict(os.environ, {leg_environment: label}):
                 prepare('coalesced', 800000, 'db-scale800k')
-            for source, target, mode in ((RAM32_BIN / 'qualifier.test', root / 'qualifier.test', 0o500),
-                                         (RAM32_BIN / 'build.json', root / 'build.json', 0o600),
-                                         (SCALE800K_PARENT / 'source-observation.json', root / 'source-observation.json', 0o600)):
+            for source, target, mode in ((bundle / 'qualifier.test', root / 'qualifier.test', 0o500),
+                                         (bundle / 'build.json', root / 'build.json', 0o600),
+                                         (parent_root / 'source-observation.json', root / 'source-observation.json', 0o600)):
                 shutil.copyfile(source, target)
                 os.chmod(target, mode)
-            environment = dict(os.environ, VAULTIC_PHASE35_RAM32_LEG=label)
+            if readers:
+                shutil.copyfile(parent_root / 'inode-manifest.json', root / 'inode-manifest.json')
+                os.chmod(root / 'inode-manifest.json', 0o600)
+            environment = dict(os.environ, **{leg_environment: label})
             command = ['timeout', '--signal=INT', '--kill-after=180s', '58100s', 'unshare', '--mount',
                        '--propagation', 'private', sys.executable, str(Path(__file__)), '--mode=coalesced',
                        '--inode-limit=800000', '--concurrency-profile=db-scale800k']
             print(json.dumps({'starting': label, 'root': str(root), 'chunk_settings': chunks}), flush=True)
-            with private_output(RAM32_ROOT / (label + '.stdout.log')) as output, private_output(RAM32_ROOT / (label + '.stderr.log')) as errors:
+            with private_output(series / (label + '.stdout.log')) as output, private_output(series / (label + '.stderr.log')) as errors:
                 process = subprocess.Popen(command, env=environment, stdout=output, stderr=errors, start_new_session=True)
                 try:
                     status = process.wait()
@@ -1208,39 +1439,41 @@ def execute_ram32_series():
                         interrupt(process, group=True)
                     raise
             launch = json.loads((root / 'launch-pins.json').read_text())
-            if launch['ram32_leg'] != label or launch['scale800k_chunk_settings'] != chunks:
-                raise ValueError('RAM32 live capacity receipt differs')
-            row = summarize_followup(root, 'db-scale800k', 800000, RAM32_BIN / 'vaultic')
+            if launch[receipt_field] != label or launch['scale800k_chunk_settings'] != chunks:
+                raise ValueError('800k series live capacity receipt differs')
+            if readers and launch['read_concurrency'] != value:
+                raise ValueError('800k series live reader receipt differs')
+            row = summarize_followup(root, 'db-scale800k', 800000, bundle / 'vaultic')
             if row != json.loads((root / 'verified-followup.json').read_text()) or runtime.exists():
-                raise ValueError('RAM32 report replay or private-runtime cleanup differs')
+                raise ValueError('800k series report replay or private-runtime cleanup differs')
             subprocess.run(['sha256sum', '-c', 'FOLLOWUP-SHA256SUMS'], cwd=root, check=True,
                            stdout=subprocess.DEVNULL)
-            row.update({'cache_gib': gib, 'leg': label, 'chunk_settings': chunks})
+            row.update({'readers' if readers else 'cache_gib': value, 'leg': label, 'chunk_settings': chunks})
             for mode in ('flat', 'cumulative'):
                 command = ['go', 'tool', 'pprof', '-top', '-nodecount=35']
                 if mode == 'cumulative':
                     command.append('-cum')
-                command += [str(RAM32_BIN / 'vaultic'), str(root / 'group-64/forced/cpu/cpu.pprof')]
-                with private_output(RAM32_ROOT / (label + '.cpu-' + mode + '.txt')) as output:
+                command += [str(bundle / 'vaultic'), str(root / 'group-64/forced/cpu/cpu.pprof')]
+                with private_output(series / (label + '.cpu-' + mode + '.txt')) as output:
                     subprocess.run(command, stdout=output, stderr=subprocess.STDOUT, check=True)
             rows.append(row)
-            pilot.write_json(RAM32_ROOT / (label + '.verified.json'), row)
+            pilot.write_json(series / (label + '.verified.json'), row)
             print(json.dumps({'accepted': label, 'main_seconds': row['main_seconds'],
                               'origin_bytes': row['main_encryption']['ciphertext_origin_bytes'],
                               'peak_rss_bytes': row['peak_combined_rss_bytes']}), flush=True)
         if any(pilot.digest(Path(path)) != expected for path, expected in pins.items()):
-            raise ValueError('RAM32 pins changed before final report')
-        report = ram32_comparison_report(rows)
-        pilot.write_json(RAM32_ROOT / 'verified-comparison.json', report)
-        with private_output(RAM32_ROOT / 'SERIES-SHA256SUMS', text=True) as output:
-            for path in sorted(RAM32_ROOT.iterdir()):
+            raise ValueError('800k series pins changed before final report')
+        report = readers_comparison_report(rows) if readers else ram32_comparison_report(rows)
+        pilot.write_json(series / 'verified-comparison.json', report)
+        with private_output(series / 'SERIES-SHA256SUMS', text=True) as output:
+            for path in sorted(series.iterdir()):
                 if path.is_file() and path.name != 'SERIES-SHA256SUMS':
                     output.write(pilot.digest(path) + '  ' + path.name + '\n')
-        subprocess.run(['sha256sum', '-c', 'SERIES-SHA256SUMS'], cwd=RAM32_ROOT, check=True)
+        subprocess.run(['sha256sum', '-c', 'SERIES-SHA256SUMS'], cwd=series, check=True)
         print(json.dumps({'accepted': True, 'overall': report['overall'],
                           'balanced_brackets': report['balanced_brackets']}), flush=True)
     except BaseException as error:
-        pilot.write_json(RAM32_ROOT / 'failed-series.json', {'accepted': False, 'completed_legs': len(rows),
+        pilot.write_json(series / 'failed-series.json', {'accepted': False, 'completed_legs': len(rows),
                          'failure': type(error).__name__ + ': ' + str(error)})
         raise
 
@@ -1392,6 +1625,110 @@ def execute_chunk_series(immutable=False, reconcile=False, caches=False, pipelin
 
 
 class ChunkComparisonTests(unittest.TestCase):
+    def test_original_parent_receipt_requires_complete_integrity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'group-64').mkdir()
+            source = {'source': str(SCALE_SOURCE), 'entries': 800000, 'regular_files': 1,
+                      'files': 1, 'bytes': 1, 'sha256': 'a' * 64}
+            manifest = {'source': str(SCALE_SOURCE), 'inode_limit': 800000,
+                        'paths': ['.'] + [f'dir/{index}' for index in range(799999)]}
+            receipt = dict(source, input_sha256=source['sha256'], restore_verified=True,
+                           reopen_verified=True, source_unchanged=True,
+                           writer_before={'active_transactions': 0, 'active_write_intents': 0},
+                           writer_after={'active_transactions': 0, 'active_write_intents': 0})
+            (root / 'source-observation.json').write_text(json.dumps(source))
+            (root / 'inode-manifest.json').write_text(json.dumps(manifest))
+            target = root / 'group-64/result.json'
+            target.write_text(json.dumps(receipt))
+            with patch.dict(globals(), {'ORIGINAL_PARENT': root}):
+                self.assertEqual(validate_original_parent_receipt(root), receipt)
+                receipt['source_unchanged'] = False
+                target.write_text(json.dumps(receipt))
+                with self.assertRaises(ValueError):
+                    validate_original_parent_receipt(root)
+                receipt['source_unchanged'] = True
+                receipt['source'] = str(SCALE800K_PARENT / 'input')
+                target.write_text(json.dumps(receipt))
+                with self.assertRaises(ValueError):
+                    validate_original_parent_receipt(root)
+
+    def test_original_parent_route_and_selection_isolation(self):
+        with patch.dict(os.environ, {'VAULTIC_PHASE35_ORIGINAL_PARENT': '1'}):
+            self.assertEqual(paths('coalesced', 800000, 'db-scale800k'), (ORIGINAL_PARENT, ORIGINAL_RUNTIME))
+            self.assertEqual(binaries('db-scale800k'), (READERS_BIN / 'vaultic', READERS_BIN / 'vaulticdb'))
+            self.assertEqual(scale800k_chunks(), SCALE800K_CHUNKS)
+            with self.assertRaises(ValueError):
+                paths('coalesced', 400000, 'db-scale400k')
+            with patch.dict(os.environ, {'VAULTIC_PHASE35_READERS_LEG': 'leg-01-r64'}):
+                with self.assertRaises(ValueError):
+                    original_parent_selected()
+        with patch.dict(os.environ, {'VAULTIC_PHASE35_ORIGINAL_PARENT': '2'}):
+            with self.assertRaises(ValueError):
+                original_parent_selected()
+
+    def test_backup_source_requires_original_mount(self):
+        require_original_backup_source('/ncl1-1-vs-50/fme_cae1')
+        for source in (SCALE800K_PARENT / 'input', READERS_ROOT / 'input',
+                       '/volume2/NASDA2/restore/ncl1-1-vs-50/fme_cae1',
+                       '/ncl1-1-vs-50/fme_cae1/child', '/ncl1-1-vs-50/other'):
+            with self.assertRaises(ValueError):
+                require_original_backup_source(source)
+
+    def test_readers_report_rejects_reordering_and_setting_drift(self):
+        rows = []
+        for index, readers in enumerate(READERS_SCHEDULE, 1):
+            rows.append({'readers': readers, 'leg': f'leg-{index:02d}-r{readers}', 'entries': 800000,
+                         'source_identities': {'source': str(SCALE_SOURCE), 'entries': 800000, 'metadata_records': 800000},
+                         'main_seconds': 400 * 128 / readers,
+                         'settings': dict(cache_profile_settings('db-scale800k'), readers=readers),
+                         'chunk_settings': dict(SCALE800K_CHUNKS),
+                         'main_encryption': {'ciphertext_origin_bytes': 100, 'chunk_cache_evictions': 10},
+                         'peak_combined_rss_bytes': 1, 'cli_cpu_seconds': 2,
+                         'bottlenecks': {'latency': {'source_read': {'mean_ms': 1}, 'origin_fetch': {'mean_ms': 2}}}})
+        report = readers_comparison_report(rows)
+        self.assertEqual(report['overall']['observed_speedup_vs_128']['64'], 0.5)
+        self.assertEqual(len(report['balanced_brackets']), 2)
+        with self.assertRaises(ValueError):
+            readers_comparison_report(list(reversed(rows)))
+        rows[0]['source_identities']['metadata_records'] -= 1
+        with self.assertRaises(ValueError):
+            readers_comparison_report(rows)
+        rows[0]['source_identities']['metadata_records'] += 1
+        rows[0]['settings']['rpc_limit'] = 64
+        with self.assertRaises(ValueError):
+            readers_comparison_report(rows)
+        rows[0]['settings']['rpc_limit'] = 32
+        rows[0]['chunk_settings']['VAULTICDB_CHUNK_CACHE_BYTES'] = 32 << 30
+        with self.assertRaises(ValueError):
+            readers_comparison_report(rows)
+
+    def test_readers_routes_and_setting_isolation(self):
+        baseline = cache_profile_settings('db-scale800k')
+        self.assertEqual(baseline['readers'], 128)
+        self.assertNotEqual(READERS_SCHEDULE[:6], READERS_SCHEDULE[6:])
+        for readers in (64, 96, 128):
+            self.assertEqual(READERS_SCHEDULE.count(readers), 4)
+            for block in (READERS_SCHEDULE[:6], READERS_SCHEDULE[6:]):
+                self.assertEqual(sum(index for index, value in enumerate(block, 1) if value == readers), 7)
+        for index, readers in enumerate(READERS_SCHEDULE, 1):
+            label = f'leg-{index:02d}-r{readers}'
+            root, runtime, selected = readers_leg(label)
+            with patch.dict(os.environ, {'VAULTIC_PHASE35_READERS_LEG': label}):
+                self.assertEqual(paths('coalesced', 800000, 'db-scale800k'), (root, runtime))
+                self.assertEqual(binaries('db-scale800k'), (READERS_BIN / 'vaultic', READERS_BIN / 'vaulticdb'))
+                self.assertEqual(cache_profile_settings('db-scale800k'), dict(baseline, readers=selected))
+                self.assertEqual(scale800k_chunks(), SCALE800K_CHUNKS)
+                with self.assertRaises(ValueError):
+                    paths('coalesced', 400000, 'db-scale400k')
+                with patch.dict(os.environ, {'VAULTIC_PHASE35_RAM32_LEG': 'leg-01-16g'}):
+                    with self.assertRaises(ValueError):
+                        binaries('db-scale800k')
+            with self.assertRaises(ValueError):
+                readers_leg(label + '/retry')
+        with self.assertRaises(ValueError):
+            readers_leg('leg-13-r64')
+
     def test_ram32_report_rejects_reordering_and_capacity_drift(self):
         rows = []
         for index, gib in enumerate(RAM32_SCHEDULE, 1):
@@ -1619,6 +1956,58 @@ class ChunkComparisonTests(unittest.TestCase):
                 require_cache_reuse(invalid, 400000)
         with self.assertRaises(ValueError):
             require_cache_reuse(dict(metrics, revision_lookup={'keys': 0}), 400000)
+        linked = dict(metrics, reused=399999, revision_lookup={'keys': 399999})
+        require_cache_reuse(linked, 400000, 399999)
+        with self.assertRaises(ValueError):
+            require_cache_reuse(linked, 400000)
+        for records in (0, 400001, True):
+            with self.assertRaises(ValueError):
+                require_cache_reuse(linked, 400000, records)
+        for name in ('changed', 'reconciled', 'revision_allocation_calls', 'atomic_group_calls', 'directory_publication_calls'):
+            with self.assertRaises(ValueError):
+                require_cache_reuse(dict(linked, **{name: 1}), 400000, 399999)
+
+    def test_selected_source_identities_preserve_hardlink_scope(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            (source / 'file').write_bytes(b'unchanged')
+            (source / 'alias').hardlink_to(source / 'file')
+            paths = ['.', 'file', 'alias']
+            before = selected_source_identities(source, paths)
+            self.assertEqual(before['metadata_records'], 2)
+            self.assertEqual(before['hardlink_aliases'], 1)
+            self.assertEqual(before['hardlink_paths'], 2)
+            self.assertEqual(before['hardlink_groups'], 1)
+            self.assertEqual(before, selected_source_identities(source, paths))
+            manifest = source / 'inode-manifest.json'
+            manifest.write_text(json.dumps({'paths': paths}))
+            before['manifest_sha256'] = pilot.digest(manifest)
+            pilot.write_json(source / 'source-identities-before.json', before)
+            pilot.write_json(source / 'source-identities-after.json', before)
+            with patch(__name__ + '.SCALE_SOURCE', source):
+                self.assertEqual(validated_source_identities(source, 3), before)
+                for invalid in (dict(before, metadata_records=1), dict(before, hardlink_aliases=2),
+                                dict(before, manifest_sha256='0' * 64)):
+                    (source / 'source-identities-before.json').unlink()
+                    (source / 'source-identities-after.json').unlink()
+                    pilot.write_json(source / 'source-identities-before.json', invalid)
+                    pilot.write_json(source / 'source-identities-after.json', invalid)
+                    with self.assertRaises(ValueError):
+                        validated_source_identities(source, 3)
+                (source / 'source-identities-before.json').unlink()
+                (source / 'source-identities-after.json').unlink()
+                pilot.write_json(source / 'source-identities-before.json', before)
+                pilot.write_json(source / 'source-identities-after.json', dict(before, identity_sha256='0' * 64))
+                with self.assertRaises(ValueError):
+                    validated_source_identities(source, 3)
+            (source / 'alias').unlink()
+            (source / 'alias').write_bytes(b'unchanged')
+            after = selected_source_identities(source, paths)
+            self.assertEqual(after['metadata_records'], 3)
+            self.assertNotEqual(before['identity_sha256'], after['identity_sha256'])
+            for invalid in (['.', '../escape'], ['.', '/absolute'], ['.', '.'], ['file']):
+                with self.assertRaises(ValueError):
+                    selected_source_identities(source, invalid)
 
     def test_cache400k_isolated_settings_and_report(self):
         baseline = cache_profile_settings('db-scale400k', 'N')
@@ -1809,6 +2198,8 @@ if __name__ == '__main__':
     parser.add_argument('--pipeline-series', action='store_true')
     parser.add_argument('--ram16-series', action='store_true')
     parser.add_argument('--ram32-series', action='store_true')
+    parser.add_argument('--readers-series', action='store_true')
+    parser.add_argument('--original-parent', action='store_true')
     parser.add_argument('--prepare-cache-parent', action='store_true')
     parser.add_argument('--chunk-self-test', action='store_true')
     parser.add_argument('--chunk-leg')
@@ -1816,14 +2207,27 @@ if __name__ == '__main__':
     if arguments.inode_limit == 800000 and arguments.concurrency_profile is None:
         arguments.concurrency_profile = 'db-scale800k'
     os.umask(0o077)
-    if arguments.ram32_series:
+    if arguments.original_parent:
         if ((arguments.mode, arguments.inode_limit, arguments.concurrency_profile) != ('coalesced', 800000, 'db-scale800k')
+                or any((arguments.series, arguments.chunk_series, arguments.immutable_series, arguments.reconcile_series,
+                        arguments.cache_series, arguments.pipeline_series, arguments.ram16_series, arguments.ram32_series,
+                        arguments.readers_series, arguments.prepare_cache_parent, arguments.chunk_self_test,
+                        arguments.chunk_leg is not None))):
+            raise ValueError('original parent requires its exclusive coalesced 800k route')
+        with patch.dict(os.environ, {'VAULTIC_PHASE35_ORIGINAL_PARENT': '1'}):
+            if arguments.prepare:
+                prepare(arguments.mode, arguments.inode_limit, arguments.concurrency_profile)
+            else:
+                raise SystemExit(execute(arguments.mode, arguments.inode_limit, arguments.concurrency_profile))
+    elif arguments.ram32_series or arguments.readers_series:
+        if ((arguments.mode, arguments.inode_limit, arguments.concurrency_profile) != ('coalesced', 800000, 'db-scale800k')
+                or arguments.ram32_series and arguments.readers_series
                 or any((arguments.prepare, arguments.series, arguments.chunk_series, arguments.immutable_series,
                         arguments.reconcile_series, arguments.cache_series, arguments.pipeline_series,
                         arguments.ram16_series, arguments.prepare_cache_parent, arguments.chunk_self_test,
                         arguments.chunk_leg is not None))):
-            raise ValueError('RAM32 series requires its exclusive 800k route')
-        execute_ram32_series()
+            raise ValueError('800k series requires its exclusive route')
+        execute_ram32_series(readers=arguments.readers_series)
     elif arguments.prepare_cache_parent:
         if (arguments.mode, arguments.inode_limit, arguments.concurrency_profile) != ('coalesced', 400000, 'db-scale400k') or any((arguments.prepare, arguments.series, arguments.chunk_series, arguments.immutable_series, arguments.reconcile_series, arguments.cache_series, arguments.pipeline_series, arguments.ram16_series, arguments.chunk_self_test, arguments.chunk_leg is not None)):
             raise ValueError('cache parent preparation requires its fixed isolated 400k routing')

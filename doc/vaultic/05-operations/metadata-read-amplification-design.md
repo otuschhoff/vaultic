@@ -1094,6 +1094,28 @@ source ceiling, 200 GB combined RSS ceiling, storage reserve and SIGINT-first
 cleanup requirements remain. Main intervals shorter than 600 seconds remain
 short screens; physical NFS and production qualification are separate gates.
 
+### Required Backup Test Source
+
+As of November 11, backup performance testcases must read the original
+`/ncl1-1-vs-50/fme_cae1` mount directly. The user confirms this volume does not
+change and represents future backups. Do not substitute a frozen, staged or
+restored copy on NASDA2 or another filesystem without explicit permission.
+NASDA2 may still hold disposable test repositories, database state and evidence.
+
+The Python supervisor and Go force-comparison boundaries now reject substituted
+source paths. An original-source comparison requires a newly qualified parent
+whose real source path, filesystem ID and inode identities belong to the original
+mount; do not relabel or translate the copied-source parent's identities.
+The previous copied-source routes are historical and cannot be relaunched through
+these guarded boundaries until their source and parent qualification are replaced.
+
+The November 11 reader screen at `readers-read-fme-cae1-20261111-800k` was
+interrupted with SIGINT during its first leg when this requirement was received.
+It has zero accepted legs, no surviving owned processes, and no throughput result.
+Its capture and remaining runtime directory are preserved, not accepted evidence.
+Earlier NASDA2-copy measurements below remain historical; they are not results
+from the original `ncl1` mount.
+
 ### Default Cache And 800k Bottleneck Diagnostics
 
 The November 9 follow-up promotes 16 GiB/65536 entries to the native
@@ -1114,7 +1136,7 @@ The default change does not deploy or restart a production daemon. Existing
 explicit environment overrides continue to win.
 
 The supervisor defaults to 800000 entries and selects `db-scale800k` for
-the default coalesced route. The current create-only follow-up root is
+the default coalesced route. The historical create-only follow-up root was
 `bottleneck-parent-fme-cae1-20261109-800k-retry3`, using the qualified parent
 `bottleneck-parent-fme-cae1-20261109-800k-retry2` read-only and the bundle
 `bin/phase35-bottleneck800k-20261109-retry3-final/linux-amd64`. The parent has
@@ -1324,6 +1346,103 @@ native CPU. No pass reached the unchanged 600-second sustained-main threshold.
 No production configuration was changed. Documentation was updated only after
 independent pin verification; its pre-update bytes remain in the pinned build
 archive at `/run/vaultic-ram32800k-build-20261110/candidate`.
+
+### Original-Source 800k Reader Results
+
+The original-source reader screen launched November 11 completed all twelve
+legs at
+`/volume2/NASDA2/vaultic-test-m6/ncl1-readers-fme-cae1-20261111-800k-retry3`.
+Every backup read `/ncl1-1-vs-50/fme_cae1` directly, using the same sealed
+800000-entry bounded manifest. No NASDA2 input copy was substituted. The fresh
+encrypted parent at `ncl1-parent-fme-cae1-20261111-800k-retry2` passed full restore,
+encrypted reopen and unchanged-original-source verification before the series.
+Its snapshot is
+`bf1a0adba4175cda729572a6873ddae4695d944e21795f11587a2d44fc13a0a9`.
+
+The fixed schedule was
+`64,96,128,128,96,64 | 96,128,64,64,128,96`, four observations per setting,
+with 128 readers as the control. Only content-reader concurrency varied.
+Authenticated cache capacity stayed 16 GiB / 65536 entries; metadata RPC cap 32,
+metadata cache 2 GiB, block cache 512 MiB, eight crypto workers, publication group
+64, reconciliation batch 5000 and one-batch read-ahead stayed fixed. All legs
+used the same CLI and native bytes and a fresh private daemon. Host caches were
+not dropped; backend policies were unchanged.
+
+| Leg | Readers | Main Seconds |
+| --- | ---: | ---: |
+| 01 | 64 | 379.552 |
+| 02 | 96 | 836.526 |
+| 03 | 128 | 387.120 |
+| 04 | 128 | 381.104 |
+| 05 | 96 | 401.383 |
+| 06 | 64 | 373.430 |
+| 07 | 96 | 385.030 |
+| 08 | 128 | 416.519 |
+| 09 | 64 | 400.976 |
+| 10 | 64 | 351.147 |
+| 11 | 128 | 346.937 |
+| 12 | 96 | 368.228 |
+
+| Median Measurement | 64 Readers | 96 Readers | 128 Readers |
+| --- | ---: | ---: | ---: |
+| Main seconds | 376.491 | 393.207 | 384.112 |
+| Logical ciphertext origin bytes | 40575992204 | 40575861124 | 40575074644 |
+| Main-interval chunk evictions | 86114 | 86113.5 | 86110.5 |
+| Peak combined owned RSS, GiB | 63.69 | 63.88 | 63.54 |
+| Whole-command CLI CPU, seconds | 921.651 | 930.013 | 903.234 |
+| Mean source-read latency, ms | 0.369 | 0.386 | 0.368 |
+| Mean origin-fetch latency, ms | 10.090 | 9.877 | 10.201 |
+
+64 readers had a 1.98% shorter overall median main interval than 128, an observed
+throughput ratio of 1.0202. Both balanced brackets had the same direction:
+64/128 medians were 376.491/384.112 and 376.061/381.728 seconds, ratios 1.0202
+and 1.0151. These small differences do not establish a causal or production
+speedup. 96 readers did not consistently improve throughput: its bracket
+medians were 618.954 and 376.629 seconds. The 836.526-second leg is retained,
+not excluded or replaced with a favorable repeat.
+
+That slow leg spent 703.814 accumulated seconds waiting for prepared work,
+versus 204.301--284.229 in the other legs; its writer-batch and directory phases
+were 100.448 and 29.958 seconds. Source-read mean latency was 0.544 ms and
+origin-fetch mean latency 9.508 ms. Whole-command CLI CPU was 1030.927 seconds.
+This localizes a symptom to preparation supply, not a proven physical NFS or
+native-engine cause. Phase and worker timers overlap and cannot be added as
+wall-time contributions. Matched CLI profiles remain mixed: representative
+64/128 profiles show about 21.5% flat syscall CPU, 14.8% flat SHA-256 CPU and
+18% cumulative chunk-splitting CPU. They are not exact-main or native CPU
+profiles, nor evidence that all host CPUs were saturated.
+
+All legs observed and scanned 800000 selected paths and reused all 799076
+distinct metadata records. The original source contains 1228 selected hardlink
+paths in 304 groups, hence 924 aliases; path count is not record count. Complete
+before/after device/inode/type/link-count receipts and manifest hashes matched
+across all legs. Revision lookups covered exactly those 799076 records, with
+zero changed/failed/deferred/reconciled records, revision allocations, directory
+publications, atomic groups or new data blobs. Full restore, source-stability
+and encrypted-reopen verification passed for every leg.
+
+The independent verifier checked the parent, bundle, series and twelve follow-up
+seals; current source/artifact/parent pins; actual native settings; exact row and
+comparison replay; all 24 matched profile exports; and absence of owned
+processes and all thirteen active parent/leg runtimes. Its four-file sealed
+report is beside the capture at
+`ncl1-readers-fme-cae1-20261111-800k-retry3-analysis`.
+Earlier failed preparations and the rejected reader-report attempt remain
+separate historical evidence, not observations in this comparison. Necessary
+compatibility fixes retained an explicit 800000-entry manifest maximum and
+removed on-demand-only batching from dry-run preflight; hardlink-aware reporting
+did not relax full path coverage or zero-publication checks.
+
+Retain the 128-reader control and current cache settings; do not make a
+production/default change on this small observed 64-reader advantage. 64 is a
+candidate for subsequent representative qualification, not an established
+winner. Logical origin bytes are not physical NAS disk traffic, shared NFS
+counters are not backup-exclusive, and retained-history/database-growth behavior
+is still unqualified. Eleven legs were shorter than the unchanged 600-second
+sustained-main gate, so the complete screen does not qualify sustained
+throughput. No production configuration was changed. Documentation was updated
+only after independent verification; its pinned pre-update bytes remain in
+`/run/vaultic-ncl1-readers800k-retry3-build-20261111/candidate`.
 
 ### Pipeline And RAM Investigation
 

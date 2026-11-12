@@ -410,6 +410,38 @@ func TestBoundedInodeManifest(t *testing.T) {
 			t.Fatalf("invalid bounded selection accepted: %v", paths)
 		}
 	}
+	manifest.Paths = []string{".", "dir", "dir/file"}
+	for _, limit := range []uint64{0, 200_000, 200_001, 400_000, 800_000, 800_001} {
+		manifest.InodeLimit = limit
+		encoded, err := json.Marshal(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filename, encoded, 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, err = loadBoundedInodeManifest(filename, root)
+		if (err == nil) != (limit > 0 && limit <= 800_000) {
+			t.Fatalf("bounded selection limit %d: %v", limit, err)
+		}
+	}
+	manifest.InodeLimit = 800_000
+	manifest.Paths = make([]string, manifest.InodeLimit)
+	manifest.Paths[0] = "."
+	for index := 1; index < len(manifest.Paths); index++ {
+		manifest.Paths[index] = fmt.Sprintf("file-%06d", index)
+	}
+	encoded, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filename, encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+	selected, err := loadBoundedInodeManifest(filename, root)
+	if err != nil || len(selected) != 800_000 {
+		t.Fatalf("exact 800k bounded selection failed: entries=%d error=%v", len(selected), err)
+	}
 	if err := configureSnapshotOptions(&backupRun{options: backupOptions{BoundedInodeManifest: filename}}); err != nil {
 		t.Fatal(err)
 	}
