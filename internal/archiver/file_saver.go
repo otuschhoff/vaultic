@@ -19,16 +19,69 @@ import (
 const chunkReadBufSize = 512 * 1024 // matches chunker internal read buffer size
 
 type SourceReadMetrics struct {
-	Calls          uint64    `json:"calls"`
-	Bytes          uint64    `json:"bytes"`
-	Nanoseconds    uint64    `json:"read_ns"`
-	Errors         uint64    `json:"errors"`
-	LatencyBuckets [8]uint64 `json:"latency_buckets"`
+	Calls          uint64              `json:"calls"`
+	Bytes          uint64              `json:"bytes"`
+	Nanoseconds    uint64              `json:"read_ns"`
+	Errors         uint64              `json:"errors"`
+	LatencyBuckets [8]uint64           `json:"latency_buckets"`
+	FilePipeline   FilePipelineMetrics `json:"file_pipeline"`
+}
+
+type FilePipelineMetrics struct {
+	Scheduled      uint64 `json:"scheduled"`
+	Started        uint64 `json:"started"`
+	ReadComplete   uint64 `json:"read_complete"`
+	Completed      uint64 `json:"completed"`
+	Errors         uint64 `json:"errors"`
+	Admitting      int64  `json:"admitting"`
+	Active         int64  `json:"active"`
+	AwaitingBlobs  int64  `json:"awaiting_blobs"`
+	PendingBlobs   int64  `json:"pending_blobs"`
+	AdmissionNS    uint64 `json:"admission_ns"`
+	WorkerNS       uint64 `json:"worker_ns"`
+	ChunkWorkNS    uint64 `json:"chunk_work_ns"`
+	BlobSubmitNS   uint64 `json:"blob_submit_ns"`
+	BlobCallbackNS uint64 `json:"blob_callback_ns"`
+	PostReadNS     uint64 `json:"post_read_ns"`
+}
+
+type filePipelineCounters struct {
+	scheduled, started, readComplete, completed, errors                          atomic.Uint64
+	admitting, active, awaitingBlobs, pendingBlobs                               atomic.Int64
+	admissionNS, workerNS, chunkWorkNS, blobSubmitNS, blobCallbackNS, postReadNS atomic.Uint64
+}
+
+func (metrics FilePipelineMetrics) Delta(baseline FilePipelineMetrics) FilePipelineMetrics {
+	metrics.Scheduled -= baseline.Scheduled
+	metrics.Started -= baseline.Started
+	metrics.ReadComplete -= baseline.ReadComplete
+	metrics.Completed -= baseline.Completed
+	metrics.Errors -= baseline.Errors
+	metrics.AdmissionNS -= baseline.AdmissionNS
+	metrics.WorkerNS -= baseline.WorkerNS
+	metrics.ChunkWorkNS -= baseline.ChunkWorkNS
+	metrics.BlobSubmitNS -= baseline.BlobSubmitNS
+	metrics.BlobCallbackNS -= baseline.BlobCallbackNS
+	metrics.PostReadNS -= baseline.PostReadNS
+	return metrics
+}
+
+func (counters *filePipelineCounters) snapshot() FilePipelineMetrics {
+	return FilePipelineMetrics{
+		Scheduled: counters.scheduled.Load(), Started: counters.started.Load(),
+		ReadComplete: counters.readComplete.Load(), Completed: counters.completed.Load(), Errors: counters.errors.Load(),
+		Admitting: counters.admitting.Load(), Active: counters.active.Load(),
+		AwaitingBlobs: counters.awaitingBlobs.Load(), PendingBlobs: counters.pendingBlobs.Load(),
+		AdmissionNS: counters.admissionNS.Load(), WorkerNS: counters.workerNS.Load(),
+		ChunkWorkNS: counters.chunkWorkNS.Load(), BlobSubmitNS: counters.blobSubmitNS.Load(),
+		BlobCallbackNS: counters.blobCallbackNS.Load(), PostReadNS: counters.postReadNS.Load(),
+	}
 }
 
 type sourceReadCounters struct {
 	calls, bytes, nanoseconds, errors atomic.Uint64
 	latencyBuckets                    [8]atomic.Uint64
+	pipeline                          filePipelineCounters
 }
 
 func (arch *Archiver) SourceReadMetrics() SourceReadMetrics {
@@ -37,6 +90,7 @@ func (arch *Archiver) SourceReadMetrics() SourceReadMetrics {
 
 func (counters *sourceReadCounters) snapshot() SourceReadMetrics {
 	metrics := SourceReadMetrics{Calls: counters.calls.Load(), Bytes: counters.bytes.Load(), Nanoseconds: counters.nanoseconds.Load(), Errors: counters.errors.Load()}
+	metrics.FilePipeline = counters.pipeline.snapshot()
 	for index := range metrics.LatencyBuckets {
 		metrics.LatencyBuckets[index] = counters.latencyBuckets[index].Load()
 	}
@@ -148,6 +202,9 @@ func (s *fileSaver) Save(
 		complete:        complete,
 	}
 
+	started := time.Now()
+	s.sourceReads.pipeline.scheduled.Add(1)
+	s.sourceReads.pipeline.admitting.Add(1)
 	select {
 	case s.ch <- job:
 	case <-ctx.Done():
@@ -155,6 +212,8 @@ func (s *fileSaver) Save(
 		_ = file.Close() // Preserve the stat failure; this source file has no buffered writes.
 		close(ch)
 	}
+	s.sourceReads.pipeline.admissionNS.Add(uint64(time.Since(started)))
+	s.sourceReads.pipeline.admitting.Add(-1)
 
 	return fn
 }
@@ -238,11 +297,24 @@ type saveFileParams struct {
 }
 
 type fileSaveCompletion struct {
-	lock        sync.Mutex
-	result      *futureNodeResult
-	params      saveFileParams
-	remaining   int
-	isCompleted bool
+	lock         sync.Mutex
+	result       *futureNodeResult
+	params       saveFileParams
+	remaining    int
+	isCompleted  bool
+	pipeline     *filePipelineCounters
+	readFinished time.Time
+}
+
+func (completion *fileSaveCompletion) recordCompletion() {
+	completion.pipeline.completed.Add(1)
+	if completion.result.err != nil {
+		completion.pipeline.errors.Add(1)
+	}
+	if !completion.readFinished.IsZero() {
+		completion.pipeline.postReadNS.Add(uint64(time.Since(completion.readFinished)))
+		completion.pipeline.awaitingBlobs.Add(-1)
+	}
 }
 
 func (completion *fileSaveCompletion) completeBlob() {
@@ -264,6 +336,7 @@ func (completion *fileSaveCompletion) completeBlob() {
 		}
 	}
 	completion.isCompleted = true
+	completion.recordCompletion()
 	completion.params.finish(*completion.result)
 }
 
@@ -282,18 +355,27 @@ func (completion *fileSaveCompletion) completeError(err error) {
 	completion.result.err = fmt.Errorf("failed to save %v: %w", completion.params.target, err)
 	completion.result.node = nil
 	completion.result.stats = ItemStats{}
+	completion.recordCompletion()
 	completion.params.finish(*completion.result)
 }
 
 // saveFile stores the file f in the repo, then closes it.
 func (s *fileSaver) saveFile(ctx context.Context, params saveFileParams) {
+	started := time.Now()
+	pipeline := &s.sourceReads.pipeline
+	pipeline.started.Add(1)
+	pipeline.active.Add(1)
+	defer func() {
+		pipeline.workerNS.Add(uint64(time.Since(started)))
+		pipeline.active.Add(-1)
+	}()
 	params.start()
 
 	fnr := futureNodeResult{
 		snPath: params.snapshotPath,
 		target: params.target,
 	}
-	completion := fileSaveCompletion{result: &fnr, params: params}
+	completion := fileSaveCompletion{result: &fnr, params: params, pipeline: pipeline}
 
 	debug.Log("%v", params.snapshotPath)
 
@@ -318,8 +400,10 @@ func (s *fileSaver) saveFile(ctx context.Context, params saveFileParams) {
 	reader := measuredSourceReader{reader: params.file, counters: s.sourceReads}
 	var idx int
 	for {
+		chunkStarted := time.Now()
 		buf := s.saveFilePool.Get()
 		chunkData, err := params.chunkState.readNextChunk(reader, params.chunker, buf.Data)
+		pipeline.chunkWorkNS.Add(uint64(time.Since(chunkStarted)))
 		if errors.Is(err, io.EOF) {
 			buf.Release()
 			break
@@ -350,8 +434,12 @@ func (s *fileSaver) saveFile(ctx context.Context, params saveFileParams) {
 		node.Content = append(node.Content, vaultic.ID{})
 		completion.lock.Unlock()
 
+		blobStarted := time.Now()
+		pipeline.pendingBlobs.Add(1)
 		s.uploader.SaveBlobAsync(ctx, vaultic.DataBlob, chunkData, vaultic.ID{}, false, func(newID vaultic.ID, known bool, sizeInRepo int, err error) {
 			defer buf.Release()
+			pipeline.blobCallbackNS.Add(uint64(time.Since(blobStarted)))
+			pipeline.pendingBlobs.Add(-1)
 			if err != nil {
 				completion.completeError(err)
 				return
@@ -368,6 +456,7 @@ func (s *fileSaver) saveFile(ctx context.Context, params saveFileParams) {
 
 			completion.completeBlob()
 		})
+		pipeline.blobSubmitNS.Add(uint64(time.Since(blobStarted)))
 		idx++
 
 		// test if the context has been cancelled, return the error
@@ -391,6 +480,11 @@ func (s *fileSaver) saveFile(ctx context.Context, params saveFileParams) {
 	// require one additional completeFuture() call to ensure that the future only completes
 	// after reaching the end of this method
 	completion.remaining += idx + 1
+	pipeline.readComplete.Add(1)
+	if !completion.isCompleted {
+		completion.readFinished = time.Now()
+		pipeline.awaitingBlobs.Add(1)
+	}
 	completion.lock.Unlock()
 	params.finishReading()
 	completion.completeBlob()

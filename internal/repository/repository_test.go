@@ -618,6 +618,7 @@ func TestNoDoubleInit(t *testing.T) {
 func TestSaveBlobAsync(t *testing.T) {
 	repo, _, _ := repository.TestRepositoryWithVersion(t, 2)
 	ctx := context.Background()
+	baseline := repo.BlobSaveMetrics()
 
 	type result struct {
 		id    vaultic.ID
@@ -655,6 +656,10 @@ func TestSaveBlobAsync(t *testing.T) {
 		rtest.Assert(t, result.id.Equal(expectedID), "result %d: expected ID %v, got %v", i, expectedID, result.id)
 		rtest.Assert(t, !result.known, "result %d: expected unknown blob", i)
 	}
+	metrics := repo.BlobSaveMetrics().Delta(baseline)
+	rtest.Assert(t, metrics.Calls == uint64(numCalls) && metrics.HashCalls == metrics.Calls && metrics.AdmissionCalls == metrics.Calls &&
+		metrics.New == metrics.Calls && metrics.Known == 0 && metrics.Failures == 0 && metrics.Active == 0 && metrics.AdmissionActive == 0 &&
+		metrics.HashNS > 0 && metrics.AdmissionNS > 0, "incorrect blob dependency counters: %+v", metrics)
 }
 
 func TestSaveBlobAsyncErrorHandling(t *testing.T) {

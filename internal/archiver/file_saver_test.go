@@ -15,6 +15,7 @@ import (
 	"github.com/otuschhoff/vaultic/internal/fs"
 	"github.com/otuschhoff/vaultic/internal/repository"
 	"github.com/otuschhoff/vaultic/internal/test"
+	"github.com/otuschhoff/vaultic/internal/vaultic"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -113,5 +114,55 @@ func TestFileSaver(t *testing.T) {
 	err := wg.Wait()
 	if err != nil {
 		t.Fatal(err)
+	}
+	metrics := s.sourceReads.snapshot().FilePipeline
+	if metrics.Scheduled != uint64(len(files)) || metrics.Started != metrics.Scheduled || metrics.ReadComplete != metrics.Started ||
+		metrics.Completed != metrics.Started || metrics.Errors != 0 || metrics.Admitting != 0 || metrics.Active != 0 ||
+		metrics.AwaitingBlobs != 0 || metrics.PendingBlobs != 0 {
+		t.Fatalf("file pipeline did not drain: %+v", metrics)
+	}
+}
+
+type heldBlobSaver struct {
+	vaultic.BlobSaverAsync
+	callbacks chan func()
+}
+
+func (saver heldBlobSaver) SaveBlobAsync(ctx context.Context, blobType vaultic.BlobType, contents []byte, id vaultic.ID, duplicate bool, callback func(vaultic.ID, bool, int, error)) {
+	saver.callbacks <- func() { saver.BlobSaverAsync.SaveBlobAsync(ctx, blobType, contents, id, duplicate, callback) }
+}
+
+func TestFileSaverCompletionWait(t *testing.T) {
+	files := createTestFiles(t, 1)
+	filesystem := fs.NewLocal()
+	saver, uploader, ctx, workers := startFileSaver(t.Context(), t, filesystem)
+	held := heldBlobSaver{BlobSaverAsync: uploader, callbacks: make(chan func(), 1)}
+	saver.uploader = held
+	file, err := filesystem.OpenFile(files[0], os.O_RDONLY, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readDone := make(chan struct{})
+	future := saver.Save(ctx, files[0], files[0], file, func() {}, func() { close(readDone) }, nil)
+	select {
+	case <-readDone:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	metrics := saver.sourceReads.snapshot().FilePipeline
+	if metrics.ReadComplete != 1 || metrics.Completed != 0 || metrics.PendingBlobs != 1 || metrics.AwaitingBlobs != 1 {
+		t.Fatalf("pending completion was not distinguished from source reading: %+v", metrics)
+	}
+	(<-held.callbacks)()
+	if result := future.take(ctx); result.err != nil {
+		t.Fatal(result.err)
+	}
+	saver.TriggerShutdown()
+	if err := workers.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	metrics = saver.sourceReads.snapshot().FilePipeline
+	if metrics.Completed != 1 || metrics.Active != 0 || metrics.PendingBlobs != 0 || metrics.AwaitingBlobs != 0 || metrics.PostReadNS == 0 {
+		t.Fatalf("completion wait did not drain: %+v", metrics)
 	}
 }

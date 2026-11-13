@@ -1444,6 +1444,142 @@ throughput. No production configuration was changed. Documentation was updated
 only after independent verification; its pinned pre-update bytes remain in
 `/run/vaultic-ncl1-readers800k-retry3-build-20261111/candidate`.
 
+### Original-Source 800k RAM64 And Dependency Results
+
+The November 12 screen completed all eight legs at
+`/volume2/NASDA2/vaultic-test-m6/ncl1-ram64-fme-cae1-20261112-800k`.
+Every backup read `/ncl1-1-vs-50/fme_cae1` directly, using the same sealed
+800000-path manifest and qualified original-source parent from the reader
+screen above. NASDA2 held disposable repositories, evidence and restore output,
+not substituted input. The source device, root inode, selected path identities
+and hardlink topology matched before and after every leg.
+
+The fixed schedule was `16,64,64,16 | 64,16,16,64`, four observations per
+capacity. Authenticated database-chunk cache budgets varied together:
+16 GiB / 65536 entries versus 64 GiB / 262144 entries. Content readers stayed
+128, metadata RPC cap 32, metadata cache 2 GiB, block cache 512 MiB, crypto
+workers eight, publication group 64, reconciliation batch 5000 and read-ahead
+one. All legs used identical instrumented CLI bytes, unchanged native bytes and
+a fresh private daemon; host caches were not dropped. The supervisor had 56
+available CPUs and no ancestor cgroup CPU quota. This is not evidence that CPU
+work was on the critical path.
+
+| Leg | Cache GiB | Main Seconds |
+| --- | ---: | ---: |
+| 01 | 16 | 364.195 |
+| 02 | 64 | 368.239 |
+| 03 | 64 | 356.444 |
+| 04 | 16 | 363.954 |
+| 05 | 64 | 365.474 |
+| 06 | 16 | 374.324 |
+| 07 | 16 | 403.844 |
+| 08 | 64 | 384.731 |
+
+| Median Metric | 16 GiB | 64 GiB |
+| --- | ---: | ---: |
+| Main seconds | 369.260 | 366.856 |
+| Logical ciphertext origin bytes | 40576254364 | 28589512684 |
+| Chunk evictions | 86115 | 0 |
+| Peak combined RSS GiB | 63.788 | 74.880 |
+| Whole-CLI CPU seconds | 861.319 | 895.071 |
+
+The 64 GiB setting reduced median logical origin bytes by 29.541%, eliminated
+recorded evictions, and increased median combined RSS by 11.092 GiB. Cache
+misses were 105751 in every 64 GiB leg versus approximately 151474 at 16 GiB;
+the bounded refetch sample contained no refetches at 64 GiB. Configured capacity
+is not measured occupancy: this does not establish that a 64 GiB cache filled
+or that 64 GiB is necessary. Median elapsed time was only 2.403 seconds
+(0.651%) shorter, an observed throughput ratio of 1.00655, not a proven causal
+or production speedup. Balanced four-leg bracket medians were 364.075 versus
+362.341 seconds and 389.084 versus 375.103 seconds (16 versus 64 GiB), ratios
+1.00478 and 1.03727. Both brackets favor 64 GiB, but the magnitude differs;
+the slower seventh and eighth legs remain included without replacement.
+
+New constant-space counters distinguish file admission, source reading,
+read-inclusive chunk work, blob submission, callback completion, hashing and
+metadata admission. These are accumulated overlapping worker/caller seconds,
+not additive wall-time contributions. Main-interval median durations were:
+
+| Dependency Duration, Worker/Caller Seconds | 16 GiB | 64 GiB |
+| --- | ---: | ---: |
+| File handoff to reader pool | 36.901 | 33.722 |
+| File workers submitting blob work | 6782.521 | 5907.552 |
+| Post-read wait for blob completion | 4881.422 | 3821.193 |
+| Blob hashing | 123.234 | 125.381 |
+| Blob metadata admission | 5935.152 | 4779.639 |
+| Writer waiting for prepared work | 228.801 | 233.951 |
+| Writer processing batches | 108.518 | 98.982 |
+| Collector waiting to fill batches | 336.059 | 332.020 |
+
+The measured dependency chain is file workers waiting to submit blob work,
+bounded asynchronous blob tasks waiting for metadata admission, and file
+completion waiting for those callbacks. `WithBlobUploader` limits its shared
+group to `2 + GOMAXPROCS`; two long-lived tasks leave approximately 56 blob
+slots here, held through hashing, admission and callback completion. All
+811726 blob saves per leg were already known: admission is an existence/size
+lookup, not new data publication. Its cached-lookup path can coalesce remote
+size requests; the counters do not separately attribute coalescing, RPC-pool
+wait and backend read time. Live windows reached 56 active admissions, but
+sparse 30-second samples do not establish persistent saturation. Likewise,
+the 128 file readers were not consistently busy in those samples. Buffered
+future-result delivery does not support blaming that send for the stall.
+
+Across all eight legs, writer-connection `MultiGet` attribution recorded
+1035.709--1257.852 storage worker-seconds versus 84.287--91.106 seconds outside
+the server handler. In the first leg, engine durable wait totaled only 0.436
+worker-seconds. Database write durability is therefore not the large measured
+wait in this unchanged/full-reuse workload; server storage time is not itself
+physical disk time. Despite approximately 19.5% less accumulated blob-admission
+time at 64 GiB, the prepared queue remained empty in approximately 96% of
+recorded samples at both settings, with batch-ready handoff below 1 ms per leg.
+Those queue samples are not a wall-time fraction. Writer starvation persisted:
+less origin traffic did not translate into a comparable end-to-end gain.
+
+The complete causal critical path remains unqualified. In particular, serial
+directory traversal/previous-node discovery occurs before file handoff, and
+this screen does not time its individual synchronous dependencies or establish
+per-batch first/last-ready critical delays. Those are the next discriminating
+measurements. A smaller/time-bounded reconciliation batch or an independently
+controlled blob-task limit remains a hypothesis, not a justified default
+change. Do not equate accumulated worker time, sampled CPU shares, cache
+evictions or sparse gauge peaks with exclusive critical-path blocked time.
+
+Every leg completed all 677957 regular-file lifecycles and drained every live
+file/blob gauge. All 800000 selected paths were observed/scanned, with 799076
+reused metadata records and 924 independently accounted hardlink aliases.
+Changed/failed/deferred/reconciled records, revision allocations, directory
+publications, atomic groups and new data blobs remained zero. Full selected
+restore, unchanged-source and encrypted-reopen verification passed eight times.
+The independent verifier checked parent/bundle/series/eight follow-up seals,
+24 current source pins before this documentation edit, actual settings,
+identity/preflight/manifest receipts, diagnostic coverage, exact report replay,
+16 matched profile exports, zero owned survivors and all nine runtimes absent.
+Its sealed analysis, including dependency windows, is at
+`ncl1-ram64-fme-cae1-20261112-800k-analysis` beside the capture.
+
+Validation included focused lifecycle/callback/error race checks, 30 supervisor
+tests, seven observer tests, nine compiled qualifier checks, and broad archiver
+and repository race suites. Broad testing was not initially clean: root DAC
+bypass invalidated archiver permission fixtures, resolved by a scoped capability
+drop for that suite. `TestReadCacheChunkBoundaryAndFinalShortRead` reproduced on
+committed HEAD and was the only repository exclusion. Two initial candidate
+cache failures did not reproduce in three fixed isolated repetitions per side
+or subsequent full baseline/candidate suites; their failed logs remain sealed,
+not relabeled as reproduced baseline failures. Native cache fixtures required
+the qualified binary at their hardcoded crate debug path in private source
+archives. No unrelated cache product fix or workspace fixture-link change was
+made to obtain passing validation.
+
+All eight main intervals were below the unchanged 600-second sustained-main
+gate. This qualifies bounded backup correctness and the observed cache/read
+comparison, not sustained throughput, larger-database/history growth, physical
+NAS traffic or a production speedup. Retain the current production/default
+settings; 64 GiB is an optional logical-origin-load reduction candidate, not an
+established throughput winner. No production configuration was changed.
+Documentation was edited only after independent verification; its pinned
+pre-update bytes remain at
+`/run/vaultic-ncl1-ram64800k-build-20261112/candidate`.
+
 ### Pipeline And RAM Investigation
 
 The November 8 screen completed all 20 legs at

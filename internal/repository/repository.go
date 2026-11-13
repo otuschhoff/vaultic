@@ -50,6 +50,7 @@ type Repository struct {
 	ownedClosers           []io.Closer
 	stagedPackRoots        StagedPackRoots
 	accounting             *monitor.ProductionAccounting
+	blobSaves              blobSaveCounters
 
 	opts Options
 

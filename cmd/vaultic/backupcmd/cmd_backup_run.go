@@ -361,6 +361,7 @@ type backupCriticalPath struct {
 	DBEngineBackpressure uint64                        `json:"db_engine_backpressure"`
 	EncryptionReads      *daemon.EncryptionReadMetrics `json:"encryption_reads,omitempty"`
 	SourceReads          *archiver.SourceReadMetrics   `json:"source_reads,omitempty"`
+	BlobSaves            *repository.BlobSaveMetrics   `json:"blob_saves,omitempty"`
 }
 
 func backupDBStages(state daemon.WriterStatus) map[string]daemon.TimingSnapshot {
@@ -517,6 +518,10 @@ func (run *backupRun) startCriticalPathReporting() func() {
 	if sourceArchiver != nil {
 		sourceBaseline = sourceArchiver.SourceReadMetrics()
 	}
+	var blobBaseline repository.BlobSaveMetrics
+	if run.repo != nil {
+		blobBaseline = run.repo.BlobSaveMetrics()
+	}
 	started := time.Now()
 	report := func() {
 		sample := backupCriticalPath{
@@ -525,6 +530,7 @@ func (run *backupRun) startCriticalPathReporting() func() {
 		}
 		if sourceArchiver != nil {
 			metrics := sourceArchiver.SourceReadMetrics()
+			metrics.FilePipeline = metrics.FilePipeline.Delta(sourceBaseline.FilePipeline)
 			metrics.Calls -= sourceBaseline.Calls
 			metrics.Bytes -= sourceBaseline.Bytes
 			metrics.Nanoseconds -= sourceBaseline.Nanoseconds
@@ -533,6 +539,10 @@ func (run *backupRun) startCriticalPathReporting() func() {
 				metrics.LatencyBuckets[index] -= sourceBaseline.LatencyBuckets[index]
 			}
 			sample.SourceReads = &metrics
+		}
+		if run.repo != nil {
+			metrics := run.repo.BlobSaveMetrics().Delta(blobBaseline)
+			sample.BlobSaves = &metrics
 		}
 		for client, connection := range clients {
 			for _, stats := range client.RPCWaitStats() {

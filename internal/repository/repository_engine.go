@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sync/atomic"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/otuschhoff/vaultic/internal/backend"
@@ -19,6 +21,46 @@ import (
 	"github.com/otuschhoff/vaultic/internal/vaultic"
 	"github.com/restic/chunker"
 )
+
+type BlobSaveMetrics struct {
+	Calls           uint64 `json:"calls"`
+	HashCalls       uint64 `json:"hash_calls"`
+	HashNS          uint64 `json:"hash_ns"`
+	AdmissionCalls  uint64 `json:"admission_calls"`
+	AdmissionNS     uint64 `json:"admission_ns"`
+	Known           uint64 `json:"known"`
+	New             uint64 `json:"new"`
+	Failures        uint64 `json:"failures"`
+	Active          int64  `json:"active"`
+	AdmissionActive int64  `json:"admission_active"`
+}
+
+type blobSaveCounters struct {
+	calls, hashCalls, hashNS, admissionCalls, admissionNS, known, new, failures atomic.Uint64
+	active, admissionActive                                                     atomic.Int64
+}
+
+func (r *Repository) BlobSaveMetrics() BlobSaveMetrics {
+	counters := &r.blobSaves
+	return BlobSaveMetrics{
+		Calls: counters.calls.Load(), HashCalls: counters.hashCalls.Load(), HashNS: counters.hashNS.Load(),
+		AdmissionCalls: counters.admissionCalls.Load(), AdmissionNS: counters.admissionNS.Load(),
+		Known: counters.known.Load(), New: counters.new.Load(), Failures: counters.failures.Load(),
+		Active: counters.active.Load(), AdmissionActive: counters.admissionActive.Load(),
+	}
+}
+
+func (metrics BlobSaveMetrics) Delta(baseline BlobSaveMetrics) BlobSaveMetrics {
+	metrics.Calls -= baseline.Calls
+	metrics.HashCalls -= baseline.HashCalls
+	metrics.HashNS -= baseline.HashNS
+	metrics.AdmissionCalls -= baseline.AdmissionCalls
+	metrics.AdmissionNS -= baseline.AdmissionNS
+	metrics.Known -= baseline.Known
+	metrics.New -= baseline.New
+	metrics.Failures -= baseline.Failures
+	return metrics
+}
 
 // ApplyRepoSettings applies repository-config behavior that must be enforced
 // by the repository itself (as opposed to the CLI layer). Currently this
@@ -335,6 +377,15 @@ func (r *Repository) saveBlob(
 	id vaultic.ID,
 	storeDuplicate bool,
 ) (newID vaultic.ID, known bool, size int, err error) {
+	counters := &r.blobSaves
+	counters.calls.Add(1)
+	counters.active.Add(1)
+	defer func() {
+		counters.active.Add(-1)
+		if err != nil {
+			counters.failures.Add(1)
+		}
+	}()
 
 	if err := ctx.Err(); err != nil {
 		return vaultic.ID{}, false, 0, err
@@ -345,6 +396,7 @@ func (r *Repository) saveBlob(
 
 	// compute plaintext hash if not already set
 	if id.IsNull() {
+		started := time.Now()
 		// Special case the hash calculation for all zero chunks. This is especially
 		// useful for sparse files containing large all zero regions. For these we can
 		// process chunks as fast as we can read the from disk.
@@ -353,6 +405,8 @@ func (r *Repository) saveBlob(
 		} else {
 			newID = vaultic.Hash(buf)
 		}
+		counters.hashNS.Add(uint64(time.Since(started)))
+		counters.hashCalls.Add(1)
 	} else {
 		newID = id
 	}
@@ -363,14 +417,25 @@ func (r *Repository) saveBlob(
 		return vaultic.ID{}, false, 0, err
 	}
 	handle := vaultic.BlobHandle{ID: newID, Type: t}
+	admissionStarted := time.Now()
+	counters.admissionCalls.Add(1)
+	counters.admissionActive.Add(1)
 	if admission, ok := engine.(enginepkg.ContextWriteEngine); ok {
-		added, err := admission.AddPendingContext(ctx, handle, uint(len(buf)))
-		if err != nil {
-			return vaultic.ID{}, false, 0, fmt.Errorf("%w: admit blob %s: %w", vaultic.ErrMetadataLookup, newID.Str(), err)
-		}
+		var added bool
+		added, err = admission.AddPendingContext(ctx, handle, uint(len(buf)))
 		known = !added
 	} else {
 		known = !engine.AddPending(handle, uint(len(buf)))
+	}
+	counters.admissionNS.Add(uint64(time.Since(admissionStarted)))
+	counters.admissionActive.Add(-1)
+	if err != nil {
+		return vaultic.ID{}, false, 0, fmt.Errorf("%w: admit blob %s: %w", vaultic.ErrMetadataLookup, newID.Str(), err)
+	}
+	if known {
+		counters.known.Add(1)
+	} else {
+		counters.new.Add(1)
 	}
 
 	// only save when needed or explicitly told
