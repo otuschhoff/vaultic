@@ -93,6 +93,12 @@ type Metrics struct {
 	WriterWaitFirstNS                         uint64                                          `json:"writer_wait_first_ns"`
 	WriterWaitFillNS                          uint64                                          `json:"writer_wait_fill_ns"`
 	BatchReadyBlockedNS                       uint64                                          `json:"batch_ready_blocked_ns"`
+	CollectionBatches                         uint64                                          `json:"collection_batches"`
+	CollectionItems                           uint64                                          `json:"collection_items"`
+	BatchFirstToLastNS                        uint64                                          `json:"batch_first_to_last_ns"`
+	BatchFirstToLastMaxNS                     uint64                                          `json:"batch_first_to_last_max_ns"`
+	PreparedQueueAgeNS                        uint64                                          `json:"prepared_queue_age_ns"`
+	BatchFirstHandoffAgeNS                    uint64                                          `json:"batch_first_handoff_age_ns"`
 	CollectionBatchSize                       int                                             `json:"collection_batch_size"`
 	CollectionReadAhead                       int                                             `json:"collection_read_ahead"`
 	PreparedQueueSamples                      [5]uint64                                       `json:"prepared_queue_samples"`
@@ -220,6 +226,7 @@ type identity struct {
 
 type preparedItem struct {
 	workItem
+	readyAt            time.Time
 	stat               fs.ExtendedFileInfo
 	parent             identity
 	identity           identity
@@ -283,6 +290,12 @@ type Reconciler struct {
 	writerWaitFirstNS      atomic.Uint64
 	writerWaitFillNS       atomic.Uint64
 	batchReadyBlockedNS    atomic.Uint64
+	collectionBatches      atomic.Uint64
+	collectionItems        atomic.Uint64
+	batchFirstToLastNS     atomic.Uint64
+	batchFirstToLastMaxNS  atomic.Uint64
+	preparedQueueAgeNS     atomic.Uint64
+	batchFirstHandoffAgeNS atomic.Uint64
 	preparedQueueSamples   [5]atomic.Uint64
 	observationFirstUnixNS atomic.Int64
 	observationLastUnixNS  atomic.Int64
@@ -426,6 +439,9 @@ func (reconciler *Reconciler) Metrics() Metrics {
 		ContentLookup: reconciler.contentLookup.snapshot(), ComparisonNS: reconciler.comparisonNS.Load(),
 		WriterWaitFirstNS: reconciler.writerWaitFirstNS.Load(), WriterWaitFillNS: reconciler.writerWaitFillNS.Load(),
 		BatchReadyBlockedNS: reconciler.batchReadyBlockedNS.Load(),
+		CollectionBatches:   reconciler.collectionBatches.Load(), CollectionItems: reconciler.collectionItems.Load(),
+		BatchFirstToLastNS: reconciler.batchFirstToLastNS.Load(), BatchFirstToLastMaxNS: reconciler.batchFirstToLastMaxNS.Load(),
+		PreparedQueueAgeNS: reconciler.preparedQueueAgeNS.Load(), BatchFirstHandoffAgeNS: reconciler.batchFirstHandoffAgeNS.Load(),
 		CollectionBatchSize: reconciler.options.BatchSize, CollectionReadAhead: reconciler.options.CollectionReadAhead,
 		ObservationFirstUnixNS: reconciler.observationFirstUnixNS.Load(), ObservationLastUnixNS: reconciler.observationLastUnixNS.Load(),
 		Observed: reconciler.observed.Load(), InputQueueDepth: len(reconciler.input),
@@ -708,6 +724,7 @@ func (reconciler *Reconciler) statWorker() {
 		reconciler.statWorkerNS.Add(uint64(time.Since(statStarted)))
 		reconciler.statActive.Add(-1)
 		reconciler.scanned.Add(1)
+		prepared.readyAt = time.Now()
 		select {
 		case reconciler.prepared <- prepared:
 		case <-reconciler.ctx.Done():
@@ -767,6 +784,20 @@ func (reconciler *Reconciler) writer() {
 
 func (reconciler *Reconciler) collectBatches(deliver func([]preparedItem)) {
 	batch := make([]preparedItem, 0, reconciler.options.BatchSize)
+	var firstArrival, lastArrival time.Time
+	handoff := func() {
+		span := uint64(lastArrival.Sub(firstArrival))
+		reconciler.collectionBatches.Add(1)
+		reconciler.collectionItems.Add(uint64(len(batch)))
+		reconciler.batchFirstToLastNS.Add(span)
+		for maximum := reconciler.batchFirstToLastMaxNS.Load(); span > maximum; maximum = reconciler.batchFirstToLastMaxNS.Load() {
+			if reconciler.batchFirstToLastMaxNS.CompareAndSwap(maximum, span) {
+				break
+			}
+		}
+		reconciler.batchFirstHandoffAgeNS.Add(uint64(time.Since(firstArrival)))
+		deliver(batch)
+	}
 	for {
 		depth, capacity := len(reconciler.prepared), cap(reconciler.prepared)
 		bucket := 0
@@ -785,9 +816,16 @@ func (reconciler *Reconciler) collectBatches(deliver func([]preparedItem)) {
 		if !open {
 			break
 		}
+		lastArrival = time.Now()
+		if len(batch) == 0 {
+			firstArrival = lastArrival
+		}
+		if !item.readyAt.IsZero() {
+			reconciler.preparedQueueAgeNS.Add(uint64(lastArrival.Sub(item.readyAt)))
+		}
 		batch = append(batch, item)
 		if len(batch) == reconciler.options.BatchSize {
-			deliver(batch)
+			handoff()
 			if reconciler.options.CollectionReadAhead == 1 {
 				batch = make([]preparedItem, 0, reconciler.options.BatchSize)
 			} else {
@@ -796,7 +834,7 @@ func (reconciler *Reconciler) collectBatches(deliver func([]preparedItem)) {
 		}
 	}
 	if len(batch) > 0 {
-		deliver(batch)
+		handoff()
 	}
 }
 

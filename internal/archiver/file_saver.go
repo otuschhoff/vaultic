@@ -25,28 +25,86 @@ type SourceReadMetrics struct {
 	Errors         uint64              `json:"errors"`
 	LatencyBuckets [8]uint64           `json:"latency_buckets"`
 	FilePipeline   FilePipelineMetrics `json:"file_pipeline"`
+	Traversal      TraversalMetrics    `json:"traversal"`
+}
+
+type TraversalStageMetrics struct {
+	Calls       uint64 `json:"calls"`
+	Nanoseconds uint64 `json:"ns"`
+}
+
+type TraversalMetrics struct {
+	PreviousNode TraversalStageMetrics `json:"previous_node"`
+	OpenMetadata TraversalStageMetrics `json:"open_metadata"`
+	OpenContent  TraversalStageMetrics `json:"open_content"`
+	StatMetadata TraversalStageMetrics `json:"stat_metadata"`
+	NodeMetadata TraversalStageMetrics `json:"node_metadata"`
+	Directory    TraversalStageMetrics `json:"directory"`
+	LoadSubtree  TraversalStageMetrics `json:"load_subtree"`
+}
+
+func (metrics TraversalMetrics) Delta(baseline TraversalMetrics) TraversalMetrics {
+	delta := func(current, before TraversalStageMetrics) TraversalStageMetrics {
+		return TraversalStageMetrics{Calls: current.Calls - before.Calls, Nanoseconds: current.Nanoseconds - before.Nanoseconds}
+	}
+	return TraversalMetrics{
+		PreviousNode: delta(metrics.PreviousNode, baseline.PreviousNode), OpenMetadata: delta(metrics.OpenMetadata, baseline.OpenMetadata),
+		StatMetadata: delta(metrics.StatMetadata, baseline.StatMetadata),
+		OpenContent:  delta(metrics.OpenContent, baseline.OpenContent),
+		NodeMetadata: delta(metrics.NodeMetadata, baseline.NodeMetadata), Directory: delta(metrics.Directory, baseline.Directory),
+		LoadSubtree: delta(metrics.LoadSubtree, baseline.LoadSubtree),
+	}
+}
+
+type traversalStageCounters struct {
+	calls, nanoseconds atomic.Uint64
+}
+
+func (counters *traversalStageCounters) record(started time.Time) {
+	counters.calls.Add(1)
+	counters.nanoseconds.Add(uint64(time.Since(started)))
+}
+
+func (counters *traversalStageCounters) snapshot() TraversalStageMetrics {
+	return TraversalStageMetrics{Calls: counters.calls.Load(), Nanoseconds: counters.nanoseconds.Load()}
+}
+
+type traversalCounters struct {
+	previousNode, openMetadata, openContent, statMetadata, nodeMetadata, directory, loadSubtree traversalStageCounters
+}
+
+func (counters *traversalCounters) snapshot() TraversalMetrics {
+	return TraversalMetrics{
+		PreviousNode: counters.previousNode.snapshot(), OpenMetadata: counters.openMetadata.snapshot(),
+		StatMetadata: counters.statMetadata.snapshot(),
+		OpenContent:  counters.openContent.snapshot(),
+		NodeMetadata: counters.nodeMetadata.snapshot(), Directory: counters.directory.snapshot(),
+		LoadSubtree: counters.loadSubtree.snapshot(),
+	}
 }
 
 type FilePipelineMetrics struct {
-	Scheduled      uint64 `json:"scheduled"`
-	Started        uint64 `json:"started"`
-	ReadComplete   uint64 `json:"read_complete"`
-	Completed      uint64 `json:"completed"`
-	Errors         uint64 `json:"errors"`
-	Admitting      int64  `json:"admitting"`
-	Active         int64  `json:"active"`
-	AwaitingBlobs  int64  `json:"awaiting_blobs"`
-	PendingBlobs   int64  `json:"pending_blobs"`
-	AdmissionNS    uint64 `json:"admission_ns"`
-	WorkerNS       uint64 `json:"worker_ns"`
-	ChunkWorkNS    uint64 `json:"chunk_work_ns"`
-	BlobSubmitNS   uint64 `json:"blob_submit_ns"`
-	BlobCallbackNS uint64 `json:"blob_callback_ns"`
-	PostReadNS     uint64 `json:"post_read_ns"`
+	Scheduled       uint64 `json:"scheduled"`
+	Started         uint64 `json:"started"`
+	ReadComplete    uint64 `json:"read_complete"`
+	Completed       uint64 `json:"completed"`
+	Errors          uint64 `json:"errors"`
+	Admitting       int64  `json:"admitting"`
+	Active          int64  `json:"active"`
+	AwaitingBlobs   int64  `json:"awaiting_blobs"`
+	PendingBlobs    int64  `json:"pending_blobs"`
+	AdmissionNS     uint64 `json:"admission_ns"`
+	WorkerNS        uint64 `json:"worker_ns"`
+	ChunkWorkNS     uint64 `json:"chunk_work_ns"`
+	BlobSubmitNS    uint64 `json:"blob_submit_ns"`
+	BlobCallbackNS  uint64 `json:"blob_callback_ns"`
+	PostReadNS      uint64 `json:"post_read_ns"`
+	WorkerOpenCalls uint64 `json:"worker_open_calls"`
 }
 
 type filePipelineCounters struct {
 	scheduled, started, readComplete, completed, errors                          atomic.Uint64
+	workerOpenCalls                                                              atomic.Uint64
 	admitting, active, awaitingBlobs, pendingBlobs                               atomic.Int64
 	admissionNS, workerNS, chunkWorkNS, blobSubmitNS, blobCallbackNS, postReadNS atomic.Uint64
 }
@@ -63,6 +121,7 @@ func (metrics FilePipelineMetrics) Delta(baseline FilePipelineMetrics) FilePipel
 	metrics.BlobSubmitNS -= baseline.BlobSubmitNS
 	metrics.BlobCallbackNS -= baseline.BlobCallbackNS
 	metrics.PostReadNS -= baseline.PostReadNS
+	metrics.WorkerOpenCalls -= baseline.WorkerOpenCalls
 	return metrics
 }
 
@@ -75,6 +134,7 @@ func (counters *filePipelineCounters) snapshot() FilePipelineMetrics {
 		AdmissionNS: counters.admissionNS.Load(), WorkerNS: counters.workerNS.Load(),
 		ChunkWorkNS: counters.chunkWorkNS.Load(), BlobSubmitNS: counters.blobSubmitNS.Load(),
 		BlobCallbackNS: counters.blobCallbackNS.Load(), PostReadNS: counters.postReadNS.Load(),
+		WorkerOpenCalls: counters.workerOpenCalls.Load(),
 	}
 }
 
@@ -82,6 +142,7 @@ type sourceReadCounters struct {
 	calls, bytes, nanoseconds, errors atomic.Uint64
 	latencyBuckets                    [8]atomic.Uint64
 	pipeline                          filePipelineCounters
+	traversal                         traversalCounters
 }
 
 func (arch *Archiver) SourceReadMetrics() SourceReadMetrics {
@@ -91,6 +152,7 @@ func (arch *Archiver) SourceReadMetrics() SourceReadMetrics {
 func (counters *sourceReadCounters) snapshot() SourceReadMetrics {
 	metrics := SourceReadMetrics{Calls: counters.calls.Load(), Bytes: counters.bytes.Load(), Nanoseconds: counters.nanoseconds.Load(), Errors: counters.errors.Load()}
 	metrics.FilePipeline = counters.pipeline.snapshot()
+	metrics.Traversal = counters.traversal.snapshot()
 	for index := range metrics.LatencyBuckets {
 		metrics.LatencyBuckets[index] = counters.latencyBuckets[index].Load()
 	}
@@ -136,6 +198,7 @@ type fileSaver struct {
 	CompleteBlob func(bytes uint64)
 
 	NodeFromFileInfo func(snPath, filename string, meta toNoder, ignoreXattrListError bool) (*data.Node, error)
+	PrepareFile      func(context.Context, string, fs.File) error
 }
 
 // newFileSaver returns a new file saver. A worker pool with fileWorkers is
@@ -378,6 +441,14 @@ func (s *fileSaver) saveFile(ctx context.Context, params saveFileParams) {
 	completion := fileSaveCompletion{result: &fnr, params: params, pipeline: pipeline}
 
 	debug.Log("%v", params.snapshotPath)
+	if s.PrepareFile != nil {
+		pipeline.workerOpenCalls.Add(1)
+		if err := s.PrepareFile(ctx, params.target, params.file); err != nil {
+			_ = params.file.Close()
+			completion.completeError(err)
+			return
+		}
+	}
 
 	node, err := s.NodeFromFileInfo(params.snapshotPath, params.target, params.file, false)
 	if err != nil {

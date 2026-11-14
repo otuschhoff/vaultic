@@ -531,6 +531,7 @@ func (run *backupRun) startCriticalPathReporting() func() {
 		if sourceArchiver != nil {
 			metrics := sourceArchiver.SourceReadMetrics()
 			metrics.FilePipeline = metrics.FilePipeline.Delta(sourceBaseline.FilePipeline)
+			metrics.Traversal = metrics.Traversal.Delta(sourceBaseline.Traversal)
 			metrics.Calls -= sourceBaseline.Calls
 			metrics.Bytes -= sourceBaseline.Bytes
 			metrics.Nanoseconds -= sourceBaseline.Nanoseconds
@@ -1197,7 +1198,8 @@ func configureArchiver(ctx context.Context, run *backupRun) error {
 	cancelCtx, cancel := context.WithCancel(groupCtx)
 	run.group, run.cancel = group, cancel
 	configureBackupScanner(cancelCtx, run, selectByName, selectItem)
-	options := archiver.Options{ReadConcurrency: run.options.ReadConcurrency, UnchangedReadConcurrency: run.options.UnchangedReadConcurrency}
+	options := archiver.Options{ReadConcurrency: run.options.ReadConcurrency, UnchangedReadConcurrency: run.options.UnchangedReadConcurrency,
+		OpenFilesInWorkers: run.options.OpenFilesInWorkers}
 	options.SelectionError = run.markerStore.Error
 	if run.options.UseCWalk && (!run.pathdiffPlan.Selective || len(run.pathdiffPlan.ChangedDirs) > 0) {
 		options.CWalkConcurrency, options.CWalkQueue = run.options.CWalkConcurrency, 4096

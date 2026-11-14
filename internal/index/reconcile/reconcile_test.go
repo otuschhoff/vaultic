@@ -1168,12 +1168,38 @@ func TestCollectionReadAheadPreservesOrderAndDrains(t *testing.T) {
 			if metrics.Observed != 8 || metrics.Scanned != 8 || metrics.WriterWaitFirstNS == 0 || metrics.WriterWaitFillNS == 0 || samples != 9 || metrics.ObservationLastUnixNS < metrics.ObservationFirstUnixNS {
 				t.Fatalf("incomplete collection: %+v", metrics)
 			}
+			if metrics.CollectionBatches != 4 || metrics.CollectionItems != 8 || metrics.BatchFirstToLastNS == 0 || metrics.BatchFirstToLastMaxNS == 0 || metrics.PreparedQueueAgeNS == 0 || metrics.BatchFirstHandoffAgeNS < metrics.BatchFirstToLastNS {
+				t.Fatalf("incomplete batch readiness timing: %+v", metrics)
+			}
 		})
 	}
 	for _, readAhead := range []int{-1, 2} {
 		if _, err := (Options{CollectionReadAhead: readAhead}).withDefaults(); err == nil {
 			t.Fatal("unbounded read-ahead accepted")
 		}
+	}
+}
+
+func TestCollectionPartialBatchReadiness(t *testing.T) {
+	reconciler := &Reconciler{options: Options{BatchSize: 4}, prepared: make(chan preparedItem)}
+	done := make(chan struct{})
+	var batches [][]preparedItem
+	go func() {
+		defer close(done)
+		reconciler.collectBatches(func(batch []preparedItem) {
+			batches = append(batches, slices.Clone(batch))
+		})
+	}()
+	for _, name := range []string{"first", "last"} {
+		reconciler.prepared <- preparedItem{workItem: workItem{snapshotPath: name}, readyAt: time.Now()}
+	}
+	close(reconciler.prepared)
+	<-done
+	metrics := reconciler.Metrics()
+	if len(batches) != 1 || len(batches[0]) != 2 || batches[0][0].snapshotPath != "first" || batches[0][1].snapshotPath != "last" ||
+		metrics.CollectionBatches != 1 || metrics.CollectionItems != 2 || metrics.PreparedQueueAgeNS == 0 ||
+		metrics.BatchFirstHandoffAgeNS < metrics.BatchFirstToLastNS || metrics.BatchFirstToLastMaxNS != metrics.BatchFirstToLastNS {
+		t.Fatalf("partial batch order or readiness differs: batches=%v metrics=%+v", batches, metrics)
 	}
 }
 

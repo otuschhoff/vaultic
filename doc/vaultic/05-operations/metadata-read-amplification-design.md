@@ -1580,6 +1580,135 @@ Documentation was edited only after independent verification; its pinned
 pre-update bytes remain at
 `/run/vaultic-ncl1-ram64800k-build-20261112/candidate`.
 
+### Original-Source 800k Worker-Opening Results
+
+The November 13 follow-up instrumented previous-node lookup, metadata-only
+opening, content opening, metadata `Stat`, node conversion, directory work and
+subtree loading, plus batch first/last readiness and prepared-item queue age.
+Counters use constant space and main-interval deltas. Directory/node stages
+can nest, and some work runs in workers; their durations are not additive
+exclusive wall time. Batch handoff age ends before the delivery callback so
+it does not include writer processing in the no-read-ahead case.
+
+A preliminary batch-size screen stopped after one accepted leg and two actual
+successful backup/restore/reopen receipts. Batch 5000 took 350.827 seconds;
+batch 1000 took 355.811 seconds. A hardcoded expected batch-5000 report flag
+rejected the second receipt. The corrected report passed both real receipt
+replays, but the failed capture was neither relabeled nor completed by mixing
+later runs. Its evidence remains at
+`/volume2/NASDA2/vaultic-test-m6/ncl1-producer-fme-cae1-20261113-800k`, including
+the failed second-leg runtime at
+`/run/vaultic-unchanged-ncl1-producer800k-leg-02-b1000`. This is not an accepted
+balanced batch-size comparison. The observations did identify 154.420 and
+150.626 seconds in serial content opening, versus only 0.166 and 0.166 seconds
+in previous-node lookup. Smaller batches reduced the maximum first/last span
+from 14.364 to 4.806 seconds, while accumulated prepared-item queue age rose
+from 5.236 to 677.059 seconds. These two observations do not establish a
+batch-size speedup or slowdown.
+
+The evidence-driven candidate adds default-off `--read-open-in-workers`.
+Content opening moves into the existing bounded file-reader workers, without
+adding an unbounded queue or independent goroutines. Both modes share the
+context check, content open, post-open `Stat` and regular-file validation.
+Preparation failures close the source and complete the file exactly once;
+changed-type errors retain the source path. `worker_open_calls` distinguishes
+the modes rather than inferring them from timing.
+
+All eight fresh comparison legs were accepted at
+`/volume2/NASDA2/vaultic-test-m6/ncl1-open-fme-cae1-20261113-800k`.
+Every representative backup read `/ncl1-1-vs-50/fme_cae1` directly, using the
+same qualified original-source parent and sealed 800000-path manifest.
+Only the opening flag varied, in schedule `0,1,1,0 | 1,0,0,1`, where one means
+worker opening. Content readers stayed 128, metadata RPC cap 32, authenticated
+chunk cache 16 GiB / 65536 entries, metadata cache 2 GiB, block cache 512 MiB,
+crypto workers eight, publication group 64, reconciliation batch 5000 and
+read-ahead one. Both modes used identical candidate CLI and native bytes,
+with a fresh daemon per leg and no host cache dropping. Live child-namespace
+kernel checks confirmed that the workspace, original source, production
+repository and entire borrowed parent were effectively read-only, while
+the editor workspace remained writable.
+
+| Leg | Worker Opening | Main Seconds |
+| --- | ---: | ---: |
+| 01 | 0 | 775.571 |
+| 02 | 1 | 279.610 |
+| 03 | 1 | 273.834 |
+| 04 | 0 | 350.749 |
+| 05 | 1 | 268.293 |
+| 06 | 0 | 358.103 |
+| 07 | 0 | 387.921 |
+| 08 | 1 | 274.282 |
+
+| Median Metric | Serial Opening | Worker Opening |
+| --- | ---: | ---: |
+| Main seconds | 373.012 | 274.058 |
+| Logical ciphertext origin bytes | 40576276337 | 40573632764 |
+| Peak combined RSS GiB | 63.840 | 63.962 |
+| Whole-CLI CPU seconds | 890.994 | 890.526 |
+| Accumulated content-open seconds | 160.843 | 251.282 |
+| Writer waiting for prepared work, seconds | 230.256 | 121.307 |
+| Writer processing batches, seconds | 110.299 | 119.217 |
+| Collector waiting to fill batches, seconds | 339.020 | 240.158 |
+| Blob hashing, worker seconds | 125.846 | 126.491 |
+| Blob metadata admission, worker seconds | 5839.550 | 7600.559 |
+| File handoff to reader pool, caller seconds | 34.050 | 70.188 |
+| Post-read wait for blob completion, worker seconds | 4785.317 | 6265.630 |
+
+Worker opening reduced observed median elapsed time by 26.529%, a throughput
+ratio of 1.36107. Balanced bracket medians were 563.160 versus 276.722 seconds
+and 373.012 versus 271.287 seconds, ratios 2.03511 and 1.37497. The slow first
+control is retained, not replaced: it recorded 392.784 seconds opening content,
+264.506 seconds in directory work and 640.324 seconds waiting for prepared
+work. This does not identify a physical NFS or native cause. The second bracket
+also favors worker opening without that observation; neither bracket is a
+production or host-cache-controlled causal speedup qualification.
+
+Accumulated content-open time increased because opens now overlap inside the
+reader pool; that is not a regression in serial critical time. Writer supply
+wait decreased, while blob-admission, file-handoff and post-read worker/caller
+durations increased. The unchanged logical origin traffic and whole-CLI CPU
+do not establish either storage or CPU as the sole remaining bottleneck.
+Blob metadata admission remains a substantial measured dependency, but these
+captures do not emit separate blob-lookup slot/result/RPC attribution. A
+separately bounded blob-task experiment would need its own controls; no such
+limit or cache/batch default was changed here.
+
+Every leg completed all 677957 regular-file lifecycles, with zero pipeline
+errors and all live file/blob gauges drained. Content-open calls were exactly
+677957 in both modes; worker-open calls were zero in controls and 677957 in
+candidates. All 800000 paths were observed/scanned, with 799076 reused metadata
+records and 924 independently accounted hardlink aliases. Changed, failed,
+deferred and reconciled records, revision allocations, directory publications,
+atomic groups and new data blobs remained zero. Full selected restore,
+unchanged-source and encrypted-reopen verification passed eight times.
+
+The independent verifier checked parent/bundle/series/eight follow-up seals,
+25 current build-source pins before this documentation edit, 38 series pins,
+actual settings and opening coverage, source identities and manifests,
+preflights, live diagnostic windows, exact report replay, 16 profile exports,
+zero owned survivors and all new private runtimes absent. Its sealed
+`dependencies.json`, `measurements.json`, `summary.json` and `verification.json`
+are at `ncl1-open-fme-cae1-20261113-800k-analysis` beside the capture. The old
+failed batch-screen runtime remains intentionally preserved, not silently
+counted as cleaned. Whole-CLI profiles do not measure exact-main or native CPU.
+
+Validation passed full touched archiver and reconciler race suites, actual
+800000-limit manifest parsing, bounded backup/verified restore in both modes,
+preparation failure/cancellation/type-change/completion checks, 33 supervisor
+tests, seven observer tests and ten compiled qualifier policies. Archiver
+permission fixtures used a scoped DAC capability drop; reconciler fixtures
+explicitly selected the qualified native binary. Prior fixture/report failures
+remain disclosed, and unchanged repository code retains the earlier cache-test
+qualification caveats. No unrelated cache fix or new exclusion was introduced.
+
+Seven of eight main intervals, including every candidate, were shorter than
+the unchanged 600-second sustained-main gate. This is a bounded correctness
+and observed opening-mode comparison, not sustained throughput, larger-history
+growth, physical NAS traffic or production qualification. Keep worker opening
+opt-in and production/default settings unchanged. Documentation was edited
+only after independent verification; its pinned pre-update bytes remain at
+`/run/vaultic-ncl1-open800k-build-20261113/candidate`.
+
 ### Pipeline And RAM Investigation
 
 The November 8 screen completed all 20 legs at

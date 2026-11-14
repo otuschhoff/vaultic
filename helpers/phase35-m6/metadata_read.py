@@ -71,6 +71,9 @@ READERS_SCHEDULE = (64, 96, 128, 128, 96, 64, 96, 128, 64, 64, 128, 96)
 RAM64_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-ram64-fme-cae1-20261112-800k')
 RAM64_BIN = WORKSPACE / 'bin/phase35-ncl1-ram64800k-20261112/linux-amd64'
 RAM64_SCHEDULE = (16, 64, 64, 16, 64, 16, 16, 64)
+PRODUCER_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-open-fme-cae1-20261113-800k')
+PRODUCER_BIN = WORKSPACE / 'bin/phase35-ncl1-open800k-20261113/linux-amd64'
+PRODUCER_SCHEDULE = (0, 1, 1, 0, 1, 0, 0, 1)
 ACCEPTED = Path('/volume2/NASDA2/vaultic-test-m6/critical-path-fme_cae1-20261102-production-cap100k/group-64')
 SEED = Path('/ncl1-1-vs-50/fme_dump/amakura/db.begin-readiness-20261001-fuU56R')
 CANDIDATE = WORKSPACE / 'bin/phase35-metadata-read/linux-amd64/vaultic'
@@ -153,7 +156,20 @@ def ram64_leg(label):
     raise ValueError('RAM64 comparison requires its exact scheduled private leg')
 
 
+def producer_leg(label):
+    if any(os.environ.get(key) for key in ('VAULTIC_PHASE35_READERS_LEG', 'VAULTIC_PHASE35_RAM32_LEG',
+                                          'VAULTIC_PHASE35_RAM64_LEG', 'VAULTIC_PHASE35_ORIGINAL_PARENT')):
+        raise ValueError('producer comparison cannot be combined with another experiment')
+    for index, enabled in enumerate(PRODUCER_SCHEDULE, 1):
+        if label == f'leg-{index:02d}-open{enabled}':
+            return PRODUCER_ROOT / label, Path('/run/vaultic-unchanged-ncl1-open800k-' + label), enabled
+    raise ValueError('producer comparison requires its exact scheduled private leg')
+
+
 def scale800k_chunks():
+    if os.environ.get('VAULTIC_PHASE35_PRODUCER_LEG'):
+        producer_leg(os.environ['VAULTIC_PHASE35_PRODUCER_LEG'])
+        return dict(SCALE800K_CHUNKS)
     if os.environ.get('VAULTIC_PHASE35_RAM64_LEG'):
         return ram64_leg(os.environ['VAULTIC_PHASE35_RAM64_LEG'])[2]
     if os.environ.get('VAULTIC_PHASE35_READERS_LEG'):
@@ -216,12 +232,17 @@ def original_parent_selected():
     value = os.environ.get('VAULTIC_PHASE35_ORIGINAL_PARENT')
     if value not in (None, '1'):
         raise ValueError('invalid original-parent selector')
-    if value and any(os.environ.get(key) for key in ('VAULTIC_PHASE35_READERS_LEG', 'VAULTIC_PHASE35_RAM32_LEG', 'VAULTIC_PHASE35_RAM64_LEG')):
+    if value and any(os.environ.get(key) for key in ('VAULTIC_PHASE35_READERS_LEG', 'VAULTIC_PHASE35_RAM32_LEG', 'VAULTIC_PHASE35_RAM64_LEG', 'VAULTIC_PHASE35_PRODUCER_LEG')):
         raise ValueError('parent qualification cannot be combined with a comparison leg')
     return value == '1'
 
 
 def binaries(profile):
+    if os.environ.get('VAULTIC_PHASE35_PRODUCER_LEG'):
+        producer_leg(os.environ['VAULTIC_PHASE35_PRODUCER_LEG'])
+        if profile != 'db-scale800k':
+            raise ValueError('producer comparison requires the exact 800k profile')
+        return PRODUCER_BIN / 'vaultic', PRODUCER_BIN / 'vaulticdb'
     if os.environ.get('VAULTIC_PHASE35_RAM64_LEG'):
         original_parent_selected()
         ram64_leg(os.environ['VAULTIC_PHASE35_RAM64_LEG'])
@@ -252,6 +273,10 @@ def binaries(profile):
 
 
 def profile_settings(profile):
+    if os.environ.get('VAULTIC_PHASE35_PRODUCER_LEG'):
+        producer_leg(os.environ['VAULTIC_PHASE35_PRODUCER_LEG'])
+        if profile != 'db-scale800k':
+            raise ValueError('producer comparison requires its fixed profile')
     if os.environ.get('VAULTIC_PHASE35_RAM64_LEG'):
         ram64_leg(os.environ['VAULTIC_PHASE35_RAM64_LEG'])
         if profile != 'db-scale800k':
@@ -365,6 +390,8 @@ def paths(mode, inode_limit=10000, profile=None):
     if inode_limit == 800000:
         if (mode, profile) != ('coalesced', 'db-scale800k'):
             raise ValueError('800k requires its explicit forced-only scale profile')
+        if os.environ.get('VAULTIC_PHASE35_PRODUCER_LEG'):
+            return producer_leg(os.environ['VAULTIC_PHASE35_PRODUCER_LEG'])[:2]
         if os.environ.get('VAULTIC_PHASE35_RAM64_LEG'):
             return ram64_leg(os.environ['VAULTIC_PHASE35_RAM64_LEG'])[:2]
         if os.environ.get('VAULTIC_PHASE35_READERS_LEG'):
@@ -372,7 +399,7 @@ def paths(mode, inode_limit=10000, profile=None):
         if os.environ.get('VAULTIC_PHASE35_RAM32_LEG'):
             return ram32_leg(os.environ['VAULTIC_PHASE35_RAM32_LEG'])[:2]
         return SCALE800K_ROOT, SCALE800K_RUNTIME
-    if os.environ.get('VAULTIC_PHASE35_READERS_LEG') or os.environ.get('VAULTIC_PHASE35_RAM64_LEG'):
+    if os.environ.get('VAULTIC_PHASE35_READERS_LEG') or os.environ.get('VAULTIC_PHASE35_RAM64_LEG') or os.environ.get('VAULTIC_PHASE35_PRODUCER_LEG'):
         raise ValueError('reader comparison requires exactly 800000 entries')
     if os.environ.get('VAULTIC_PHASE35_RAM32_LEG'):
         raise ValueError('RAM32 comparison requires exactly 800000 entries')
@@ -566,7 +593,7 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
             raise ValueError('unsafe capture root')
     if (root / '.nobackup').read_bytes() != MARKER:
         raise ValueError('ownership marker differs')
-    original_reader = bool(os.environ.get('VAULTIC_PHASE35_READERS_LEG') or os.environ.get('VAULTIC_PHASE35_RAM64_LEG'))
+    original_reader = bool(os.environ.get('VAULTIC_PHASE35_READERS_LEG') or os.environ.get('VAULTIC_PHASE35_RAM64_LEG') or os.environ.get('VAULTIC_PHASE35_PRODUCER_LEG'))
     parent_root = ORIGINAL_PARENT if original_reader else SCALE800K_PARENT
     borrowed_roots = ((parent_root / 'group-64/db', parent_root / 'group-64/repo') if original_reader else
                       (parent_root / 'input', parent_root / 'group-64/db', parent_root / 'group-64/repo')) if inode_limit == 800000 and not parent_setup else ()
@@ -619,6 +646,7 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
                      'borrowed_read_only_roots': list(map(str, borrowed_roots)), 'borrowed_read_only_bytes': borrowed_bytes,
                      'ram32_leg': os.environ.get('VAULTIC_PHASE35_RAM32_LEG'),
                      'ram64_leg': os.environ.get('VAULTIC_PHASE35_RAM64_LEG'),
+                     'producer_leg': os.environ.get('VAULTIC_PHASE35_PRODUCER_LEG'),
                      'readers_leg': os.environ.get('VAULTIC_PHASE35_READERS_LEG'),
                      'original_parent_setup': parent_setup,
                      'source_device': source.stat().st_dev, 'source_root_inode': source.stat().st_ino,
@@ -667,6 +695,8 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
                     environment['VAULTIC_PHASE35_READERS_LEG'] = os.environ['VAULTIC_PHASE35_READERS_LEG']
                 if os.environ.get('VAULTIC_PHASE35_RAM64_LEG'):
                     environment['VAULTIC_PHASE35_RAM64_LEG'] = os.environ['VAULTIC_PHASE35_RAM64_LEG']
+                if os.environ.get('VAULTIC_PHASE35_PRODUCER_LEG'):
+                    environment['VAULTIC_PHASE35_PRODUCER_LEG'] = os.environ['VAULTIC_PHASE35_PRODUCER_LEG']
             elif parent_setup:
                 environment['VAULTIC_PHASE35_ORIGINAL_PARENT'] = '1'
                 environment.update({key: str(value) for key, value in SCALE800K_CHUNKS.items()})
@@ -887,6 +917,11 @@ def encryption_counter_deltas(first, last):
         after = last[name]
         if name == 'file_pipeline':
             result[name] = dependency_counter_deltas(before, after, ('admitting', 'active', 'awaiting_blobs', 'pending_blobs'))
+        elif name == 'traversal':
+            if before.keys() != after.keys():
+                raise ValueError('traversal counter stages changed')
+            result[name] = {stage: dependency_counter_deltas(values, after[stage], ())
+                            for stage, values in before.items()}
         elif name.endswith('latency_buckets'):
             latency_summary(before)
             latency_summary(after)
@@ -911,6 +946,11 @@ def bottleneck_report(critical):
     latencies['source_read'] = None if source is None else latency_summary(source.get('latency_buckets'), source.get('read_ns'))
     return {'latency': latencies, 'source_reads': source,
             'file_pipeline': None if source is None else source.get('file_pipeline'),
+            'traversal': None if source is None else source.get('traversal'),
+            'batch_readiness': {name: reconciliation[name] for name in
+                    ('collection_batches', 'collection_items', 'batch_first_to_last_ns',
+                     'batch_first_to_last_max_ns', 'prepared_queue_age_ns', 'batch_first_handoff_age_ns')
+                    if name in reconciliation},
             'blob_saves': critical.get('blob_saves'),
             'origin_logical_bytes': encryption.get('ciphertext_origin_bytes'),
             'chunk_misses': encryption.get('chunk_cache_misses'), 'chunk_evictions': encryption.get('chunk_cache_evictions'),
@@ -954,11 +994,15 @@ def bottleneck_windows(path):
                     source = encryption_counter_deltas(first, last) if first is not None and last is not None else None
                     first, last = previous.get('reconciliation', {}), current.get('reconciliation', {})
                     reconciliation = {}
-                    for name in ('scanned', 'writer_wait_prepared_ns', 'writer_batch_ns', 'stat_worker_ns', 'prepare_blocked_worker_ns'):
+                    for name in ('scanned', 'writer_wait_prepared_ns', 'writer_batch_ns', 'stat_worker_ns', 'prepare_blocked_worker_ns',
+                                 'collection_batches', 'collection_items', 'batch_first_to_last_ns',
+                                 'prepared_queue_age_ns', 'batch_first_handoff_age_ns'):
                         if name in first and name in last:
                             if last[name] < first[name]:
                                 raise ValueError('reconciliation observation counter reset')
                             reconciliation[name] = last[name] - first[name]
+                    if 'batch_first_to_last_max_ns' in last:
+                        reconciliation['batch_first_to_last_max_ns'] = last['batch_first_to_last_max_ns']
                     first_blobs, last_blobs = previous.get('blob_saves'), current.get('blob_saves')
                     blobs = dependency_counter_deltas(first_blobs, last_blobs, ('active', 'admission_active')) if first_blobs is not None and last_blobs is not None else None
                     window = bottleneck_report({'encryption_reads': encryption, 'source_reads': source,
@@ -992,18 +1036,33 @@ def bottleneck_windows(path):
             'causal_attribution_qualified': False}
 
 
+def followup_metadata_flags(settings, variant, inode_limit, root):
+    flags = [f"--read-concurrency={settings['readers']}",
+             f"--metadata-read-concurrency={settings['rpc_limit']}",
+             f"--metadata-batch-delay={settings['batch_delay_ns'] // 1000000}ms",
+             f"--metadata-publication-group-size={settings['publication_group_size']}"]
+    flags += reconciliation_flags(variant)
+    if inode_limit == 800000:
+        flags += ['--metadata-reconciliation-batch-size=5000', '--metadata-reconciliation-read-ahead=1']
+        if root.parent == PRODUCER_ROOT and producer_leg(root.name)[2] == 1:
+            flags.append('--read-open-in-workers')
+    return flags
+
+
 def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None):
     outcome = json.loads((root / 'outcome.json').read_text())
     measured = json.loads((root / 'group-64/forced/result.json').read_text())
     variant = root.name.rsplit('-', 1)[-1] if inode_limit == 400000 and root.parent in (RECONCILE_ROOT, CACHE_ROOT, PIPELINE_ROOT, RAM16_ROOT) else None
     settings = cache_profile_settings(profile, variant)
-    if root.parent in (READERS_ROOT, RAM64_ROOT):
+    if root.parent in (READERS_ROOT, RAM64_ROOT, PRODUCER_ROOT):
         if (profile, inode_limit) != ('db-scale800k', 800000):
             raise ValueError('reader receipt requires its exact 800k profile')
         if root.parent == READERS_ROOT:
             settings['readers'] = readers_leg(root.name)[2]
-        else:
+        elif root.parent == RAM64_ROOT:
             ram64_leg(root.name)
+        else:
+            producer_leg(root.name)
         launch = json.loads((root / 'launch-pins.json').read_text())
         require_original_backup_source(launch['source'])
         manifest = json.loads((root / 'inode-manifest.json').read_text())
@@ -1043,13 +1102,7 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
         raise ValueError('follow-up actual cache settings differ')
     if measured['crypto_threads_requested'] != str(settings['crypto_threads']):
         raise ValueError('follow-up actual crypto settings differ')
-    expected_flags = [f"--read-concurrency={settings['readers']}",
-                      f"--metadata-read-concurrency={settings['rpc_limit']}",
-                      f"--metadata-batch-delay={settings['batch_delay_ns'] // 1000000}ms",
-                      f"--metadata-publication-group-size={settings['publication_group_size']}"]
-    expected_flags += reconciliation_flags(variant)
-    if inode_limit == 800000:
-        expected_flags += ['--metadata-reconciliation-batch-size=5000', '--metadata-reconciliation-read-ahead=1']
+    expected_flags = followup_metadata_flags(settings, variant, inode_limit, root)
     if measured['metadata_read_flags'] != expected_flags or measured['candidate'] != str(expected_candidate or binaries(profile)[0]) or measured['engine_multi_get'] is not True:
         raise ValueError('follow-up binary, batching, concurrency or engine settings differ')
     before, after = measured['writer_before'], measured['writer_after']
@@ -1069,9 +1122,11 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
         else:
             deltas[field] = encryption_counter_deltas(first, last)
     critical = measured['critical_path']
-    identities = validated_source_identities(root, expected_entries) if root.parent in (READERS_ROOT, RAM64_ROOT) else None
-    if root.parent == RAM64_ROOT:
+    identities = validated_source_identities(root, expected_entries) if root.parent in (READERS_ROOT, RAM64_ROOT, PRODUCER_ROOT) else None
+    if root.parent in (RAM64_ROOT, PRODUCER_ROOT):
         require_dependency_coverage(critical, expected_regular)
+    if root.parent == PRODUCER_ROOT:
+        require_producer_coverage(critical, producer_leg(root.name)[2])
     if inode_limit == 800000:
         require_cache_reuse(critical['reconciliation'], expected_entries, None if identities is None else identities['metadata_records'])
         cpu = root / 'group-64/forced/cpu/cpu.pprof'
@@ -1372,6 +1427,59 @@ def require_dependency_coverage(critical, regular_files):
         raise ValueError('dependency diagnostics lack complete drained file/blob coverage')
 
 
+def require_producer_coverage(critical, worker_open, entries=800000):
+    metrics = critical['reconciliation']
+    if (metrics['collection_batch_size'] != 5000 or metrics['collection_read_ahead'] != 1
+            or metrics['collection_items'] != entries or metrics['collection_batches'] != math.ceil(entries / 5000)):
+        raise ValueError('producer collection configuration or coverage differs')
+    pipeline = critical['source_reads']['file_pipeline']
+    if worker_open not in (0, 1) or pipeline['worker_open_calls'] != pipeline['completed'] * worker_open:
+        raise ValueError('worker-opening mode or complete coverage differs')
+    for key in ('batch_first_to_last_ns', 'batch_first_to_last_max_ns', 'prepared_queue_age_ns', 'batch_first_handoff_age_ns'):
+        if type(metrics[key]) is not int or metrics[key] <= 0:
+            raise ValueError('missing producer batch readiness timing')
+    if (metrics['batch_first_to_last_max_ns'] > metrics['batch_first_to_last_ns']
+            or metrics['batch_first_handoff_age_ns'] < metrics['batch_first_to_last_ns']):
+        raise ValueError('inconsistent producer batch timing')
+    traversal = critical['source_reads']['traversal']
+    if set(traversal) != {'previous_node', 'open_metadata', 'open_content', 'stat_metadata', 'node_metadata', 'directory', 'load_subtree'}:
+        raise ValueError('producer traversal stages differ')
+    for stage in traversal.values():
+        if set(stage) != {'calls', 'ns'} or any(type(value) is not int or value <= 0 for value in stage.values()):
+            raise ValueError('missing producer traversal timing')
+
+
+def producer_comparison_report(rows):
+    if [row['worker_open'] for row in rows] != list(PRODUCER_SCHEDULE):
+        raise ValueError('producer comparison requires its exact ABBA/BAAB schedule')
+    identities = rows[0]['source_identities']
+    require_original_backup_source(identities['source'])
+    for index, row in enumerate(rows, 1):
+        label = f"leg-{index:02d}-open{row['worker_open']}"
+        if (row['leg'] != label or row['entries'] != 800000 or row['source_identities'] != identities
+                or row['chunk_settings'] != SCALE800K_CHUNKS or row['settings'] != cache_profile_settings('db-scale800k')
+                or not math.isfinite(row['main_seconds']) or row['main_seconds'] <= 0):
+            raise ValueError('producer comparison changed identity, scope or another setting')
+        producer_leg(label)
+    brackets = []
+    for block in (rows, rows[:4], rows[4:]):
+        medians = {}
+        for enabled in (0, 1):
+            selected = [row for row in block if row['worker_open'] == enabled]
+            medians[str(enabled)] = {
+                'main_seconds': statistics.median(row['main_seconds'] for row in selected),
+                'origin_bytes': statistics.median(row['main_encryption']['ciphertext_origin_bytes'] for row in selected),
+                'peak_rss_bytes': statistics.median(row['peak_combined_rss_bytes'] for row in selected),
+                'cli_cpu_seconds': statistics.median(row['cli_cpu_seconds'] for row in selected)}
+        brackets.append({'schedule': [row['worker_open'] for row in block], 'medians': medians,
+                         'observed_speedup': medians['0']['main_seconds'] / medians['1']['main_seconds']})
+    return {'accepted': True, 'rows': rows, 'schedule': list(PRODUCER_SCHEDULE), 'replicates_per_mode': 4,
+            'overall': brackets[0], 'balanced_brackets': brackets[1:], 'same_optimized_cli_and_native': True,
+            'causal_speedup_claim': False, 'physical_nfs_traffic_measured': False, 'production_modified': False,
+            'larger_database_growth_qualified': False,
+            'single_pass_sustained_qualified': all(row['main_seconds'] >= 600 for row in rows)}
+
+
 def ram32_comparison_report(rows, ram64=False):
     schedule = RAM64_SCHEDULE if ram64 else RAM32_SCHEDULE
     leg = ram64_leg if ram64 else ram32_leg
@@ -1447,16 +1555,17 @@ def readers_comparison_report(rows):
             'single_pass_sustained_qualified': all(row['main_seconds'] >= 600 for row in rows)}
 
 
-def execute_ram32_series(readers=False, ram64=False):
-    if readers and ram64:
+def execute_ram32_series(readers=False, ram64=False, producer=False):
+    if sum((readers, ram64, producer)) > 1:
         raise ValueError('cache and reader comparisons must be separate')
-    original = readers or ram64
+    original = readers or ram64 or producer
     require_original_backup_source(SCALE_SOURCE if original else SCALE800K_PARENT / 'input')
-    series, bundle, schedule = ((RAM64_ROOT, RAM64_BIN, RAM64_SCHEDULE) if ram64 else
-                                ((READERS_ROOT, READERS_BIN, READERS_SCHEDULE) if readers else (RAM32_ROOT, RAM32_BIN, RAM32_SCHEDULE)))
-    leg_environment = 'VAULTIC_PHASE35_RAM64_LEG' if ram64 else ('VAULTIC_PHASE35_READERS_LEG' if readers else 'VAULTIC_PHASE35_RAM32_LEG')
-    receipt_field = 'ram64_leg' if ram64 else ('readers_leg' if readers else 'ram32_leg')
-    if any(os.environ.get(key) for key in ('VAULTIC_PHASE35_READERS_LEG', 'VAULTIC_PHASE35_RAM32_LEG', 'VAULTIC_PHASE35_RAM64_LEG')):
+    series, bundle, schedule = ((PRODUCER_ROOT, PRODUCER_BIN, PRODUCER_SCHEDULE) if producer else
+                               ((RAM64_ROOT, RAM64_BIN, RAM64_SCHEDULE) if ram64 else
+                                ((READERS_ROOT, READERS_BIN, READERS_SCHEDULE) if readers else (RAM32_ROOT, RAM32_BIN, RAM32_SCHEDULE))))
+    leg_environment = 'VAULTIC_PHASE35_PRODUCER_LEG' if producer else ('VAULTIC_PHASE35_RAM64_LEG' if ram64 else ('VAULTIC_PHASE35_READERS_LEG' if readers else 'VAULTIC_PHASE35_RAM32_LEG'))
+    receipt_field = 'producer_leg' if producer else ('ram64_leg' if ram64 else ('readers_leg' if readers else 'ram32_leg'))
+    if any(os.environ.get(key) for key in ('VAULTIC_PHASE35_READERS_LEG', 'VAULTIC_PHASE35_RAM32_LEG', 'VAULTIC_PHASE35_RAM64_LEG', 'VAULTIC_PHASE35_PRODUCER_LEG')):
         raise ValueError('series launcher must not inherit an individual leg')
     if series.exists() or series.parent.resolve() != series.parent:
         raise ValueError('refuse existing or noncanonical 800k series')
@@ -1481,7 +1590,7 @@ def execute_ram32_series(readers=False, ram64=False):
     with private_output(series / '.nobackup') as output:
         output.write(MARKER)
     pilot.write_json(series / 'launch-pins.json', {'pins': pins, 'schedule': list(schedule),
-                     'experiment': 'content-readers' if readers else 'chunk-cache-capacity',
+                     'experiment': 'producer-worker-open' if producer else ('content-readers' if readers else 'chunk-cache-capacity'),
                      'parent': str(parent_root), 'entries': 800000, 'process_cache_state': 'fresh daemon per leg',
                      'host_cache_state': 'uncontrolled; balanced ordering; no host cache dropping',
                      'same_optimized_cli_and_native': True, 'ordinary_backend_policies_unchanged': True,
@@ -1492,8 +1601,11 @@ def execute_ram32_series(readers=False, ram64=False):
         for index, value in enumerate(schedule, 1):
             if any(pilot.digest(Path(path)) != expected for path, expected in pins.items()):
                 raise ValueError('800k series source, artifact or parent receipt pin changed')
-            label = f'leg-{index:02d}-r{value}' if readers else f'leg-{index:02d}-{value}g'
-            if ram64:
+            label = f'leg-{index:02d}-open{value}' if producer else (f'leg-{index:02d}-r{value}' if readers else f'leg-{index:02d}-{value}g')
+            if producer:
+                root, runtime, _ = producer_leg(label)
+                chunks = dict(SCALE800K_CHUNKS)
+            elif ram64:
                 root, runtime, chunks = ram64_leg(label)
             elif readers:
                 root, runtime, _ = readers_leg(label)
@@ -1535,7 +1647,7 @@ def execute_ram32_series(readers=False, ram64=False):
                 raise ValueError('800k series report replay or private-runtime cleanup differs')
             subprocess.run(['sha256sum', '-c', 'FOLLOWUP-SHA256SUMS'], cwd=root, check=True,
                            stdout=subprocess.DEVNULL)
-            row.update({'readers' if readers else 'cache_gib': value, 'leg': label, 'chunk_settings': chunks})
+            row.update({'worker_open' if producer else ('readers' if readers else 'cache_gib'): value, 'leg': label, 'chunk_settings': chunks})
             for mode in ('flat', 'cumulative'):
                 command = ['go', 'tool', 'pprof', '-top', '-nodecount=35']
                 if mode == 'cumulative':
@@ -1550,7 +1662,7 @@ def execute_ram32_series(readers=False, ram64=False):
                               'peak_rss_bytes': row['peak_combined_rss_bytes']}), flush=True)
         if any(pilot.digest(Path(path)) != expected for path, expected in pins.items()):
             raise ValueError('800k series pins changed before final report')
-        report = readers_comparison_report(rows) if readers else ram32_comparison_report(rows, ram64=ram64)
+        report = producer_comparison_report(rows) if producer else (readers_comparison_report(rows) if readers else ram32_comparison_report(rows, ram64=ram64))
         pilot.write_json(series / 'verified-comparison.json', report)
         with private_output(series / 'SERIES-SHA256SUMS', text=True) as output:
             for path in sorted(series.iterdir()):
@@ -1712,6 +1824,68 @@ def execute_chunk_series(immutable=False, reconcile=False, caches=False, pipelin
 
 
 class ChunkComparisonTests(unittest.TestCase):
+    def test_producer_routes_and_opening_isolation(self):
+        self.assertNotEqual(PRODUCER_SCHEDULE[:4], PRODUCER_SCHEDULE[4:])
+        for index, enabled in enumerate(PRODUCER_SCHEDULE, 1):
+            label = f'leg-{index:02d}-open{enabled}'
+            root, runtime, got = producer_leg(label)
+            self.assertEqual(got, enabled)
+            self.assertEqual(root.parent, PRODUCER_ROOT)
+            self.assertTrue(str(runtime).startswith('/run/vaultic-unchanged-ncl1-open800k-'))
+            with patch.dict(os.environ, {'VAULTIC_PHASE35_PRODUCER_LEG': label}):
+                self.assertEqual(paths('coalesced', 800000, 'db-scale800k'), (root, runtime))
+                self.assertEqual(binaries('db-scale800k'), (PRODUCER_BIN / 'vaultic', PRODUCER_BIN / 'vaulticdb'))
+                self.assertEqual(scale800k_chunks(), SCALE800K_CHUNKS)
+                self.assertEqual(profile_settings('db-scale800k')['readers'], 128)
+                self.assertEqual(followup_metadata_flags(profile_settings('db-scale800k'), None, 800000, root),
+                                 ['--read-concurrency=128', '--metadata-read-concurrency=32', '--metadata-batch-delay=1ms',
+                                  '--metadata-publication-group-size=64', '--metadata-reconciliation-batch-size=5000',
+                                  '--metadata-reconciliation-read-ahead=1'] + (['--read-open-in-workers'] if enabled else []))
+                with self.assertRaises(ValueError):
+                    paths('coalesced', 400000, 'db-scale400k')
+                with patch.dict(os.environ, {'VAULTIC_PHASE35_RAM64_LEG': 'leg-01-16g'}):
+                    with self.assertRaises(ValueError):
+                        producer_leg(label)
+            with self.assertRaises(ValueError):
+                producer_leg(label + '/retry')
+
+    def test_producer_report_rejects_order_and_identity_drift(self):
+        rows = []
+        for index, enabled in enumerate(PRODUCER_SCHEDULE, 1):
+            rows.append({'worker_open': enabled, 'leg': f'leg-{index:02d}-open{enabled}', 'entries': 800000,
+                         'source_identities': {'source': str(SCALE_SOURCE), 'entries': 800000, 'metadata_records': 799076},
+                         'settings': cache_profile_settings('db-scale800k'), 'chunk_settings': dict(SCALE800K_CHUNKS),
+                         'main_seconds': 400, 'main_encryption': {'ciphertext_origin_bytes': 100},
+                         'peak_combined_rss_bytes': 1, 'cli_cpu_seconds': 2})
+        self.assertEqual(producer_comparison_report(rows)['replicates_per_mode'], 4)
+        with self.assertRaises(ValueError):
+            producer_comparison_report(list(reversed(rows)))
+        rows[0]['source_identities'] = dict(rows[0]['source_identities'], metadata_records=800000)
+        with self.assertRaises(ValueError):
+            producer_comparison_report(rows)
+
+    def test_producer_coverage_rejects_missing_or_inconsistent_timing(self):
+        metrics = {'collection_batch_size': 5000, 'collection_read_ahead': 1, 'collection_items': 10,
+                   'collection_batches': 1, 'batch_first_to_last_ns': 3, 'batch_first_to_last_max_ns': 2,
+                   'prepared_queue_age_ns': 4, 'batch_first_handoff_age_ns': 5}
+        traversal = {name: {'calls': 1, 'ns': 1} for name in
+                     ('previous_node', 'open_metadata', 'open_content', 'stat_metadata', 'node_metadata', 'directory', 'load_subtree')}
+        critical = {'reconciliation': metrics, 'source_reads': {'traversal': traversal,
+                    'file_pipeline': {'completed': 9, 'worker_open_calls': 9}}}
+        require_producer_coverage(critical, 1, 10)
+        with self.assertRaises(ValueError):
+            require_producer_coverage(critical, 0, 10)
+        for key, value in (('collection_items', 9), ('collection_batches', 2),
+                           ('batch_first_to_last_max_ns', 4), ('batch_first_handoff_age_ns', 1)):
+            previous = metrics[key]
+            metrics[key] = value
+            with self.assertRaises(ValueError):
+                require_producer_coverage(critical, 1, 10)
+            metrics[key] = previous
+        traversal['previous_node']['ns'] = 0
+        with self.assertRaises(ValueError):
+            require_producer_coverage(critical, 1, 10)
+
     def test_ram64_routes_and_capacity_isolation(self):
         baseline = cache_profile_settings('db-scale800k')
         self.assertEqual(baseline['readers'], 128)
@@ -1758,10 +1932,17 @@ class ChunkComparisonTests(unittest.TestCase):
             ram32_comparison_report(rows, ram64=True)
 
     def test_nested_dependency_deltas_preserve_live_gauges(self):
-        before = {'calls': 1, 'file_pipeline': {'scheduled': 1, 'active': 5}}
-        after = {'calls': 3, 'file_pipeline': {'scheduled': 4, 'active': 2}}
+        before = {'calls': 1, 'file_pipeline': {'scheduled': 1, 'active': 5},
+                  'traversal': {'previous_node': {'calls': 1, 'ns': 2}}}
+        after = {'calls': 3, 'file_pipeline': {'scheduled': 4, 'active': 2},
+                 'traversal': {'previous_node': {'calls': 3, 'ns': 9}}}
         self.assertEqual(encryption_counter_deltas(before, after),
-                         {'calls': 2, 'file_pipeline': {'scheduled': 3, 'active': 2}})
+                         {'calls': 2, 'file_pipeline': {'scheduled': 3, 'active': 2},
+                          'traversal': {'previous_node': {'calls': 2, 'ns': 7}}})
+        after['traversal']['previous_node']['ns'] = 1
+        with self.assertRaises(ValueError):
+            encryption_counter_deltas(before, after)
+        after['traversal']['previous_node']['ns'] = 9
         after['file_pipeline']['scheduled'] = 0
         with self.assertRaises(ValueError):
             encryption_counter_deltas(before, after)
@@ -2357,6 +2538,7 @@ if __name__ == '__main__':
     parser.add_argument('--ram16-series', action='store_true')
     parser.add_argument('--ram32-series', action='store_true')
     parser.add_argument('--ram64-series', action='store_true')
+    parser.add_argument('--producer-series', action='store_true')
     parser.add_argument('--readers-series', action='store_true')
     parser.add_argument('--original-parent', action='store_true')
     parser.add_argument('--prepare-cache-parent', action='store_true')
@@ -2370,7 +2552,7 @@ if __name__ == '__main__':
         if ((arguments.mode, arguments.inode_limit, arguments.concurrency_profile) != ('coalesced', 800000, 'db-scale800k')
                 or any((arguments.series, arguments.chunk_series, arguments.immutable_series, arguments.reconcile_series,
                         arguments.cache_series, arguments.pipeline_series, arguments.ram16_series, arguments.ram32_series,
-                        arguments.readers_series, arguments.ram64_series, arguments.prepare_cache_parent, arguments.chunk_self_test,
+                        arguments.readers_series, arguments.ram64_series, arguments.producer_series, arguments.prepare_cache_parent, arguments.chunk_self_test,
                         arguments.chunk_leg is not None))):
             raise ValueError('original parent requires its exclusive coalesced 800k route')
         with patch.dict(os.environ, {'VAULTIC_PHASE35_ORIGINAL_PARENT': '1'}):
@@ -2378,15 +2560,15 @@ if __name__ == '__main__':
                 prepare(arguments.mode, arguments.inode_limit, arguments.concurrency_profile)
             else:
                 raise SystemExit(execute(arguments.mode, arguments.inode_limit, arguments.concurrency_profile))
-    elif arguments.ram32_series or arguments.readers_series or arguments.ram64_series:
+    elif arguments.ram32_series or arguments.readers_series or arguments.ram64_series or arguments.producer_series:
         if ((arguments.mode, arguments.inode_limit, arguments.concurrency_profile) != ('coalesced', 800000, 'db-scale800k')
-                or sum((arguments.ram32_series, arguments.readers_series, arguments.ram64_series)) != 1
+                or sum((arguments.ram32_series, arguments.readers_series, arguments.ram64_series, arguments.producer_series)) != 1
                 or any((arguments.prepare, arguments.series, arguments.chunk_series, arguments.immutable_series,
                         arguments.reconcile_series, arguments.cache_series, arguments.pipeline_series,
                         arguments.ram16_series, arguments.prepare_cache_parent, arguments.chunk_self_test,
                         arguments.chunk_leg is not None))):
             raise ValueError('800k series requires its exclusive route')
-        execute_ram32_series(readers=arguments.readers_series, ram64=arguments.ram64_series)
+        execute_ram32_series(readers=arguments.readers_series, ram64=arguments.ram64_series, producer=arguments.producer_series)
     elif arguments.prepare_cache_parent:
         if (arguments.mode, arguments.inode_limit, arguments.concurrency_profile) != ('coalesced', 400000, 'db-scale400k') or any((arguments.prepare, arguments.series, arguments.chunk_series, arguments.immutable_series, arguments.reconcile_series, arguments.cache_series, arguments.pipeline_series, arguments.ram16_series, arguments.chunk_self_test, arguments.chunk_leg is not None)):
             raise ValueError('cache parent preparation requires its fixed isolated 400k routing')

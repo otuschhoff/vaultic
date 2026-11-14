@@ -2,6 +2,7 @@ package archiver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -67,6 +68,138 @@ func TestMeasuredSourceReader(t *testing.T) {
 	reader.reader = iotest.ErrReader(fmt.Errorf("source failure"))
 	if _, err := reader.Read(make([]byte, 1)); err == nil || counters.snapshot().Errors != 1 {
 		t.Fatal("source read error was lost")
+	}
+}
+
+func TestTraversalMetrics(t *testing.T) {
+	root := t.TempDir()
+	arch := &Archiver{FS: fs.NewLocal()}
+	meta, err := arch.openMetadata(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer meta.Close()
+	if _, err := arch.statMetadata(meta); err != nil {
+		t.Fatal(err)
+	}
+	contentMeta, err := arch.FS.OpenFile(root, fs.O_NOFOLLOW, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer contentMeta.Close()
+	if err := arch.openContent(contentMeta); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := arch.dirToNodeAndEntries("/", root, meta); err != nil {
+		t.Fatal(err)
+	}
+	finder := data.NewTreeFinder(nil)
+	defer finder.Close()
+	if _, err := arch.findPreviousNode(finder, "absent"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := arch.loadSubtree(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	metrics := arch.SourceReadMetrics()
+	for _, stage := range []TraversalStageMetrics{metrics.Traversal.OpenMetadata, metrics.Traversal.OpenContent, metrics.Traversal.StatMetadata, metrics.Traversal.Directory, metrics.Traversal.NodeMetadata, metrics.Traversal.PreviousNode, metrics.Traversal.LoadSubtree} {
+		if stage.Calls != 1 || stage.Nanoseconds == 0 {
+			t.Fatalf("missing traversal stage: %+v", metrics)
+		}
+	}
+	if metrics.Calls != 0 || metrics.Bytes != 0 || metrics.Traversal.Delta(metrics.Traversal) != (TraversalMetrics{}) {
+		t.Fatalf("traversal changed source read counters or delta: %+v", metrics)
+	}
+}
+
+func TestFileSaverWorkerOpen(t *testing.T) {
+	filename := createTestFiles(t, 1)[0]
+	filesystem := fs.NewLocal()
+	arch := &Archiver{FS: filesystem}
+	saver, _, ctx, workers := startFileSaver(t.Context(), t, filesystem)
+	saver.sourceReads = &arch.sourceReads
+	saver.PrepareFile = arch.prepareFile
+	file, err := filesystem.OpenFile(filename, fs.O_NOFOLLOW, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	future := saver.Save(ctx, filename, filename, file, func() {}, func() {}, func(*data.Node, ItemStats) {})
+	result := future.take(ctx)
+	if result.err != nil || result.node == nil || result.node.Type != data.NodeTypeFile || result.node.Size != uint64(len(filepath.Base(filename))) {
+		t.Fatalf("worker opening changed the saved file: %+v", result)
+	}
+	saver.TriggerShutdown()
+	if err := workers.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	metrics := arch.SourceReadMetrics()
+	if metrics.FilePipeline.WorkerOpenCalls != 1 || metrics.Traversal.OpenContent.Calls != 1 || metrics.Traversal.StatMetadata.Calls != 1 || metrics.FilePipeline.Errors != 0 {
+		t.Fatalf("worker opening was not attributed: %+v", metrics)
+	}
+}
+
+func TestPrepareFileSafety(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("canceled=%t", canceled), func(t *testing.T) {
+			filename := createTestFiles(t, 1)[0]
+			arch := &Archiver{FS: fs.NewLocal()}
+			file, err := arch.FS.OpenFile(filename, fs.O_NOFOLLOW, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer file.Close()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if canceled {
+				cancel()
+			} else {
+				if err := os.Remove(filename); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(filename, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err = arch.prepareFile(ctx, filename, file)
+			if canceled {
+				if !errors.Is(err, context.Canceled) || arch.SourceReadMetrics().Traversal.OpenContent.Calls != 0 {
+					t.Fatalf("canceled preparation opened content or lost error: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), filename) || !strings.Contains(err.Error(), "changed type") {
+				t.Fatalf("post-open type change was not rejected with its source path: %v", err)
+			}
+		})
+	}
+}
+
+func TestFileSaverPreparationFailure(t *testing.T) {
+	filename := createTestFiles(t, 1)[0]
+	filesystem := fs.NewLocal()
+	saver, _, ctx, workers := startFileSaver(t.Context(), t, filesystem)
+	failure := errors.New("injected file preparation failure")
+	saver.PrepareFile = func(context.Context, string, fs.File) error { return failure }
+	file, err := filesystem.OpenFile(filename, os.O_RDONLY, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var completed int
+	future := saver.Save(ctx, filename, filename, file, func() {}, func() {
+		t.Error("preparation failure completed reading")
+	}, func(*data.Node, ItemStats) { completed++ })
+	result := future.take(ctx)
+	if !errors.Is(result.err, failure) || result.node != nil || completed != 1 {
+		t.Fatalf("preparation error or completion changed: result=%+v completed=%d", result, completed)
+	}
+	if _, err := file.Read(make([]byte, 1)); err == nil {
+		t.Fatal("preparation failure left the source handle open")
+	}
+	saver.TriggerShutdown()
+	if err := workers.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	metrics := saver.sourceReads.snapshot()
+	if metrics.Calls != 0 || metrics.FilePipeline.Started != 1 || metrics.FilePipeline.Completed != 1 || metrics.FilePipeline.Errors != 1 || metrics.FilePipeline.Active != 0 {
+		t.Fatalf("preparation failure did not drain: %+v", metrics)
 	}
 }
 

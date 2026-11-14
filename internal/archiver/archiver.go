@@ -173,6 +173,7 @@ type Options struct {
 	// it's set to zero, at most two files are read in concurrently (which
 	// turned out to be a good default for most situations).
 	ReadConcurrency          uint
+	OpenFilesInWorkers       bool
 	UnchangedReadConcurrency uint
 
 	// SaveTreeConcurrency sets how many trees are marshalled and saved to the
@@ -301,6 +302,7 @@ func (arch *Archiver) reconcileNode(snapshotPath, sourcePath string, node *data.
 
 // nodeFromFileInfo returns the vaultic node from an os.FileInfo.
 func (arch *Archiver) nodeFromFileInfo(snPath, filename string, meta toNoder, ignoreXattrListError bool) (*data.Node, error) {
+	defer arch.sourceReads.traversal.nodeMetadata.record(time.Now())
 	node, err := meta.ToNode(ignoreXattrListError, func(format string, args ...any) {
 		_ = arch.error(filename, fmt.Errorf(format, args...)) // The callback itself records the item failure.
 	})
@@ -333,6 +335,7 @@ func (arch *Archiver) nodeFromFileInfo(snPath, filename string, meta toNoder, ig
 // loadSubtree tries to load the subtree referenced by node. In case of an error, nil is returned.
 // If there is no node to load, then nil is returned without an error.
 func (arch *Archiver) loadSubtree(ctx context.Context, node *data.Node) (data.TreeNodeIterator, error) {
+	defer arch.sourceReads.traversal.loadSubtree.record(time.Now())
 	if node == nil || node.Type != data.NodeTypeDir || node.Subtree == nil {
 		return nil, nil
 	}
@@ -401,7 +404,7 @@ func (arch *Archiver) saveDir(
 		}
 
 		pathname := arch.FS.Join(dir, name)
-		oldNode, err := finder.Find(name)
+		oldNode, err := arch.findPreviousNode(finder, name)
 		err = arch.error(pathname, err)
 		if err != nil {
 			return futureNode{}, err
@@ -439,6 +442,7 @@ func (arch *Archiver) saveDir(
 }
 
 func (arch *Archiver) openMetadata(target string) (fs.File, error) {
+	defer arch.sourceReads.traversal.openMetadata.record(time.Now())
 	if provider, ok := arch.cwalkManifest.(interface {
 		OpenMetadata(string) (fs.File, bool, error)
 	}); ok {
@@ -450,6 +454,7 @@ func (arch *Archiver) openMetadata(target string) (fs.File, error) {
 }
 
 func (arch *Archiver) dirToNodeAndEntries(snPath, dir string, meta fs.File) (node *data.Node, names []string, err error) {
+	defer arch.sourceReads.traversal.directory.record(time.Now())
 	node, err = arch.nodeFromFileInfo(snPath, dir, meta, false)
 	if err != nil {
 		return nil, nil, err
@@ -647,7 +652,7 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 	}()
 
 	// get file info and run remaining select functions that require file information
-	fi, err := meta.Stat()
+	fi, err := arch.statMetadata(meta)
 	if err != nil {
 		debug.Log("lstat() for %v returned error: %v", target, err)
 		// ignore if file disappeared since it was returned by readdir
@@ -836,17 +841,10 @@ func (arch *Archiver) saveRegularFile(
 func (arch *Archiver) readRegularFile(ctx context.Context, snPath, target string, meta fs.File, previous *data.Node,
 	start time.Time, closeFile *bool, filterError func(error) (futureNode, bool, error),
 ) (futureNode, bool, error) {
-	if err := meta.MakeReadable(); err != nil {
-		debug.Log("MakeReadable() for %v returned error: %v", target, err)
-		return filterError(err)
-	}
-	fileInfo, err := meta.Stat()
-	if err != nil {
-		debug.Log("stat() on opened file %v returned error: %v", target, err)
-		return filterError(err)
-	}
-	if !fileInfo.Mode.IsRegular() {
-		return filterError(errors.Errorf("file %q changed type, refusing to archive", target))
+	if !arch.Options.OpenFilesInWorkers {
+		if err := arch.prepareFile(ctx, target, meta); err != nil {
+			return filterError(err)
+		}
 	}
 	*closeFile = false
 	future := arch.fileSaver.Save(ctx, snPath, target, meta, func() {
@@ -952,7 +950,7 @@ func (arch *Archiver) saveTreeChild(
 	finder *data.TreeFinder,
 ) (futureNode, bool, error) {
 	pathname := join(snapshotPath, name)
-	oldNode, err := finder.Find(name)
+	oldNode, err := arch.findPreviousNode(finder, name)
 	if subtree.Leaf() {
 		return arch.saveTreeLeaf(ctx, pathname, subtree, oldNode, err)
 	}
@@ -1003,6 +1001,38 @@ func (arch *Archiver) saveTreeLeaf(
 		return futureNode{}, false, nil
 	}
 	return child, !excluded, nil
+}
+
+func (arch *Archiver) prepareFile(ctx context.Context, target string, meta fs.File) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := arch.openContent(meta); err != nil {
+		return err
+	}
+	info, err := arch.statMetadata(meta)
+	if err != nil {
+		return err
+	}
+	if !info.Mode.IsRegular() {
+		return errors.Errorf("file %q changed type, refusing to archive", target)
+	}
+	return nil
+}
+
+func (arch *Archiver) openContent(meta fs.File) error {
+	defer arch.sourceReads.traversal.openContent.record(time.Now())
+	return meta.MakeReadable()
+}
+
+func (arch *Archiver) statMetadata(meta fs.File) (*fs.ExtendedFileInfo, error) {
+	defer arch.sourceReads.traversal.statMetadata.record(time.Now())
+	return meta.Stat()
+}
+
+func (arch *Archiver) findPreviousNode(finder *data.TreeFinder, name string) (*data.Node, error) {
+	defer arch.sourceReads.traversal.previousNode.record(time.Now())
+	return finder.Find(name)
 }
 
 func (arch *Archiver) dirPathToNode(snPath, target string) (node *data.Node, err error) {
@@ -1129,6 +1159,9 @@ func (arch *Archiver) runWorkers(ctx context.Context, wg *errgroup.Group, upload
 	arch.fileSaver.CompleteBlob = arch.CompleteBlob
 	arch.fileSaver.NodeFromFileInfo = arch.nodeFromFileInfo
 	arch.fileSaver.sourceReads = &arch.sourceReads
+	if arch.Options.OpenFilesInWorkers {
+		arch.fileSaver.PrepareFile = arch.prepareFile
+	}
 	if arch.Options.UnchangedReadConcurrency > 0 {
 		jobs := make(chan func(context.Context))
 		arch.validationJobs = jobs

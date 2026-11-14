@@ -884,9 +884,68 @@ const publicationOriginal800kParent = "/volume2/NASDA2/vaultic-test-m6/ncl1-pare
 const publicationOriginal800kBin = "/root/proj/vaultic/bin/phase35-ncl1-readers800k-20261111-retry3/linux-amd64"
 const publicationRAM64800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-ram64-fme-cae1-20261112-800k"
 const publicationRAM64800kBin = "/root/proj/vaultic/bin/phase35-ncl1-ram64800k-20261112/linux-amd64"
+const publicationProducer800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-open-fme-cae1-20261113-800k"
+const publicationProducer800kBin = "/root/proj/vaultic/bin/phase35-ncl1-open800k-20261113/linux-amd64"
 
 func publicationOriginalSourceLeg() bool {
-	return os.Getenv("VAULTIC_PHASE35_READERS_LEG") != "" || os.Getenv("VAULTIC_PHASE35_RAM64_LEG") != ""
+	return os.Getenv("VAULTIC_PHASE35_READERS_LEG") != "" || os.Getenv("VAULTIC_PHASE35_RAM64_LEG") != "" || os.Getenv("VAULTIC_PHASE35_PRODUCER_LEG") != ""
+}
+
+func publicationProducerLeg(root, label string) (int, error) {
+	for _, key := range []string{"VAULTIC_PHASE35_READERS_LEG", "VAULTIC_PHASE35_RAM32_LEG", "VAULTIC_PHASE35_RAM64_LEG", "VAULTIC_PHASE35_ORIGINAL_PARENT"} {
+		if os.Getenv(key) != "" {
+			return 0, fmt.Errorf("producer comparison cannot be combined with another experiment")
+		}
+	}
+	for index, enabled := range []int{0, 1, 1, 0, 1, 0, 0, 1} {
+		expected := fmt.Sprintf("leg-%02d-open%d", index+1, enabled)
+		if label == expected && root == filepath.Join(publicationProducer800kRoot, expected) {
+			return enabled, nil
+		}
+	}
+	return 0, fmt.Errorf("producer comparison requires its exact scheduled private leg")
+}
+
+func TestPublicationProducerPolicy(t *testing.T) {
+	for _, key := range []string{"VAULTIC_PHASE35_READERS_LEG", "VAULTIC_PHASE35_RAM32_LEG", "VAULTIC_PHASE35_RAM64_LEG", "VAULTIC_PHASE35_ORIGINAL_PARENT", "VAULTIC_PHASE35_PRODUCER_LEG"} {
+		t.Setenv(key, "")
+	}
+	baseline, err := publicationDBProfile("db-scale800k")
+	rtest.OK(t, err)
+	for index, enabled := range []int{0, 1, 1, 0, 1, 0, 0, 1} {
+		label := fmt.Sprintf("leg-%02d-open%d", index+1, enabled)
+		root := filepath.Join(publicationProducer800kRoot, label)
+		got, err := publicationProducerLeg(root, label)
+		rtest.OK(t, err)
+		if got != enabled {
+			t.Fatal("producer opening routing differs")
+		}
+		if _, err := publicationProducerLeg(root+"/retry", label); err == nil {
+			t.Fatal("producer comparison accepted a child path")
+		}
+		t.Setenv("VAULTIC_PHASE35_PRODUCER_LEG", label)
+		t.Setenv("VAULTIC_PHASE35_THROUGHPUT_ROOT", root)
+		tuning, err := publicationDBProfile("db-scale800k")
+		rtest.OK(t, err)
+		want := slices.Clone(baseline.Flags)
+		if enabled == 1 {
+			want = append(want, "--read-open-in-workers")
+		}
+		if !slices.Equal(tuning.Flags, want) || tuning.MetaCacheBytes != baseline.MetaCacheBytes || tuning.BlockCacheBytes != baseline.BlockCacheBytes || tuning.CryptoThreads != baseline.CryptoThreads {
+			t.Fatal("producer comparison changed another setting")
+		}
+		command := backupcmd.NewCommand(&global.Options{})
+		rtest.OK(t, command.ParseFlags(tuning.Flags))
+		workerOpen, err := command.Flags().GetBool("read-open-in-workers")
+		rtest.OK(t, err)
+		if workerOpen != (enabled == 1) {
+			t.Fatal("actual worker-opening flag differs")
+		}
+	}
+	t.Setenv("VAULTIC_PHASE35_RAM64_LEG", "leg-01-16g")
+	if _, err := publicationDBProfile("db-scale800k"); err == nil {
+		t.Fatal("producer comparison accepted simultaneous cache tuning")
+	}
 }
 
 func publicationRAM64Leg(root, label string) (int, error) {
@@ -1383,6 +1442,14 @@ func publicationQualificationPreflightArgs(backupArgs []string) []string {
 }
 
 func TestBoundedSourceRoundTrip(t *testing.T) {
+	for _, workerOpen := range []bool{false, true} {
+		t.Run(fmt.Sprintf("worker-open=%t", workerOpen), func(t *testing.T) {
+			testBoundedSourceRoundTrip(t, workerOpen)
+		})
+	}
+}
+
+func testBoundedSourceRoundTrip(t *testing.T, workerOpen bool) {
 	environment, cleanup := withTestEnvironment(t)
 	defer cleanup()
 	testSetupBackupData(t, environment)
@@ -1409,7 +1476,7 @@ func TestBoundedSourceRoundTrip(t *testing.T) {
 		return command.Execute()
 	}))
 	testListSnapshots(t, environment.globalOptions, 0)
-	testRunBackup(t, "", []string{source}, backupOptions{BoundedInodeManifest: filename, Force: true, UseCWalk: true, CWalkConcurrency: 4}, environment.globalOptions)
+	testRunBackup(t, "", []string{source}, backupOptions{BoundedInodeManifest: filename, Force: true, UseCWalk: true, CWalkConcurrency: 4, OpenFilesInWorkers: workerOpen}, environment.globalOptions)
 	ids := testListSnapshots(t, environment.globalOptions, 1)
 	snapshot := testLoadSnapshot(t, environment.globalOptions, ids[0])
 	if snapshot.CrawlPlan == nil || snapshot.CrawlPlan.Mode != "bounded" {
@@ -2457,6 +2524,15 @@ func publicationDBProfile(profile string) (publicationDBTuning, error) {
 			}
 		}
 		tuning.Flags = append(tuning.Flags, "--metadata-reconciliation-batch-size=5000", "--metadata-reconciliation-read-ahead=1")
+		if label := os.Getenv("VAULTIC_PHASE35_PRODUCER_LEG"); label != "" {
+			enabled, err := publicationProducerLeg(os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT"), label)
+			if err != nil {
+				return publicationDBTuning{}, err
+			}
+			if enabled == 1 {
+				tuning.Flags = append(tuning.Flags, "--read-open-in-workers")
+			}
+		}
 	case "db-group64", "db-group64-end", "db-hot-control", "db-hot-control-end", "db-read64-end":
 		tuning.MetaCacheBytes = 2 << 30
 	case "db-group16", "db-group32":
@@ -2646,6 +2722,11 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 		expectedLimit := "50000"
 		if profile == "db-scale800k" {
 			previous, expectedRoot, expectedLimit = publicationScale800kParent, publicationScale800kRoot, "800000"
+			if label := os.Getenv("VAULTIC_PHASE35_PRODUCER_LEG"); label != "" {
+				_, err := publicationProducerLeg(root, label)
+				rtest.OK(t, err)
+				previous, expectedRoot = publicationOriginal800kParent, root
+			}
 			if label := os.Getenv("VAULTIC_PHASE35_RAM32_LEG"); label != "" {
 				rtest.OK(t, validatePublicationRAM32Leg(root, label))
 				expectedRoot = root
@@ -2769,6 +2850,9 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 	}
 	if profile == "db-scale800k" {
 		candidate, binary = filepath.Join(publicationScale800kBin, "vaultic"), filepath.Join(publicationScale800kBin, "vaulticdb")
+		if os.Getenv("VAULTIC_PHASE35_PRODUCER_LEG") != "" {
+			candidate, binary = filepath.Join(publicationProducer800kBin, "vaultic"), filepath.Join(publicationProducer800kBin, "vaulticdb")
+		}
 		if os.Getenv("VAULTIC_PHASE35_RAM32_LEG") != "" {
 			candidate, binary = filepath.Join(publicationRAM32800kBin, "vaultic"), filepath.Join(publicationRAM32800kBin, "vaulticdb")
 		}
@@ -3400,7 +3484,10 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 	readers := os.Getenv("VAULTIC_PHASE35_READERS_LEG") != "" && readersErr == nil
 	_, ram64Err := publicationRAM64Leg(rawRoot, os.Getenv("VAULTIC_PHASE35_RAM64_LEG"))
 	ram64 := os.Getenv("VAULTIC_PHASE35_RAM64_LEG") != "" && ram64Err == nil
-	scale200k = scale200k || len(paths) == 800_000 && os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT") == "800000" && (rawRoot == publicationScale800kRoot || ram32 || readers || ram64)
+	_, producerErr := publicationProducerLeg(rawRoot, os.Getenv("VAULTIC_PHASE35_PRODUCER_LEG"))
+	producer := os.Getenv("VAULTIC_PHASE35_PRODUCER_LEG") != "" && producerErr == nil
+	original := readers || ram64 || producer
+	scale200k = scale200k || len(paths) == 800_000 && os.Getenv("VAULTIC_PHASE35_SCALE_INODE_LIMIT") == "800000" && (rawRoot == publicationScale800kRoot || ram32 || original)
 	if len(paths) != 10000 && len(paths) != 50000 && !scale200k {
 		t.Fatal("force comparison requires exactly 10000 or 50000 entries")
 	}
@@ -3476,7 +3563,7 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 		rtest.OK(t, err)
 		legOptions := publicationQualificationOptions(filepath.Join(leg, "repo"), current.Socket, current.PassphraseFile)
 		rtest.OK(t, publicationQualificationLoadPassword(&legOptions))
-		if readers || ram64 {
+		if original {
 			receipt, preflightErr := publicationCacheReusePreflight(t.Context(), *owner, parent, source, paths)
 			encoded, err := json.MarshalIndent(receipt, "", "  ")
 			rtest.OK(t, err)
@@ -3534,7 +3621,7 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 		} else {
 			args = append(args, "--parent="+parent.String())
 		}
-		if readers || ram64 {
+		if original {
 			args = append(args, "--bounded-inode-manifest="+filepath.Join(rawRoot, "inode-manifest.json"))
 		}
 		args = append(args, source)
@@ -3587,7 +3674,7 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 		rtest.OK(t, err)
 		snapshot := testLoadSnapshot(t, legOptions, id)
 		expectedCrawlMode := "full"
-		if readers || ram64 {
+		if original {
 			expectedCrawlMode = "bounded"
 		}
 		if snapshot.CrawlPlan == nil || snapshot.CrawlPlan.Mode != expectedCrawlMode || snapshot.CrawlPlan.ReusedSubtrees != 0 || len(snapshot.Paths) != 1 || snapshot.Paths[0] != source {
