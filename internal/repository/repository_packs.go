@@ -18,12 +18,28 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+func (r *Repository) SetBlobSaveConcurrency(concurrency uint) error {
+	if concurrency > 256 {
+		return fmt.Errorf("blob save concurrency must be 0 (automatic) or 1-256")
+	}
+	if r.mainWg != nil {
+		return fmt.Errorf("cannot change blob save concurrency after uploader startup")
+	}
+	r.blobSaveConcurrency = concurrency
+	return nil
+}
+
 func (r *Repository) WithBlobUploader(ctx context.Context, fn func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	wg, ctx := errgroup.WithContext(ctx)
 	// pack uploader + wg.Go below + blob saver (CPU bound)
-	wg.SetLimit(2 + runtime.GOMAXPROCS(0))
+	concurrency := int(r.blobSaveConcurrency)
+	if concurrency == 0 {
+		concurrency = runtime.GOMAXPROCS(0)
+	}
+	wg.SetLimit(2 + concurrency)
+	r.blobSaves.concurrencyLimit.Store(uint64(concurrency))
 	r.mainWg = wg
 	if err := r.startPackUploader(ctx, wg); err != nil {
 		return err

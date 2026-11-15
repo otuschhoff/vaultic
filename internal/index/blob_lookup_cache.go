@@ -127,6 +127,27 @@ type BlobLookupStats struct {
 	CoalesceDelayNanoseconds              uint64                          `json:"coalesce_delay_nanoseconds"`
 }
 
+func (stats BlobLookupStats) Delta(baseline BlobLookupStats) BlobLookupStats {
+	stats.CacheHits -= baseline.CacheHits
+	stats.NegativeHits -= baseline.NegativeHits
+	stats.CacheMisses -= baseline.CacheMisses
+	stats.Evictions -= baseline.Evictions
+	stats.SizeRPCs -= baseline.SizeRPCs
+	stats.SizeHandles -= baseline.SizeHandles
+	stats.SizeRPCNanoseconds -= baseline.SizeRPCNanoseconds
+	stats.LookupCalls -= baseline.LookupCalls
+	stats.LookupNanoseconds -= baseline.LookupNanoseconds
+	stats.SlotWaitNanoseconds -= baseline.SlotWaitNanoseconds
+	stats.ResultWaitNanoseconds -= baseline.ResultWaitNanoseconds
+	stats.LocationRPCs -= baseline.LocationRPCs
+	stats.LocationRPCNanoseconds -= baseline.LocationRPCNanoseconds
+	stats.LocationSlotWaitNanoseconds -= baseline.LocationSlotWaitNanoseconds
+	for ordinal := range stats.SizeRPCDurationBuckets {
+		stats.SizeRPCDurationBuckets[ordinal] -= baseline.SizeRPCDurationBuckets[ordinal]
+	}
+	return stats
+}
+
 func (lookup *CachedBlobLookup) Stats() BlobLookupStats {
 	stats := BlobLookupStats{
 		CatalogEntries: lookup.catalogEntries, CatalogLoadNanoseconds: lookup.catalogLoadNanoseconds, ExactCatalog: lookup.catalog != nil,

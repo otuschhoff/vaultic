@@ -339,6 +339,7 @@ func TestBackupReportsCriticalPath(t *testing.T) {
 		RPC:                 []backupRPCWait{{Connection: "writer", RPCWaitStats: daemon.RPCWaitStats{Method: "Commit", Active: 4, OldestActiveNS: 100}}},
 		DB:                  []backupDBWait{{Stage: "durable_wait", Active: 4, OldestActiveUS: 50}},
 		DBSnapshotAvailable: true, DBIntervalAvailable: true, DBScope: "daemon_all_clients",
+		BlobLookup: &enginepkg.BlobLookupStats{LookupCalls: 3, SlotWaitNanoseconds: 11, ResultWaitNanoseconds: 17, SizeRPCNanoseconds: 13, RPCConcurrencyLimit: 4},
 	}
 	run.reportCriticalPath(sample)
 	var actual backupCriticalPath
@@ -350,6 +351,9 @@ func TestBackupReportsCriticalPath(t *testing.T) {
 	}
 	if actual.Phase != "main_backup" || actual.Reconciliation != sample.Reconciliation || len(actual.RPC) != 1 || actual.RPC[0] != sample.RPC[0] || len(actual.DB) != 1 || actual.DB[0] != sample.DB[0] || !actual.DBIntervalAvailable {
 		t.Fatalf("blocking chain not preserved: %+v", actual)
+	}
+	if actual.BlobLookup == nil || *actual.BlobLookup != *sample.BlobLookup {
+		t.Fatalf("lookup slot/result/RPC attribution not preserved: %+v", actual.BlobLookup)
 	}
 	run.globalOptions = global.Options{Quiet: true}
 	run.reportCriticalPath(sample)

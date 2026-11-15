@@ -23,21 +23,23 @@ import (
 )
 
 type BlobSaveMetrics struct {
-	Calls           uint64 `json:"calls"`
-	HashCalls       uint64 `json:"hash_calls"`
-	HashNS          uint64 `json:"hash_ns"`
-	AdmissionCalls  uint64 `json:"admission_calls"`
-	AdmissionNS     uint64 `json:"admission_ns"`
-	Known           uint64 `json:"known"`
-	New             uint64 `json:"new"`
-	Failures        uint64 `json:"failures"`
-	Active          int64  `json:"active"`
-	AdmissionActive int64  `json:"admission_active"`
+	Calls            uint64 `json:"calls"`
+	HashCalls        uint64 `json:"hash_calls"`
+	HashNS           uint64 `json:"hash_ns"`
+	AdmissionCalls   uint64 `json:"admission_calls"`
+	AdmissionNS      uint64 `json:"admission_ns"`
+	Known            uint64 `json:"known"`
+	New              uint64 `json:"new"`
+	Failures         uint64 `json:"failures"`
+	Active           int64  `json:"active"`
+	AdmissionActive  int64  `json:"admission_active"`
+	ConcurrencyLimit uint64 `json:"concurrency_limit"`
 }
 
 type blobSaveCounters struct {
 	calls, hashCalls, hashNS, admissionCalls, admissionNS, known, new, failures atomic.Uint64
 	active, admissionActive                                                     atomic.Int64
+	concurrencyLimit                                                            atomic.Uint64
 }
 
 func (r *Repository) BlobSaveMetrics() BlobSaveMetrics {
@@ -47,6 +49,7 @@ func (r *Repository) BlobSaveMetrics() BlobSaveMetrics {
 		AdmissionCalls: counters.admissionCalls.Load(), AdmissionNS: counters.admissionNS.Load(),
 		Known: counters.known.Load(), New: counters.new.Load(), Failures: counters.failures.Load(),
 		Active: counters.active.Load(), AdmissionActive: counters.admissionActive.Load(),
+		ConcurrencyLimit: counters.concurrencyLimit.Load(),
 	}
 }
 

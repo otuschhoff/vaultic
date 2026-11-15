@@ -218,6 +218,10 @@ func TestPublicationQualificationNativeLookup(t *testing.T) {
 	if found {
 		t.Fatal("empty private catalog unexpectedly contains a blob")
 	}
+	stats, enabled := lookup.BlobLookupStats()
+	if !enabled || stats.LookupCalls == 0 || stats.SizeRPCs == 0 || stats.SizeRPCNanoseconds == 0 || stats.ResultWaitNanoseconds == 0 || stats.RPCConcurrencyLimit != 4 {
+		t.Fatalf("authenticated native lookup lost dependency attribution: %+v", stats)
+	}
 	rtest.OK(t, lookup.Close())
 	_, err = client.WriterStatus(t.Context())
 	rtest.OK(t, err)
@@ -884,8 +888,8 @@ const publicationOriginal800kParent = "/volume2/NASDA2/vaultic-test-m6/ncl1-pare
 const publicationOriginal800kBin = "/root/proj/vaultic/bin/phase35-ncl1-readers800k-20261111-retry3/linux-amd64"
 const publicationRAM64800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-ram64-fme-cae1-20261112-800k"
 const publicationRAM64800kBin = "/root/proj/vaultic/bin/phase35-ncl1-ram64800k-20261112/linux-amd64"
-const publicationProducer800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-open-fme-cae1-20261113-800k"
-const publicationProducer800kBin = "/root/proj/vaultic/bin/phase35-ncl1-open800k-20261113/linux-amd64"
+const publicationProducer800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-blob-fme-cae1-20261114-800k"
+const publicationProducer800kBin = "/root/proj/vaultic/bin/phase35-ncl1-blob800k-20261114/linux-amd64"
 
 func publicationOriginalSourceLeg() bool {
 	return os.Getenv("VAULTIC_PHASE35_READERS_LEG") != "" || os.Getenv("VAULTIC_PHASE35_RAM64_LEG") != "" || os.Getenv("VAULTIC_PHASE35_PRODUCER_LEG") != ""
@@ -897,8 +901,8 @@ func publicationProducerLeg(root, label string) (int, error) {
 			return 0, fmt.Errorf("producer comparison cannot be combined with another experiment")
 		}
 	}
-	for index, enabled := range []int{0, 1, 1, 0, 1, 0, 0, 1} {
-		expected := fmt.Sprintf("leg-%02d-open%d", index+1, enabled)
+	for index, enabled := range []int{56, 112, 112, 56, 112, 56, 56, 112} {
+		expected := fmt.Sprintf("leg-%02d-blob%d", index+1, enabled)
 		if label == expected && root == filepath.Join(publicationProducer800kRoot, expected) {
 			return enabled, nil
 		}
@@ -912,8 +916,8 @@ func TestPublicationProducerPolicy(t *testing.T) {
 	}
 	baseline, err := publicationDBProfile("db-scale800k")
 	rtest.OK(t, err)
-	for index, enabled := range []int{0, 1, 1, 0, 1, 0, 0, 1} {
-		label := fmt.Sprintf("leg-%02d-open%d", index+1, enabled)
+	for index, enabled := range []int{56, 112, 112, 56, 112, 56, 56, 112} {
+		label := fmt.Sprintf("leg-%02d-blob%d", index+1, enabled)
 		root := filepath.Join(publicationProducer800kRoot, label)
 		got, err := publicationProducerLeg(root, label)
 		rtest.OK(t, err)
@@ -928,9 +932,7 @@ func TestPublicationProducerPolicy(t *testing.T) {
 		tuning, err := publicationDBProfile("db-scale800k")
 		rtest.OK(t, err)
 		want := slices.Clone(baseline.Flags)
-		if enabled == 1 {
-			want = append(want, "--read-open-in-workers")
-		}
+		want = append(want, "--read-open-in-workers", fmt.Sprintf("--blob-save-concurrency=%d", enabled))
 		if !slices.Equal(tuning.Flags, want) || tuning.MetaCacheBytes != baseline.MetaCacheBytes || tuning.BlockCacheBytes != baseline.BlockCacheBytes || tuning.CryptoThreads != baseline.CryptoThreads {
 			t.Fatal("producer comparison changed another setting")
 		}
@@ -938,8 +940,13 @@ func TestPublicationProducerPolicy(t *testing.T) {
 		rtest.OK(t, command.ParseFlags(tuning.Flags))
 		workerOpen, err := command.Flags().GetBool("read-open-in-workers")
 		rtest.OK(t, err)
-		if workerOpen != (enabled == 1) {
+		if !workerOpen {
 			t.Fatal("actual worker-opening flag differs")
+		}
+		blobLimit, err := command.Flags().GetUint("blob-save-concurrency")
+		rtest.OK(t, err)
+		if blobLimit != uint(enabled) {
+			t.Fatal("actual blob-task limit differs")
 		}
 	}
 	t.Setenv("VAULTIC_PHASE35_RAM64_LEG", "leg-01-16g")
@@ -1476,7 +1483,7 @@ func testBoundedSourceRoundTrip(t *testing.T, workerOpen bool) {
 		return command.Execute()
 	}))
 	testListSnapshots(t, environment.globalOptions, 0)
-	testRunBackup(t, "", []string{source}, backupOptions{BoundedInodeManifest: filename, Force: true, UseCWalk: true, CWalkConcurrency: 4, OpenFilesInWorkers: workerOpen}, environment.globalOptions)
+	testRunBackup(t, "", []string{source}, backupOptions{BoundedInodeManifest: filename, Force: true, UseCWalk: true, CWalkConcurrency: 4, OpenFilesInWorkers: workerOpen, BlobSaveConcurrency: 2}, environment.globalOptions)
 	ids := testListSnapshots(t, environment.globalOptions, 1)
 	snapshot := testLoadSnapshot(t, environment.globalOptions, ids[0])
 	if snapshot.CrawlPlan == nil || snapshot.CrawlPlan.Mode != "bounded" {
@@ -2529,9 +2536,7 @@ func publicationDBProfile(profile string) (publicationDBTuning, error) {
 			if err != nil {
 				return publicationDBTuning{}, err
 			}
-			if enabled == 1 {
-				tuning.Flags = append(tuning.Flags, "--read-open-in-workers")
-			}
+			tuning.Flags = append(tuning.Flags, "--read-open-in-workers", fmt.Sprintf("--blob-save-concurrency=%d", enabled))
 		}
 	case "db-group64", "db-group64-end", "db-hot-control", "db-hot-control-end", "db-read64-end":
 		tuning.MetaCacheBytes = 2 << 30

@@ -71,9 +71,9 @@ READERS_SCHEDULE = (64, 96, 128, 128, 96, 64, 96, 128, 64, 64, 128, 96)
 RAM64_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-ram64-fme-cae1-20261112-800k')
 RAM64_BIN = WORKSPACE / 'bin/phase35-ncl1-ram64800k-20261112/linux-amd64'
 RAM64_SCHEDULE = (16, 64, 64, 16, 64, 16, 16, 64)
-PRODUCER_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-open-fme-cae1-20261113-800k')
-PRODUCER_BIN = WORKSPACE / 'bin/phase35-ncl1-open800k-20261113/linux-amd64'
-PRODUCER_SCHEDULE = (0, 1, 1, 0, 1, 0, 0, 1)
+PRODUCER_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-blob-fme-cae1-20261114-800k')
+PRODUCER_BIN = WORKSPACE / 'bin/phase35-ncl1-blob800k-20261114/linux-amd64'
+PRODUCER_SCHEDULE = (56, 112, 112, 56, 112, 56, 56, 112)
 ACCEPTED = Path('/volume2/NASDA2/vaultic-test-m6/critical-path-fme_cae1-20261102-production-cap100k/group-64')
 SEED = Path('/ncl1-1-vs-50/fme_dump/amakura/db.begin-readiness-20261001-fuU56R')
 CANDIDATE = WORKSPACE / 'bin/phase35-metadata-read/linux-amd64/vaultic'
@@ -161,8 +161,8 @@ def producer_leg(label):
                                           'VAULTIC_PHASE35_RAM64_LEG', 'VAULTIC_PHASE35_ORIGINAL_PARENT')):
         raise ValueError('producer comparison cannot be combined with another experiment')
     for index, enabled in enumerate(PRODUCER_SCHEDULE, 1):
-        if label == f'leg-{index:02d}-open{enabled}':
-            return PRODUCER_ROOT / label, Path('/run/vaultic-unchanged-ncl1-open800k-' + label), enabled
+        if label == f'leg-{index:02d}-blob{enabled}':
+            return PRODUCER_ROOT / label, Path('/run/vaultic-unchanged-ncl1-blob800k-' + label), enabled
     raise ValueError('producer comparison requires its exact scheduled private leg')
 
 
@@ -909,6 +909,23 @@ def dependency_counter_deltas(first, last, gauges):
     return result
 
 
+def blob_lookup_counter_deltas(first, last):
+    if first.keys() != last.keys():
+        raise ValueError('lookup counter fields changed')
+    counters = ('cache_hits', 'negative_hits', 'cache_misses', 'evictions', 'size_rpcs', 'size_handles',
+                'size_rpc_nanoseconds', 'lookup_calls', 'lookup_nanoseconds', 'slot_wait_nanoseconds',
+                'result_wait_nanoseconds', 'location_rpcs', 'location_rpc_nanoseconds', 'location_slot_wait_nanoseconds')
+    result = dict(last)
+    result.update(dependency_counter_deltas({key: first[key] for key in counters},
+                                            {key: last[key] for key in counters}, ()))
+    before, after = first['size_rpc_duration_buckets'], last['size_rpc_duration_buckets']
+    if (len(before) != 8 or len(after) != 8 or any(type(value) is not int or value < 0 for value in before + after)
+            or any(now < earlier for now, earlier in zip(after, before))):
+        raise ValueError('lookup histogram reset or invalid')
+    result['size_rpc_duration_buckets'] = [now - earlier for now, earlier in zip(after, before)]
+    return result
+
+
 def encryption_counter_deltas(first, last):
     result = {}
     for name, before in first.items():
@@ -952,6 +969,7 @@ def bottleneck_report(critical):
                      'batch_first_to_last_max_ns', 'prepared_queue_age_ns', 'batch_first_handoff_age_ns')
                     if name in reconciliation},
             'blob_saves': critical.get('blob_saves'),
+            'blob_lookup': critical.get('blob_lookup'),
             'origin_logical_bytes': encryption.get('ciphertext_origin_bytes'),
             'chunk_misses': encryption.get('chunk_cache_misses'), 'chunk_evictions': encryption.get('chunk_cache_evictions'),
             'pipeline_seconds': {name: reconciliation[name] / 1000000000 for name in
@@ -1004,9 +1022,11 @@ def bottleneck_windows(path):
                     if 'batch_first_to_last_max_ns' in last:
                         reconciliation['batch_first_to_last_max_ns'] = last['batch_first_to_last_max_ns']
                     first_blobs, last_blobs = previous.get('blob_saves'), current.get('blob_saves')
-                    blobs = dependency_counter_deltas(first_blobs, last_blobs, ('active', 'admission_active')) if first_blobs is not None and last_blobs is not None else None
+                    blobs = dependency_counter_deltas(first_blobs, last_blobs, ('active', 'admission_active', 'concurrency_limit')) if first_blobs is not None and last_blobs is not None else None
+                    first_lookup, last_lookup = previous.get('blob_lookup'), current.get('blob_lookup')
+                    lookup = blob_lookup_counter_deltas(first_lookup, last_lookup) if first_lookup is not None and last_lookup is not None else None
                     window = bottleneck_report({'encryption_reads': encryption, 'source_reads': source,
-                                                'reconciliation': reconciliation, 'blob_saves': blobs})
+                                                'reconciliation': reconciliation, 'blob_saves': blobs, 'blob_lookup': lookup})
                     window.update(start_seconds=previous['critical_path_seconds_elapsed'], end_seconds=seconds,
                                   interval_seconds=elapsed, scanned_per_second=reconciliation.get('scanned', 0) / elapsed if 'scanned' in reconciliation else None,
                                   shared_nfs_read_mean_rtt_ms=nfs['rtt_ms'] / nfs['calls'] if nfs['calls'] else None,
@@ -1044,8 +1064,8 @@ def followup_metadata_flags(settings, variant, inode_limit, root):
     flags += reconciliation_flags(variant)
     if inode_limit == 800000:
         flags += ['--metadata-reconciliation-batch-size=5000', '--metadata-reconciliation-read-ahead=1']
-        if root.parent == PRODUCER_ROOT and producer_leg(root.name)[2] == 1:
-            flags.append('--read-open-in-workers')
+        if root.parent == PRODUCER_ROOT:
+            flags += ['--read-open-in-workers', f'--blob-save-concurrency={producer_leg(root.name)[2]}']
     return flags
 
 
@@ -1427,14 +1447,22 @@ def require_dependency_coverage(critical, regular_files):
         raise ValueError('dependency diagnostics lack complete drained file/blob coverage')
 
 
-def require_producer_coverage(critical, worker_open, entries=800000):
+def require_producer_coverage(critical, blob_tasks, entries=800000):
     metrics = critical['reconciliation']
     if (metrics['collection_batch_size'] != 5000 or metrics['collection_read_ahead'] != 1
             or metrics['collection_items'] != entries or metrics['collection_batches'] != math.ceil(entries / 5000)):
         raise ValueError('producer collection configuration or coverage differs')
     pipeline = critical['source_reads']['file_pipeline']
-    if worker_open not in (0, 1) or pipeline['worker_open_calls'] != pipeline['completed'] * worker_open:
+    if blob_tasks not in (56, 112) or pipeline['worker_open_calls'] != pipeline['completed']:
         raise ValueError('worker-opening mode or complete coverage differs')
+    if critical['blob_saves']['concurrency_limit'] != blob_tasks:
+        raise ValueError('actual bounded blob-task limit differs')
+    lookup = critical['blob_lookup']
+    if (lookup['rpc_concurrency_limit'] != 32 or lookup['size_rpc_active'] != 0
+            or any(type(lookup[key]) is not int or lookup[key] <= 0 for key in
+                   ('lookup_calls', 'lookup_nanoseconds', 'size_rpcs', 'size_handles', 'size_rpc_nanoseconds', 'result_wait_nanoseconds'))
+            or sum(lookup['size_rpc_duration_buckets']) != lookup['size_rpcs']):
+        raise ValueError('lookup attribution or completed RPC coverage differs')
     for key in ('batch_first_to_last_ns', 'batch_first_to_last_max_ns', 'prepared_queue_age_ns', 'batch_first_handoff_age_ns'):
         if type(metrics[key]) is not int or metrics[key] <= 0:
             raise ValueError('missing producer batch readiness timing')
@@ -1450,12 +1478,12 @@ def require_producer_coverage(critical, worker_open, entries=800000):
 
 
 def producer_comparison_report(rows):
-    if [row['worker_open'] for row in rows] != list(PRODUCER_SCHEDULE):
+    if [row['blob_tasks'] for row in rows] != list(PRODUCER_SCHEDULE):
         raise ValueError('producer comparison requires its exact ABBA/BAAB schedule')
     identities = rows[0]['source_identities']
     require_original_backup_source(identities['source'])
     for index, row in enumerate(rows, 1):
-        label = f"leg-{index:02d}-open{row['worker_open']}"
+        label = f"leg-{index:02d}-blob{row['blob_tasks']}"
         if (row['leg'] != label or row['entries'] != 800000 or row['source_identities'] != identities
                 or row['chunk_settings'] != SCALE800K_CHUNKS or row['settings'] != cache_profile_settings('db-scale800k')
                 or not math.isfinite(row['main_seconds']) or row['main_seconds'] <= 0):
@@ -1464,15 +1492,15 @@ def producer_comparison_report(rows):
     brackets = []
     for block in (rows, rows[:4], rows[4:]):
         medians = {}
-        for enabled in (0, 1):
-            selected = [row for row in block if row['worker_open'] == enabled]
+        for enabled in (56, 112):
+            selected = [row for row in block if row['blob_tasks'] == enabled]
             medians[str(enabled)] = {
                 'main_seconds': statistics.median(row['main_seconds'] for row in selected),
                 'origin_bytes': statistics.median(row['main_encryption']['ciphertext_origin_bytes'] for row in selected),
                 'peak_rss_bytes': statistics.median(row['peak_combined_rss_bytes'] for row in selected),
                 'cli_cpu_seconds': statistics.median(row['cli_cpu_seconds'] for row in selected)}
-        brackets.append({'schedule': [row['worker_open'] for row in block], 'medians': medians,
-                         'observed_speedup': medians['0']['main_seconds'] / medians['1']['main_seconds']})
+        brackets.append({'schedule': [row['blob_tasks'] for row in block], 'medians': medians,
+                         'observed_speedup': medians['56']['main_seconds'] / medians['112']['main_seconds']})
     return {'accepted': True, 'rows': rows, 'schedule': list(PRODUCER_SCHEDULE), 'replicates_per_mode': 4,
             'overall': brackets[0], 'balanced_brackets': brackets[1:], 'same_optimized_cli_and_native': True,
             'causal_speedup_claim': False, 'physical_nfs_traffic_measured': False, 'production_modified': False,
@@ -1590,7 +1618,7 @@ def execute_ram32_series(readers=False, ram64=False, producer=False):
     with private_output(series / '.nobackup') as output:
         output.write(MARKER)
     pilot.write_json(series / 'launch-pins.json', {'pins': pins, 'schedule': list(schedule),
-                     'experiment': 'producer-worker-open' if producer else ('content-readers' if readers else 'chunk-cache-capacity'),
+                     'experiment': 'blob-task-concurrency' if producer else ('content-readers' if readers else 'chunk-cache-capacity'),
                      'parent': str(parent_root), 'entries': 800000, 'process_cache_state': 'fresh daemon per leg',
                      'host_cache_state': 'uncontrolled; balanced ordering; no host cache dropping',
                      'same_optimized_cli_and_native': True, 'ordinary_backend_policies_unchanged': True,
@@ -1601,7 +1629,7 @@ def execute_ram32_series(readers=False, ram64=False, producer=False):
         for index, value in enumerate(schedule, 1):
             if any(pilot.digest(Path(path)) != expected for path, expected in pins.items()):
                 raise ValueError('800k series source, artifact or parent receipt pin changed')
-            label = f'leg-{index:02d}-open{value}' if producer else (f'leg-{index:02d}-r{value}' if readers else f'leg-{index:02d}-{value}g')
+            label = f'leg-{index:02d}-blob{value}' if producer else (f'leg-{index:02d}-r{value}' if readers else f'leg-{index:02d}-{value}g')
             if producer:
                 root, runtime, _ = producer_leg(label)
                 chunks = dict(SCALE800K_CHUNKS)
@@ -1647,7 +1675,7 @@ def execute_ram32_series(readers=False, ram64=False, producer=False):
                 raise ValueError('800k series report replay or private-runtime cleanup differs')
             subprocess.run(['sha256sum', '-c', 'FOLLOWUP-SHA256SUMS'], cwd=root, check=True,
                            stdout=subprocess.DEVNULL)
-            row.update({'worker_open' if producer else ('readers' if readers else 'cache_gib'): value, 'leg': label, 'chunk_settings': chunks})
+            row.update({'blob_tasks' if producer else ('readers' if readers else 'cache_gib'): value, 'leg': label, 'chunk_settings': chunks})
             for mode in ('flat', 'cumulative'):
                 command = ['go', 'tool', 'pprof', '-top', '-nodecount=35']
                 if mode == 'cumulative':
@@ -1827,11 +1855,11 @@ class ChunkComparisonTests(unittest.TestCase):
     def test_producer_routes_and_opening_isolation(self):
         self.assertNotEqual(PRODUCER_SCHEDULE[:4], PRODUCER_SCHEDULE[4:])
         for index, enabled in enumerate(PRODUCER_SCHEDULE, 1):
-            label = f'leg-{index:02d}-open{enabled}'
+            label = f'leg-{index:02d}-blob{enabled}'
             root, runtime, got = producer_leg(label)
             self.assertEqual(got, enabled)
             self.assertEqual(root.parent, PRODUCER_ROOT)
-            self.assertTrue(str(runtime).startswith('/run/vaultic-unchanged-ncl1-open800k-'))
+            self.assertTrue(str(runtime).startswith('/run/vaultic-unchanged-ncl1-blob800k-'))
             with patch.dict(os.environ, {'VAULTIC_PHASE35_PRODUCER_LEG': label}):
                 self.assertEqual(paths('coalesced', 800000, 'db-scale800k'), (root, runtime))
                 self.assertEqual(binaries('db-scale800k'), (PRODUCER_BIN / 'vaultic', PRODUCER_BIN / 'vaulticdb'))
@@ -1840,7 +1868,7 @@ class ChunkComparisonTests(unittest.TestCase):
                 self.assertEqual(followup_metadata_flags(profile_settings('db-scale800k'), None, 800000, root),
                                  ['--read-concurrency=128', '--metadata-read-concurrency=32', '--metadata-batch-delay=1ms',
                                   '--metadata-publication-group-size=64', '--metadata-reconciliation-batch-size=5000',
-                                  '--metadata-reconciliation-read-ahead=1'] + (['--read-open-in-workers'] if enabled else []))
+                                  '--metadata-reconciliation-read-ahead=1', '--read-open-in-workers', f'--blob-save-concurrency={enabled}'])
                 with self.assertRaises(ValueError):
                     paths('coalesced', 400000, 'db-scale400k')
                 with patch.dict(os.environ, {'VAULTIC_PHASE35_RAM64_LEG': 'leg-01-16g'}):
@@ -1852,7 +1880,7 @@ class ChunkComparisonTests(unittest.TestCase):
     def test_producer_report_rejects_order_and_identity_drift(self):
         rows = []
         for index, enabled in enumerate(PRODUCER_SCHEDULE, 1):
-            rows.append({'worker_open': enabled, 'leg': f'leg-{index:02d}-open{enabled}', 'entries': 800000,
+            rows.append({'blob_tasks': enabled, 'leg': f'leg-{index:02d}-blob{enabled}', 'entries': 800000,
                          'source_identities': {'source': str(SCALE_SOURCE), 'entries': 800000, 'metadata_records': 799076},
                          'settings': cache_profile_settings('db-scale800k'), 'chunk_settings': dict(SCALE800K_CHUNKS),
                          'main_seconds': 400, 'main_encryption': {'ciphertext_origin_bytes': 100},
@@ -1871,20 +1899,23 @@ class ChunkComparisonTests(unittest.TestCase):
         traversal = {name: {'calls': 1, 'ns': 1} for name in
                      ('previous_node', 'open_metadata', 'open_content', 'stat_metadata', 'node_metadata', 'directory', 'load_subtree')}
         critical = {'reconciliation': metrics, 'source_reads': {'traversal': traversal,
-                    'file_pipeline': {'completed': 9, 'worker_open_calls': 9}}}
-        require_producer_coverage(critical, 1, 10)
+                    'file_pipeline': {'completed': 9, 'worker_open_calls': 9}}, 'blob_saves': {'concurrency_limit': 56},
+                    'blob_lookup': {'rpc_concurrency_limit': 32, 'size_rpc_active': 0, 'lookup_calls': 1,
+                                    'lookup_nanoseconds': 1, 'size_rpcs': 1, 'size_handles': 1, 'size_rpc_nanoseconds': 1,
+                                    'result_wait_nanoseconds': 1, 'size_rpc_duration_buckets': [1, 0, 0, 0, 0, 0, 0, 0]}}
+        require_producer_coverage(critical, 56, 10)
         with self.assertRaises(ValueError):
-            require_producer_coverage(critical, 0, 10)
+            require_producer_coverage(critical, 112, 10)
         for key, value in (('collection_items', 9), ('collection_batches', 2),
                            ('batch_first_to_last_max_ns', 4), ('batch_first_handoff_age_ns', 1)):
             previous = metrics[key]
             metrics[key] = value
             with self.assertRaises(ValueError):
-                require_producer_coverage(critical, 1, 10)
+                require_producer_coverage(critical, 56, 10)
             metrics[key] = previous
         traversal['previous_node']['ns'] = 0
         with self.assertRaises(ValueError):
-            require_producer_coverage(critical, 1, 10)
+            require_producer_coverage(critical, 56, 10)
 
     def test_ram64_routes_and_capacity_isolation(self):
         baseline = cache_profile_settings('db-scale800k')
@@ -1948,6 +1979,27 @@ class ChunkComparisonTests(unittest.TestCase):
             encryption_counter_deltas(before, after)
         with self.assertRaises(ValueError):
             dependency_counter_deltas({'active': 1}, {'active': True}, ('active',))
+
+    def test_lookup_window_deltas_preserve_gauges_and_histograms(self):
+        names = ('cache_hits', 'negative_hits', 'cache_misses', 'evictions', 'size_rpcs', 'size_handles',
+                 'size_rpc_nanoseconds', 'lookup_calls', 'lookup_nanoseconds', 'slot_wait_nanoseconds',
+                 'result_wait_nanoseconds', 'location_rpcs', 'location_rpc_nanoseconds', 'location_slot_wait_nanoseconds')
+        before, after = dict.fromkeys(names, 2), dict.fromkeys(names, 5)
+        before.update(size_rpc_duration_buckets=[2, 0, 0, 0, 0, 0, 0, 0], size_rpc_active=1,
+                      rpc_concurrency_limit=32, size_rpc_peak_active=2, size_rpc_max_nanoseconds=50)
+        after.update(size_rpc_duration_buckets=[5, 0, 0, 0, 0, 0, 0, 0], size_rpc_active=0,
+                     rpc_concurrency_limit=32, size_rpc_peak_active=4, size_rpc_max_nanoseconds=100)
+        delta = blob_lookup_counter_deltas(before, after)
+        self.assertTrue(all(delta[name] == 3 for name in names))
+        self.assertEqual(delta['size_rpc_duration_buckets'], [3, 0, 0, 0, 0, 0, 0, 0])
+        for name in ('size_rpc_active', 'rpc_concurrency_limit', 'size_rpc_peak_active', 'size_rpc_max_nanoseconds'):
+            self.assertEqual(delta[name], after[name])
+        self.assertEqual(dependency_counter_deltas({'calls': 2, 'concurrency_limit': 56},
+                                                  {'calls': 5, 'concurrency_limit': 56}, ('concurrency_limit',)),
+                         {'calls': 3, 'concurrency_limit': 56})
+        after['lookup_calls'] = 1
+        with self.assertRaises(ValueError):
+            blob_lookup_counter_deltas(before, after)
 
     def test_dependency_coverage_rejects_incomplete_or_active_work(self):
         pipeline = dict.fromkeys(('scheduled', 'started', 'read_complete', 'completed'), 10)

@@ -51,6 +51,7 @@ type Repository struct {
 	stagedPackRoots        StagedPackRoots
 	accounting             *monitor.ProductionAccounting
 	blobSaves              blobSaveCounters
+	blobSaveConcurrency    uint
 
 	opts Options
 

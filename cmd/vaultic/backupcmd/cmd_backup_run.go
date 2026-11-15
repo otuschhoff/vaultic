@@ -362,6 +362,7 @@ type backupCriticalPath struct {
 	EncryptionReads      *daemon.EncryptionReadMetrics `json:"encryption_reads,omitempty"`
 	SourceReads          *archiver.SourceReadMetrics   `json:"source_reads,omitempty"`
 	BlobSaves            *repository.BlobSaveMetrics   `json:"blob_saves,omitempty"`
+	BlobLookup           *enginepkg.BlobLookupStats    `json:"blob_lookup,omitempty"`
 }
 
 func backupDBStages(state daemon.WriterStatus) map[string]daemon.TimingSnapshot {
@@ -519,8 +520,18 @@ func (run *backupRun) startCriticalPathReporting() func() {
 		sourceBaseline = sourceArchiver.SourceReadMetrics()
 	}
 	var blobBaseline repository.BlobSaveMetrics
+	var lookupBaseline enginepkg.BlobLookupStats
+	var lookupProvider interface {
+		BlobLookupStats() (enginepkg.BlobLookupStats, bool)
+	}
 	if run.repo != nil {
 		blobBaseline = run.repo.BlobSaveMetrics()
+		lookupProvider, _ = run.repo.Engine().(interface {
+			BlobLookupStats() (enginepkg.BlobLookupStats, bool)
+		})
+		if lookupProvider != nil {
+			lookupBaseline, _ = lookupProvider.BlobLookupStats()
+		}
 	}
 	started := time.Now()
 	report := func() {
@@ -544,6 +555,12 @@ func (run *backupRun) startCriticalPathReporting() func() {
 		if run.repo != nil {
 			metrics := run.repo.BlobSaveMetrics().Delta(blobBaseline)
 			sample.BlobSaves = &metrics
+		}
+		if lookupProvider != nil {
+			if metrics, enabled := lookupProvider.BlobLookupStats(); enabled {
+				metrics = metrics.Delta(lookupBaseline)
+				sample.BlobLookup = &metrics
+			}
 		}
 		for client, connection := range clients {
 			for _, stats := range client.RPCWaitStats() {
@@ -1187,6 +1204,9 @@ func openBackupStdin(run *backupRun) error {
 }
 
 func configureArchiver(ctx context.Context, run *backupRun) error {
+	if err := run.repo.SetBlobSaveConcurrency(run.options.BlobSaveConcurrency); err != nil {
+		return err
+	}
 	if err := configurePathdiff(run); err != nil {
 		return err
 	}

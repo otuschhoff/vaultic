@@ -313,6 +313,39 @@ func TestCachedBlobLookupRPCDeadlineAttribution(t *testing.T) {
 	}
 }
 
+func TestBlobLookupStatsDelta(t *testing.T) {
+	baseline := BlobLookupStats{
+		CacheHits: 2, NegativeHits: 2, CacheMisses: 2, Evictions: 2,
+		SizeRPCs: 2, SizeHandles: 2, SizeRPCNanoseconds: 2,
+		LookupCalls: 2, LookupNanoseconds: 2, SlotWaitNanoseconds: 2, ResultWaitNanoseconds: 2,
+		LocationRPCs: 2, LocationRPCNanoseconds: 2, LocationSlotWaitNanoseconds: 2,
+		SizeRPCDurationBuckets: [8]uint64{2},
+	}
+	current := BlobLookupStats{
+		CacheHits: 5, NegativeHits: 5, CacheMisses: 5, Evictions: 5,
+		SizeRPCs: 5, SizeHandles: 5, SizeRPCNanoseconds: 5,
+		LookupCalls: 5, LookupNanoseconds: 5, SlotWaitNanoseconds: 5, ResultWaitNanoseconds: 5,
+		LocationRPCs: 5, LocationRPCNanoseconds: 5, LocationSlotWaitNanoseconds: 5,
+		SizeRPCDurationBuckets: [8]uint64{5},
+		Capacity:               100, SizeRPCActive: 1, SizeRPCPeakActive: 4, SizeRPCMaxNanoseconds: 50,
+		RPCConcurrencyLimit: 8, CoalesceDelayNanoseconds: 100,
+	}
+	delta := current.Delta(baseline)
+	for _, value := range []uint64{delta.CacheHits, delta.NegativeHits, delta.CacheMisses, delta.Evictions,
+		delta.SizeRPCs, delta.SizeHandles, delta.SizeRPCNanoseconds, delta.LookupCalls, delta.LookupNanoseconds,
+		delta.SlotWaitNanoseconds, delta.ResultWaitNanoseconds, delta.LocationRPCs,
+		delta.LocationRPCNanoseconds, delta.LocationSlotWaitNanoseconds, delta.SizeRPCDurationBuckets[0]} {
+		if value != 3 {
+			t.Fatalf("cumulative lookup counter did not subtract baseline: %+v", delta)
+		}
+	}
+	if delta.Capacity != current.Capacity || delta.SizeRPCActive != current.SizeRPCActive ||
+		delta.SizeRPCPeakActive != current.SizeRPCPeakActive || delta.SizeRPCMaxNanoseconds != current.SizeRPCMaxNanoseconds ||
+		delta.RPCConcurrencyLimit != current.RPCConcurrencyLimit || delta.CoalesceDelayNanoseconds != current.CoalesceDelayNanoseconds {
+		t.Fatalf("lookup delta changed live gauges, configuration or maxima: %+v", delta)
+	}
+}
+
 func TestCachedBlobLookupStats(t *testing.T) {
 	positive, negative, third := vaultic.NewRandomBlobHandle(), vaultic.NewRandomBlobHandle(), vaultic.NewRandomBlobHandle()
 	session := &testBlobLookupSession{ctx: t.Context(), query: func(_ context.Context, handles []vaultic.BlobHandle) ([]vaultic.BlobSize, error) {

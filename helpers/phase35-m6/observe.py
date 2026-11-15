@@ -167,9 +167,9 @@ class TelemetryTail:
                                'total_duration', 'data_added', 'data_added_packed')
                     result = {key: value[key] for key in allowed if key in value}
                 elif isinstance(value, dict) and value.get('message_type') in ('reconciliation_progress', 'backup_critical_path'):
-                    result = {key: value[key] for key in ('message_type', 'seconds_elapsed', 'reconciliation', 'encryption_reads', 'source_reads', 'blob_saves') if key in value}
+                    result = {key: value[key] for key in ('message_type', 'seconds_elapsed', 'reconciliation', 'encryption_reads', 'source_reads', 'blob_saves', 'blob_lookup') if key in value}
                     if value.get('message_type') == 'backup_critical_path':
-                        self.critical[str(path)] = {key: value[key] for key in ('encryption_reads', 'source_reads', 'blob_saves', 'reconciliation') if key in value}
+                        self.critical[str(path)] = {key: value[key] for key in ('encryption_reads', 'source_reads', 'blob_saves', 'blob_lookup', 'reconciliation') if key in value}
                         self.critical[str(path)]['critical_path_seconds_elapsed'] = value.get('seconds_elapsed')
                     if 'reconciliation' in value:
                         self.reconciliation[str(path)] = (value.get('seconds_elapsed'), value['reconciliation'])
@@ -275,12 +275,17 @@ class ObservationTests(unittest.TestCase):
             path = Path(directory) / 'backup.stdout.log'
             path.write_text(json.dumps({'message_type': 'backup_critical_path', 'seconds_elapsed': 5,
                                         'source_reads': {'bytes': 123, 'file_pipeline': {'active': 2}},
-                                        'blob_saves': {'admission_active': 3}, 'encryption_reads': {'chunk_wait_ns': 456}}) + '\n' +
+                                        'blob_saves': {'admission_active': 3, 'concurrency_limit': 56},
+                                        'blob_lookup': {'slot_wait_nanoseconds': 10, 'result_wait_nanoseconds': 20},
+                                        'encryption_reads': {'chunk_wait_ns': 456}}) + '\n' +
                             json.dumps({'message_type': 'status', 'seconds_elapsed': 6}) + '\n')
             sample = TelemetryTail().read(path)
             self.assertEqual(sample['source_reads']['bytes'], 123)
             self.assertEqual(sample['source_reads']['file_pipeline']['active'], 2)
             self.assertEqual(sample['blob_saves']['admission_active'], 3)
+            self.assertEqual(sample['blob_saves']['concurrency_limit'], 56)
+            self.assertEqual(sample['blob_lookup']['slot_wait_nanoseconds'], 10)
+            self.assertEqual(sample['blob_lookup']['result_wait_nanoseconds'], 20)
             self.assertEqual(sample['encryption_reads']['chunk_wait_ns'], 456)
             self.assertEqual(sample['critical_path_seconds_elapsed'], 5)
 

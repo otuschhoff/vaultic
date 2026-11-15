@@ -266,6 +266,29 @@ func benchmarkSaveAndEncrypt(t *testing.B, version uint) {
 	})
 }
 
+func TestBlobSaveConcurrency(t *testing.T) {
+	for _, limit := range []uint{1, 56, 112, 256} {
+		t.Run(fmt.Sprintf("limit=%d", limit), func(t *testing.T) {
+			repo := repository.TestRepository(t)
+			rtest.OK(t, repo.SetBlobSaveConcurrency(limit))
+			rtest.OK(t, repo.WithBlobUploader(t.Context(), func(ctx context.Context, uploader vaultic.BlobSaverWithAsync) error {
+				metrics := repo.BlobSaveMetrics()
+				if metrics.ConcurrencyLimit != uint64(limit) || metrics.Delta(metrics).ConcurrencyLimit != uint64(limit) {
+					t.Fatalf("actual uploader limit was lost or treated as cumulative: %+v", metrics)
+				}
+				if err := repo.SetBlobSaveConcurrency(limit); err == nil {
+					t.Fatal("active uploader allowed its limit to change")
+				}
+				return nil
+			}))
+		})
+	}
+	repo := repository.TestRepository(t)
+	if err := repo.SetBlobSaveConcurrency(257); err == nil {
+		t.Fatal("unbounded explicit blob concurrency was accepted")
+	}
+}
+
 func TestLoadBlob(t *testing.T) {
 	repository.TestAllVersions(t, testLoadBlob)
 }

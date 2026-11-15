@@ -113,6 +113,7 @@ type backupOptions struct {
 	DryRun                          bool
 	ReadConcurrency                 uint
 	OpenFilesInWorkers              bool
+	BlobSaveConcurrency             uint
 	UnchangedReadConcurrency        uint
 	MetadataReadConcurrency         int
 	MetadataBatchDelay              time.Duration
@@ -204,6 +205,7 @@ func (options *backupOptions) AddFlags(f *pflag.FlagSet) {
 	f.StringVar(&options.DeleteAfter, "delete-after", "", "mark the snapshot as not deletable before a `duration` from now (e.g. 10d; delete protection)")
 	f.UintVar(&options.ReadConcurrency, "read-concurrency", 0, "read `n` files concurrently (default: $VAULTIC_READ_CONCURRENCY or 2)")
 	f.BoolVar(&options.OpenFilesInWorkers, "read-open-in-workers", false, "open content files in the bounded file reader workers")
+	f.UintVar(&options.BlobSaveConcurrency, "blob-save-concurrency", 0, "bound concurrent blob save tasks to `n` (0 uses GOMAXPROCS; 1-256)")
 	f.UintVar(&options.UnchangedReadConcurrency, "unchanged-read-concurrency", 0, "validate `n` unchanged files concurrently (0 uses synchronous validation)")
 	f.IntVar(&options.MetadataReadConcurrency, "metadata-read-concurrency", 4, "limit concurrent metadata lookup requests to `n`")
 	f.DurationVar(&options.MetadataBatchDelay, "metadata-batch-delay", 0, "coalesce on-demand metadata reads for up to `duration` (maximum 5ms)")
