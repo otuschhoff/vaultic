@@ -1709,6 +1709,127 @@ opt-in and production/default settings unchanged. Documentation was edited
 only after independent verification; its pinned pre-update bytes remain at
 `/run/vaultic-ncl1-open800k-build-20261113/candidate`.
 
+### Original-Source 800k Lookup And Coalescing Results
+
+The November 14 blob-task screen added main-interval lookup slot, result and
+RPC attribution plus opt-in `--blob-save-concurrency`. Default zero retains
+`GOMAXPROCS`; explicit limits are 1--256 and cannot change after uploader
+startup. The bounded group retains its two long-lived tasks in addition to
+the selected blob-task limit. Worker opening was enabled in both arms.
+Only four of eight planned legs completed: 56/112/112/56 tasks took
+274.903/339.235/319.801/293.438 seconds. The partial balanced medians were
+284.170 versus 329.518 seconds, 15.958% longer at 112 tasks. All four sealed
+follow-up receipts passed restore, reopen, unchanged-source and independent
+report replay. Only three series rows were finalized; the fourth follow-up
+completed without its series profiles/row. No final comparison or failure
+record exists. The launcher termination cause remains unestablished; kernel
+journal inspection supplied no evidence. The incomplete capture remains at
+`/volume2/NASDA2/vaultic-test-m6/ncl1-blob-fme-cae1-20261114-800k`, unchanged
+and not mixed with later runs. It is not an eight-leg qualification.
+
+Retained timed `MultiGet` client work was mostly inside server storage, not
+outside the handler: storage was 1169.852--1810.577 worker seconds versus
+66.705--80.221 outside-handler worker seconds. Durability wait was only
+0.481--0.521 worker seconds. These scopes include metadata requests other
+than blob-size lookup; server storage is not isolated physical disk/NFS time.
+The negative concurrency result did not justify increasing blob tasks.
+
+The November 15 follow-up added constant-space group collection and follower
+wait counters, preserving main-interval and observer-window deltas. Collection
+covers the leader's timer/flush wait and group retirement; follower wait
+includes collection and RPC completion. Caller, group, follower and RPC
+denominators differ, and their accumulated durations overlap. They cannot be
+summed or subtracted as exclusive wall-time components. No coalescer behavior
+or product default changed. The launcher now journals/fsyncs phases and legs,
+records handled SIGTERM failures, and bounds profile extraction to 120 seconds
+with owned-group cleanup. This improves future interruption evidence but
+does not explain the old interruption or make SIGKILL catchable.
+
+All eight fresh coalescing legs completed at
+`/volume2/NASDA2/vaultic-test-m6/ncl1-coalesce-fme-cae1-20261115-800k`.
+Every backup read `/ncl1-1-vs-50/fme_cae1` directly with the qualified original
+parent and exact 800000-path manifest. Only metadata batch/coalescing delay
+varied: `1,5,5,1 | 5,1,1,5` ms. Both arms used identical CLI/native bytes,
+worker opening, 56 blob tasks, 128 readers, RPC cap 32, chunk cache 16 GiB /
+65536 entries, metadata cache 2 GiB, block cache 512 MiB, eight crypto workers,
+publication group 64, reconciliation batch 5000 and read-ahead one. Fresh
+daemons, uncontrolled host cache without dropping, private read-only source,
+workspace, production and entire borrowed-parent protection, resource caps,
+deadlines and the 600-second sustained-main gate stayed unchanged.
+
+| Leg | Delay ms | Main Seconds |
+| --- | ---: | ---: |
+| 01 | 1 | 260.104 |
+| 02 | 5 | 347.854 |
+| 03 | 5 | 367.737 |
+| 04 | 1 | 289.428 |
+| 05 | 5 | 351.048 |
+| 06 | 1 | 289.126 |
+| 07 | 1 | 290.722 |
+| 08 | 5 | 349.647 |
+
+| Median Metric | 1 ms | 5 ms |
+| --- | ---: | ---: |
+| Main seconds | 289.277 | 350.347 |
+| Logical ciphertext origin bytes | 40573894924 | 40576123284 |
+| Peak combined RSS bytes | 68378886144 | 67662911488 |
+| Whole-CLI CPU seconds | 947.286 | 909.959 |
+| Size RPC count | 83851 | 22931 |
+| Handles per size RPC | 4.958 | 18.125 |
+| Mean size RPC ms | 13.169 | 20.267 |
+| Mean group collection ms | 1.152 | 5.217 |
+| Mean follower wait ms | 17.545 | 30.463 |
+| Slot wait, worker seconds | 0.778 | 0.542 |
+| Result wait, worker seconds | 7369.061 | 13445.780 |
+| Size RPC duration, worker seconds | 1120.707 | 465.335 |
+| Group collection, group seconds | 96.525 | 119.608 |
+| Follower wait, follower seconds | 5799.027 | 11972.163 |
+| Writer waiting for prepared work, seconds | 136.577 | 198.565 |
+| Writer processing batches, seconds | 120.313 | 118.589 |
+
+Five milliseconds increased observed median elapsed time by 21.111% despite
+larger groups and fewer RPCs. Balanced bracket medians were 274.766/357.795
+and 289.924/350.347 seconds for 1/5 ms. RPC worker time fell, but follower
+latency, total result wait and writer supply wait grew. Fewer RPCs alone did
+not improve this bounded workflow. Retain the 1 ms / 56-task comparison
+control; neither increasing blob concurrency nor extending collection delay
+is supported. Writer supply gaps and blob completion dependencies remain
+measured costs; these overlapping counters do not isolate their causal wall
+path. Optimizing backend service would require a separately controlled test,
+not an inference of physical NFS saturation from server-storage duration.
+
+Every leg completed all 677957 regular-file lifecycles and worker opens,
+811726 logical lookups and 415619 size handles. All 800000 paths were
+observed/scanned with 799076 reused metadata records and 924 hardlink aliases.
+Errors, changed/deferred/reconciled records, revision allocations, directory
+publications, atomic groups and new data blobs remained zero; live file/blob
+gauges drained. Full selected restore, unchanged source and encrypted reopen
+passed eight times. The independent verifier checked parent, build, series
+and all eight follow-up seals, current source pins before report repair,
+actual settings/delays/limits, source identities/manifests, live coalescer
+windows, exact report replay, 16 profiles, launcher phases, no owned survivors
+and all new runtimes absent. Its sealed results are beside the capture in
+`ncl1-coalesce-fme-cae1-20261115-800k-analysis`.
+
+The initial series report returned inside the bracket loop, retaining correct
+overall medians but omitting both bracket summaries. After independent raw
+receipt verification, the report-only indentation was repaired and explicit
+bracket count/order/value regression assertions added. All 38 supervisor
+tests passed, and all eight actual receipts replayed identically; only the
+two missing summaries changed. Original capture and analysis seals were not
+rewritten. The corrected report, patch, test log and verification are sealed
+separately in `ncl1-coalesce-fme-cae1-20261115-800k-bracket-correction`.
+
+The isolated bundle passed focused lookup and command race tests, actual
+authenticated native lookup, both bounded opening-mode restores, 38 supervisor
+tests, seven observer tests and eleven compiled qualifier policies. A local
+route compile failure was corrected before the sealed build and retained as
+a validation summary. No new full repository-cache qualification is claimed;
+earlier caveats remain. All eight main intervals were below 600 seconds.
+This is not sustained throughput, larger-history growth, causal production
+speedup or physical NAS traffic qualification. Production and defaults remain
+unchanged. No additional backup run was substituted for a retained result.
+
 ### Pipeline And RAM Investigation
 
 The November 8 screen completed all 20 legs at

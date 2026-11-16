@@ -93,6 +93,10 @@ type blobLookupCounters struct {
 	locationRPCs                atomic.Uint64
 	locationRPCNanoseconds      atomic.Uint64
 	locationSlotWaitNanoseconds atomic.Uint64
+	coalesceGroups              atomic.Uint64
+	coalesceFollowers           atomic.Uint64
+	coalesceCollectNanoseconds  atomic.Uint64
+	coalesceFollowerNanoseconds atomic.Uint64
 }
 
 type BlobLookupStats struct {
@@ -125,6 +129,10 @@ type BlobLookupStats struct {
 	LocationRPCNanoseconds                uint64                          `json:"location_rpc_nanoseconds"`
 	LocationSlotWaitNanoseconds           uint64                          `json:"location_slot_wait_nanoseconds"`
 	CoalesceDelayNanoseconds              uint64                          `json:"coalesce_delay_nanoseconds"`
+	CoalesceGroups                        uint64                          `json:"coalesce_groups"`
+	CoalesceFollowers                     uint64                          `json:"coalesce_followers"`
+	CoalesceCollectNanoseconds            uint64                          `json:"coalesce_collect_nanoseconds"`
+	CoalesceFollowerNanoseconds           uint64                          `json:"coalesce_follower_nanoseconds"`
 }
 
 func (stats BlobLookupStats) Delta(baseline BlobLookupStats) BlobLookupStats {
@@ -142,6 +150,10 @@ func (stats BlobLookupStats) Delta(baseline BlobLookupStats) BlobLookupStats {
 	stats.LocationRPCs -= baseline.LocationRPCs
 	stats.LocationRPCNanoseconds -= baseline.LocationRPCNanoseconds
 	stats.LocationSlotWaitNanoseconds -= baseline.LocationSlotWaitNanoseconds
+	stats.CoalesceGroups -= baseline.CoalesceGroups
+	stats.CoalesceFollowers -= baseline.CoalesceFollowers
+	stats.CoalesceCollectNanoseconds -= baseline.CoalesceCollectNanoseconds
+	stats.CoalesceFollowerNanoseconds -= baseline.CoalesceFollowerNanoseconds
 	for ordinal := range stats.SizeRPCDurationBuckets {
 		stats.SizeRPCDurationBuckets[ordinal] -= baseline.SizeRPCDurationBuckets[ordinal]
 	}
@@ -159,6 +171,10 @@ func (lookup *CachedBlobLookup) Stats() BlobLookupStats {
 		LocationRPCNanoseconds:      lookup.stats.locationRPCNanoseconds.Load(),
 		LocationSlotWaitNanoseconds: lookup.stats.locationSlotWaitNanoseconds.Load(),
 		CoalesceDelayNanoseconds:    uint64(lookup.coalesceDelay),
+		CoalesceGroups:              lookup.stats.coalesceGroups.Load(),
+		CoalesceFollowers:           lookup.stats.coalesceFollowers.Load(),
+		CoalesceCollectNanoseconds:  lookup.stats.coalesceCollectNanoseconds.Load(),
+		CoalesceFollowerNanoseconds: lookup.stats.coalesceFollowerNanoseconds.Load(),
 		SizeRPCActive:               lookup.stats.sizeRPCActive.Load(), SizeRPCPeakActive: lookup.stats.sizeRPCPeakActive.Load(),
 		SizeRPCMaxNanoseconds: lookup.stats.sizeRPCMaxNanoseconds.Load(),
 		LookupCalls:           lookup.stats.lookupCalls.Load(), LookupNanoseconds: lookup.stats.lookupNanoseconds.Load(),
@@ -736,6 +752,7 @@ func (lookup *CachedBlobLookup) coalescedSizes(handles []vaultic.BlobHandle, slo
 	if !leader {
 		<-lookup.slots
 		*slotOwned = false
+		lookup.stats.coalesceFollowers.Add(1)
 	}
 	defer func() {
 		lookup.mutex.Lock()
@@ -746,6 +763,8 @@ func (lookup *CachedBlobLookup) coalescedSizes(handles []vaultic.BlobHandle, slo
 		lookup.mutex.Unlock()
 	}()
 	if leader {
+		lookup.stats.coalesceGroups.Add(1)
+		collectStarted := time.Now()
 		timer := time.NewTimer(lookup.coalesceDelay)
 		select {
 		case <-timer.C:
@@ -758,10 +777,13 @@ func (lookup *CachedBlobLookup) coalescedSizes(handles []vaultic.BlobHandle, slo
 			lookup.collecting = nil
 		}
 		lookup.mutex.Unlock()
+		lookup.stats.coalesceCollectNanoseconds.Add(uint64(time.Since(collectStarted)))
 		group.sizes, group.err = lookup.querySizes(group.handles)
 		close(group.done)
 	} else {
+		waitStarted := time.Now()
 		<-group.done
+		lookup.stats.coalesceFollowerNanoseconds.Add(uint64(time.Since(waitStarted)))
 	}
 	if group.err != nil {
 		return nil, group.err

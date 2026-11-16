@@ -285,6 +285,14 @@ func TestCachedBlobLookupCoalescing(test *testing.T) {
 			if !failure && (calls.Load() >= 16 || lookup.Stats().SizeRPCs != uint64(calls.Load()) || lookup.Stats().SizeHandles != 16) {
 				test.Fatalf("requests not coalesced or deduplicated: calls=%d stats=%+v", calls.Load(), lookup.Stats())
 			}
+			stats := lookup.Stats()
+			if stats.CoalesceGroups != stats.SizeRPCs || stats.CoalesceCollectNanoseconds == 0 ||
+				stats.Delta(stats).CoalesceCollectNanoseconds != 0 || stats.Delta(stats).CoalesceFollowerNanoseconds != 0 {
+				test.Fatalf("coalescer collection attribution lost: %+v", stats)
+			}
+			if !failure && (stats.CoalesceFollowers == 0 || stats.CoalesceFollowerNanoseconds == 0) {
+				test.Fatalf("coalesced follower attribution lost: %+v", stats)
+			}
 		})
 	}
 }
@@ -319,6 +327,7 @@ func TestBlobLookupStatsDelta(t *testing.T) {
 		SizeRPCs: 2, SizeHandles: 2, SizeRPCNanoseconds: 2,
 		LookupCalls: 2, LookupNanoseconds: 2, SlotWaitNanoseconds: 2, ResultWaitNanoseconds: 2,
 		LocationRPCs: 2, LocationRPCNanoseconds: 2, LocationSlotWaitNanoseconds: 2,
+		CoalesceGroups: 2, CoalesceFollowers: 2, CoalesceCollectNanoseconds: 2, CoalesceFollowerNanoseconds: 2,
 		SizeRPCDurationBuckets: [8]uint64{2},
 	}
 	current := BlobLookupStats{
@@ -326,6 +335,7 @@ func TestBlobLookupStatsDelta(t *testing.T) {
 		SizeRPCs: 5, SizeHandles: 5, SizeRPCNanoseconds: 5,
 		LookupCalls: 5, LookupNanoseconds: 5, SlotWaitNanoseconds: 5, ResultWaitNanoseconds: 5,
 		LocationRPCs: 5, LocationRPCNanoseconds: 5, LocationSlotWaitNanoseconds: 5,
+		CoalesceGroups: 5, CoalesceFollowers: 5, CoalesceCollectNanoseconds: 5, CoalesceFollowerNanoseconds: 5,
 		SizeRPCDurationBuckets: [8]uint64{5},
 		Capacity:               100, SizeRPCActive: 1, SizeRPCPeakActive: 4, SizeRPCMaxNanoseconds: 50,
 		RPCConcurrencyLimit: 8, CoalesceDelayNanoseconds: 100,
@@ -334,7 +344,8 @@ func TestBlobLookupStatsDelta(t *testing.T) {
 	for _, value := range []uint64{delta.CacheHits, delta.NegativeHits, delta.CacheMisses, delta.Evictions,
 		delta.SizeRPCs, delta.SizeHandles, delta.SizeRPCNanoseconds, delta.LookupCalls, delta.LookupNanoseconds,
 		delta.SlotWaitNanoseconds, delta.ResultWaitNanoseconds, delta.LocationRPCs,
-		delta.LocationRPCNanoseconds, delta.LocationSlotWaitNanoseconds, delta.SizeRPCDurationBuckets[0]} {
+		delta.LocationRPCNanoseconds, delta.LocationSlotWaitNanoseconds, delta.SizeRPCDurationBuckets[0],
+		delta.CoalesceGroups, delta.CoalesceFollowers, delta.CoalesceCollectNanoseconds, delta.CoalesceFollowerNanoseconds} {
 		if value != 3 {
 			t.Fatalf("cumulative lookup counter did not subtract baseline: %+v", delta)
 		}

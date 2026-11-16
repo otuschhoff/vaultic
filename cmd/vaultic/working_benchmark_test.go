@@ -890,6 +890,18 @@ const publicationRAM64800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-ram64-fme
 const publicationRAM64800kBin = "/root/proj/vaultic/bin/phase35-ncl1-ram64800k-20261112/linux-amd64"
 const publicationProducer800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-blob-fme-cae1-20261114-800k"
 const publicationProducer800kBin = "/root/proj/vaultic/bin/phase35-ncl1-blob800k-20261114/linux-amd64"
+const publicationCoalesce800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-coalesce-fme-cae1-20261115-800k"
+const publicationCoalesce800kBin = "/root/proj/vaultic/bin/phase35-ncl1-coalesce800k-20261115/linux-amd64"
+
+func publicationCoalesceDelay(root, label string) (int, error) {
+	for index, delay := range []int{1, 5, 5, 1, 5, 1, 1, 5} {
+		expected := fmt.Sprintf("leg-%02d-c%d", index+1, delay)
+		if label == expected && root == filepath.Join(publicationCoalesce800kRoot, expected) {
+			return delay, nil
+		}
+	}
+	return 0, fmt.Errorf("coalescing comparison requires its exact scheduled private leg")
+}
 
 func publicationOriginalSourceLeg() bool {
 	return os.Getenv("VAULTIC_PHASE35_READERS_LEG") != "" || os.Getenv("VAULTIC_PHASE35_RAM64_LEG") != "" || os.Getenv("VAULTIC_PHASE35_PRODUCER_LEG") != ""
@@ -907,7 +919,46 @@ func publicationProducerLeg(root, label string) (int, error) {
 			return enabled, nil
 		}
 	}
+	if _, err := publicationCoalesceDelay(root, label); err == nil {
+		return 56, nil
+	}
 	return 0, fmt.Errorf("producer comparison requires its exact scheduled private leg")
+}
+
+func TestPublicationCoalescePolicy(t *testing.T) {
+	for _, key := range []string{"VAULTIC_PHASE35_READERS_LEG", "VAULTIC_PHASE35_RAM32_LEG", "VAULTIC_PHASE35_RAM64_LEG", "VAULTIC_PHASE35_ORIGINAL_PARENT", "VAULTIC_PHASE35_PRODUCER_LEG"} {
+		t.Setenv(key, "")
+	}
+	baseline, err := publicationDBProfile("db-scale800k")
+	rtest.OK(t, err)
+	for index, delay := range []int{1, 5, 5, 1, 5, 1, 1, 5} {
+		label := fmt.Sprintf("leg-%02d-c%d", index+1, delay)
+		root := filepath.Join(publicationCoalesce800kRoot, label)
+		if _, err := publicationCoalesceDelay(root+"/retry", label); err == nil {
+			t.Fatal("coalescing comparison accepted a child path")
+		}
+		t.Setenv("VAULTIC_PHASE35_PRODUCER_LEG", label)
+		t.Setenv("VAULTIC_PHASE35_THROUGHPUT_ROOT", root)
+		tuning, err := publicationDBProfile("db-scale800k")
+		rtest.OK(t, err)
+		want := slices.Clone(baseline.Flags)
+		want[2] = fmt.Sprintf("--metadata-batch-delay=%dms", delay)
+		want = append(want, "--read-open-in-workers", "--blob-save-concurrency=56")
+		if !slices.Equal(tuning.Flags, want) || tuning.MetaCacheBytes != baseline.MetaCacheBytes || tuning.BlockCacheBytes != baseline.BlockCacheBytes || tuning.CryptoThreads != baseline.CryptoThreads {
+			t.Fatal("coalescing comparison changed another setting")
+		}
+		command := backupcmd.NewCommand(&global.Options{})
+		rtest.OK(t, command.ParseFlags(tuning.Flags))
+		actual, err := command.Flags().GetDuration("metadata-batch-delay")
+		rtest.OK(t, err)
+		if actual != time.Duration(delay)*time.Millisecond {
+			t.Fatal("actual coalescing delay differs")
+		}
+	}
+	t.Setenv("VAULTIC_PHASE35_RAM64_LEG", "leg-01-16g")
+	if _, err := publicationDBProfile("db-scale800k"); err == nil {
+		t.Fatal("coalescing comparison accepted simultaneous cache tuning")
+	}
 }
 
 func TestPublicationProducerPolicy(t *testing.T) {
@@ -2537,6 +2588,9 @@ func publicationDBProfile(profile string) (publicationDBTuning, error) {
 				return publicationDBTuning{}, err
 			}
 			tuning.Flags = append(tuning.Flags, "--read-open-in-workers", fmt.Sprintf("--blob-save-concurrency=%d", enabled))
+			if delay, err := publicationCoalesceDelay(os.Getenv("VAULTIC_PHASE35_THROUGHPUT_ROOT"), label); err == nil {
+				tuning.Flags[2] = fmt.Sprintf("--metadata-batch-delay=%dms", delay)
+			}
 		}
 	case "db-group64", "db-group64-end", "db-hot-control", "db-hot-control-end", "db-read64-end":
 		tuning.MetaCacheBytes = 2 << 30
@@ -2857,6 +2911,9 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 		candidate, binary = filepath.Join(publicationScale800kBin, "vaultic"), filepath.Join(publicationScale800kBin, "vaulticdb")
 		if os.Getenv("VAULTIC_PHASE35_PRODUCER_LEG") != "" {
 			candidate, binary = filepath.Join(publicationProducer800kBin, "vaultic"), filepath.Join(publicationProducer800kBin, "vaulticdb")
+			if _, err := publicationCoalesceDelay(root, os.Getenv("VAULTIC_PHASE35_PRODUCER_LEG")); err == nil {
+				candidate, binary = filepath.Join(publicationCoalesce800kBin, "vaultic"), filepath.Join(publicationCoalesce800kBin, "vaulticdb")
+			}
 		}
 		if os.Getenv("VAULTIC_PHASE35_RAM32_LEG") != "" {
 			candidate, binary = filepath.Join(publicationRAM32800kBin, "vaultic"), filepath.Join(publicationRAM32800kBin, "vaulticdb")

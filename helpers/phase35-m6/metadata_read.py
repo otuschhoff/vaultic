@@ -74,6 +74,9 @@ RAM64_SCHEDULE = (16, 64, 64, 16, 64, 16, 16, 64)
 PRODUCER_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-blob-fme-cae1-20261114-800k')
 PRODUCER_BIN = WORKSPACE / 'bin/phase35-ncl1-blob800k-20261114/linux-amd64'
 PRODUCER_SCHEDULE = (56, 112, 112, 56, 112, 56, 56, 112)
+COALESCE_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-coalesce-fme-cae1-20261115-800k')
+COALESCE_BIN = WORKSPACE / 'bin/phase35-ncl1-coalesce800k-20261115/linux-amd64'
+COALESCE_SCHEDULE = (1, 5, 5, 1, 5, 1, 1, 5)
 ACCEPTED = Path('/volume2/NASDA2/vaultic-test-m6/critical-path-fme_cae1-20261102-production-cap100k/group-64')
 SEED = Path('/ncl1-1-vs-50/fme_dump/amakura/db.begin-readiness-20261001-fuU56R')
 CANDIDATE = WORKSPACE / 'bin/phase35-metadata-read/linux-amd64/vaultic'
@@ -163,7 +166,19 @@ def producer_leg(label):
     for index, enabled in enumerate(PRODUCER_SCHEDULE, 1):
         if label == f'leg-{index:02d}-blob{enabled}':
             return PRODUCER_ROOT / label, Path('/run/vaultic-unchanged-ncl1-blob800k-' + label), enabled
+    for index, delay in enumerate(COALESCE_SCHEDULE, 1):
+        if label == f'leg-{index:02d}-c{delay}':
+            return COALESCE_ROOT / label, Path('/run/vaultic-unchanged-ncl1-coalesce800k-' + label), 56
     raise ValueError('producer comparison requires its exact scheduled private leg')
+
+
+def coalesce_settings(root, settings):
+    result = dict(settings)
+    if root.parent == COALESCE_ROOT:
+        if producer_leg(root.name)[0] != root:
+            raise ValueError('coalescing settings require an exact private root')
+        result['batch_delay_ns'] = int(root.name.rsplit('-c', 1)[1]) * 1000000
+    return result
 
 
 def scale800k_chunks():
@@ -239,10 +254,11 @@ def original_parent_selected():
 
 def binaries(profile):
     if os.environ.get('VAULTIC_PHASE35_PRODUCER_LEG'):
-        producer_leg(os.environ['VAULTIC_PHASE35_PRODUCER_LEG'])
+        root = producer_leg(os.environ['VAULTIC_PHASE35_PRODUCER_LEG'])[0]
         if profile != 'db-scale800k':
             raise ValueError('producer comparison requires the exact 800k profile')
-        return PRODUCER_BIN / 'vaultic', PRODUCER_BIN / 'vaulticdb'
+        bundle = COALESCE_BIN if root.parent == COALESCE_ROOT else PRODUCER_BIN
+        return bundle / 'vaultic', bundle / 'vaulticdb'
     if os.environ.get('VAULTIC_PHASE35_RAM64_LEG'):
         original_parent_selected()
         ram64_leg(os.environ['VAULTIC_PHASE35_RAM64_LEG'])
@@ -286,6 +302,8 @@ def profile_settings(profile):
                     'block_cache_bytes': 512 << 20, 'crypto_threads': 8, 'batch_delay_ns': 1000000,
                     'publication_group_size': 64}
         settings.update(DB_OVERRIDES[profile])
+        if os.environ.get('VAULTIC_PHASE35_PRODUCER_LEG'):
+            settings = coalesce_settings(producer_leg(os.environ['VAULTIC_PHASE35_PRODUCER_LEG'])[0], settings)
         if os.environ.get('VAULTIC_PHASE35_READERS_LEG'):
             if profile != 'db-scale800k':
                 raise ValueError('reader comparison requires the exact 800k profile')
@@ -915,6 +933,11 @@ def blob_lookup_counter_deltas(first, last):
     counters = ('cache_hits', 'negative_hits', 'cache_misses', 'evictions', 'size_rpcs', 'size_handles',
                 'size_rpc_nanoseconds', 'lookup_calls', 'lookup_nanoseconds', 'slot_wait_nanoseconds',
                 'result_wait_nanoseconds', 'location_rpcs', 'location_rpc_nanoseconds', 'location_slot_wait_nanoseconds')
+    coalescer = ('coalesce_groups', 'coalesce_followers', 'coalesce_collect_nanoseconds', 'coalesce_follower_nanoseconds')
+    if any(key in last for key in coalescer):
+        if not all(key in last for key in coalescer):
+            raise ValueError('incomplete coalescer attribution')
+        counters += coalescer
     result = dict(last)
     result.update(dependency_counter_deltas({key: first[key] for key in counters},
                                             {key: last[key] for key in counters}, ()))
@@ -1064,7 +1087,7 @@ def followup_metadata_flags(settings, variant, inode_limit, root):
     flags += reconciliation_flags(variant)
     if inode_limit == 800000:
         flags += ['--metadata-reconciliation-batch-size=5000', '--metadata-reconciliation-read-ahead=1']
-        if root.parent == PRODUCER_ROOT:
+        if root.parent in (PRODUCER_ROOT, COALESCE_ROOT):
             flags += ['--read-open-in-workers', f'--blob-save-concurrency={producer_leg(root.name)[2]}']
     return flags
 
@@ -1074,7 +1097,8 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
     measured = json.loads((root / 'group-64/forced/result.json').read_text())
     variant = root.name.rsplit('-', 1)[-1] if inode_limit == 400000 and root.parent in (RECONCILE_ROOT, CACHE_ROOT, PIPELINE_ROOT, RAM16_ROOT) else None
     settings = cache_profile_settings(profile, variant)
-    if root.parent in (READERS_ROOT, RAM64_ROOT, PRODUCER_ROOT):
+    settings = coalesce_settings(root, settings)
+    if root.parent in (READERS_ROOT, RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT):
         if (profile, inode_limit) != ('db-scale800k', 800000):
             raise ValueError('reader receipt requires its exact 800k profile')
         if root.parent == READERS_ROOT:
@@ -1142,11 +1166,13 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
         else:
             deltas[field] = encryption_counter_deltas(first, last)
     critical = measured['critical_path']
-    identities = validated_source_identities(root, expected_entries) if root.parent in (READERS_ROOT, RAM64_ROOT, PRODUCER_ROOT) else None
-    if root.parent in (RAM64_ROOT, PRODUCER_ROOT):
+    identities = validated_source_identities(root, expected_entries) if root.parent in (READERS_ROOT, RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT) else None
+    if root.parent in (RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT):
         require_dependency_coverage(critical, expected_regular)
-    if root.parent == PRODUCER_ROOT:
+    if root.parent in (PRODUCER_ROOT, COALESCE_ROOT):
         require_producer_coverage(critical, producer_leg(root.name)[2])
+        if root.parent == COALESCE_ROOT:
+            require_coalesce_coverage(critical, settings['batch_delay_ns'])
     if inode_limit == 800000:
         require_cache_reuse(critical['reconciliation'], expected_entries, None if identities is None else identities['metadata_records'])
         cpu = root / 'group-64/forced/cpu/cpu.pprof'
@@ -1477,31 +1503,44 @@ def require_producer_coverage(critical, blob_tasks, entries=800000):
             raise ValueError('missing producer traversal timing')
 
 
-def producer_comparison_report(rows):
-    if [row['blob_tasks'] for row in rows] != list(PRODUCER_SCHEDULE):
+def require_coalesce_coverage(critical, delay_ns):
+    lookup = critical['blob_lookup']
+    if (lookup['coalesce_delay_nanoseconds'] != delay_ns or lookup['coalesce_groups'] != lookup['size_rpcs']
+            or any(type(lookup[key]) is not int or lookup[key] <= 0 for key in
+                   ('coalesce_groups', 'coalesce_followers', 'coalesce_collect_nanoseconds', 'coalesce_follower_nanoseconds'))):
+        raise ValueError('coalescer configuration, collection or follower coverage differs')
+
+
+def producer_comparison_report(rows, coalesce=False):
+    key = 'coalesce_ms' if coalesce else 'blob_tasks'
+    schedule = COALESCE_SCHEDULE if coalesce else PRODUCER_SCHEDULE
+    arms = (1, 5) if coalesce else (56, 112)
+    if [row[key] for row in rows] != list(schedule):
         raise ValueError('producer comparison requires its exact ABBA/BAAB schedule')
     identities = rows[0]['source_identities']
     require_original_backup_source(identities['source'])
     for index, row in enumerate(rows, 1):
-        label = f"leg-{index:02d}-blob{row['blob_tasks']}"
+        label = f"leg-{index:02d}-c{row[key]}" if coalesce else f"leg-{index:02d}-blob{row[key]}"
+        expected = coalesce_settings(producer_leg(label)[0], cache_profile_settings('db-scale800k'))
         if (row['leg'] != label or row['entries'] != 800000 or row['source_identities'] != identities
-                or row['chunk_settings'] != SCALE800K_CHUNKS or row['settings'] != cache_profile_settings('db-scale800k')
+                or row['chunk_settings'] != SCALE800K_CHUNKS or row['settings'] != expected
                 or not math.isfinite(row['main_seconds']) or row['main_seconds'] <= 0):
             raise ValueError('producer comparison changed identity, scope or another setting')
         producer_leg(label)
     brackets = []
     for block in (rows, rows[:4], rows[4:]):
         medians = {}
-        for enabled in (56, 112):
-            selected = [row for row in block if row['blob_tasks'] == enabled]
+        for enabled in arms:
+            selected = [row for row in block if row[key] == enabled]
             medians[str(enabled)] = {
                 'main_seconds': statistics.median(row['main_seconds'] for row in selected),
                 'origin_bytes': statistics.median(row['main_encryption']['ciphertext_origin_bytes'] for row in selected),
                 'peak_rss_bytes': statistics.median(row['peak_combined_rss_bytes'] for row in selected),
                 'cli_cpu_seconds': statistics.median(row['cli_cpu_seconds'] for row in selected)}
-        brackets.append({'schedule': [row['blob_tasks'] for row in block], 'medians': medians,
-                         'observed_speedup': medians['56']['main_seconds'] / medians['112']['main_seconds']})
-    return {'accepted': True, 'rows': rows, 'schedule': list(PRODUCER_SCHEDULE), 'replicates_per_mode': 4,
+        brackets.append({'schedule': [row[key] for row in block], 'medians': medians,
+                         'observed_speedup': medians[str(arms[0])]['main_seconds'] / medians[str(arms[1])]['main_seconds']})
+    return {'accepted': True, 'rows': rows, 'schedule': list(schedule), 'replicates_per_mode': 4,
+            'experiment': 'coalescing-delay-at-fixed-56-tasks' if coalesce else 'blob-task-concurrency',
             'overall': brackets[0], 'balanced_brackets': brackets[1:], 'same_optimized_cli_and_native': True,
             'causal_speedup_claim': False, 'physical_nfs_traffic_measured': False, 'production_modified': False,
             'larger_database_growth_qualified': False,
@@ -1583,14 +1622,32 @@ def readers_comparison_report(rows):
             'single_pass_sustained_qualified': all(row['main_seconds'] >= 600 for row in rows)}
 
 
-def execute_ram32_series(readers=False, ram64=False, producer=False):
-    if sum((readers, ram64, producer)) > 1:
+def export_series_profile(command, output, seconds=120):
+    process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        status = process.wait(timeout=seconds)
+        if status:
+            raise subprocess.CalledProcessError(status, command)
+    except BaseException:
+        interrupt(process, group=True)
+        raise
+
+
+def stop_series(signum, _frame):
+    raise InterruptedError(f'series launcher received signal {signum}')
+
+
+def execute_ram32_series(readers=False, ram64=False, producer=False, coalesce=False):
+    if sum((readers, ram64, producer, coalesce)) > 1:
         raise ValueError('cache and reader comparisons must be separate')
+    producer = producer or coalesce
     original = readers or ram64 or producer
     require_original_backup_source(SCALE_SOURCE if original else SCALE800K_PARENT / 'input')
     series, bundle, schedule = ((PRODUCER_ROOT, PRODUCER_BIN, PRODUCER_SCHEDULE) if producer else
                                ((RAM64_ROOT, RAM64_BIN, RAM64_SCHEDULE) if ram64 else
                                 ((READERS_ROOT, READERS_BIN, READERS_SCHEDULE) if readers else (RAM32_ROOT, RAM32_BIN, RAM32_SCHEDULE))))
+    if coalesce:
+        series, bundle, schedule = COALESCE_ROOT, COALESCE_BIN, COALESCE_SCHEDULE
     leg_environment = 'VAULTIC_PHASE35_PRODUCER_LEG' if producer else ('VAULTIC_PHASE35_RAM64_LEG' if ram64 else ('VAULTIC_PHASE35_READERS_LEG' if readers else 'VAULTIC_PHASE35_RAM32_LEG'))
     receipt_field = 'producer_leg' if producer else ('ram64_leg' if ram64 else ('readers_leg' if readers else 'ram32_leg'))
     if any(os.environ.get(key) for key in ('VAULTIC_PHASE35_READERS_LEG', 'VAULTIC_PHASE35_RAM32_LEG', 'VAULTIC_PHASE35_RAM64_LEG', 'VAULTIC_PHASE35_PRODUCER_LEG')):
@@ -1618,18 +1675,32 @@ def execute_ram32_series(readers=False, ram64=False, producer=False):
     with private_output(series / '.nobackup') as output:
         output.write(MARKER)
     pilot.write_json(series / 'launch-pins.json', {'pins': pins, 'schedule': list(schedule),
-                     'experiment': 'blob-task-concurrency' if producer else ('content-readers' if readers else 'chunk-cache-capacity'),
+                     'experiment': 'coalescing-delay-at-fixed-56-tasks' if coalesce else ('blob-task-concurrency' if producer else ('content-readers' if readers else 'chunk-cache-capacity')),
                      'parent': str(parent_root), 'entries': 800000, 'process_cache_state': 'fresh daemon per leg',
                      'host_cache_state': 'uncontrolled; balanced ordering; no host cache dropping',
                      'same_optimized_cli_and_native': True, 'ordinary_backend_policies_unchanged': True,
                      'source_mount': str(SCALE_SOURCE) if original else 'NASDA2 frozen copy, not original ncl1 mount',
                      'cpu_profile_scope': 'whole CLI backup command, not exact-main or native CPU'})
     rows = []
+    phase, label = 'starting', None
+    events = private_output(series / 'launcher-events.jsonl', text=True)
+
+    def journal(next_phase):
+        nonlocal phase
+        phase = next_phase
+        events.write(json.dumps({'unix_seconds': time.time(), 'pid': os.getpid(), 'phase': phase,
+                                 'leg': label, 'completed_legs': len(rows)}) + '\n')
+        events.flush()
+        os.fsync(events.fileno())
+
+    previous_term = signal.signal(signal.SIGTERM, stop_series)
     try:
+        journal('starting')
         for index, value in enumerate(schedule, 1):
             if any(pilot.digest(Path(path)) != expected for path, expected in pins.items()):
                 raise ValueError('800k series source, artifact or parent receipt pin changed')
-            label = f'leg-{index:02d}-blob{value}' if producer else (f'leg-{index:02d}-r{value}' if readers else f'leg-{index:02d}-{value}g')
+            label = f'leg-{index:02d}-c{value}' if coalesce else (f'leg-{index:02d}-blob{value}' if producer else (f'leg-{index:02d}-r{value}' if readers else f'leg-{index:02d}-{value}g'))
+            journal('preparing')
             if producer:
                 root, runtime, _ = producer_leg(label)
                 chunks = dict(SCALE800K_CHUNKS)
@@ -1655,6 +1726,7 @@ def execute_ram32_series(readers=False, ram64=False, producer=False):
                        '--propagation', 'private', sys.executable, str(Path(__file__)), '--mode=coalesced',
                        '--inode-limit=800000', '--concurrency-profile=db-scale800k']
             print(json.dumps({'starting': label, 'root': str(root), 'chunk_settings': chunks}), flush=True)
+            journal('followup')
             with private_output(series / (label + '.stdout.log')) as output, private_output(series / (label + '.stderr.log')) as errors:
                 process = subprocess.Popen(command, env=environment, stdout=output, stderr=errors, start_new_session=True)
                 try:
@@ -1670,28 +1742,33 @@ def execute_ram32_series(readers=False, ram64=False, producer=False):
                 raise ValueError('800k series live capacity receipt differs')
             if readers and launch['read_concurrency'] != value:
                 raise ValueError('800k series live reader receipt differs')
+            journal('receipt-replay')
             row = summarize_followup(root, 'db-scale800k', 800000, bundle / 'vaultic')
             if row != json.loads((root / 'verified-followup.json').read_text()) or runtime.exists():
                 raise ValueError('800k series report replay or private-runtime cleanup differs')
             subprocess.run(['sha256sum', '-c', 'FOLLOWUP-SHA256SUMS'], cwd=root, check=True,
                            stdout=subprocess.DEVNULL)
-            row.update({'blob_tasks' if producer else ('readers' if readers else 'cache_gib'): value, 'leg': label, 'chunk_settings': chunks})
+            row.update({'coalesce_ms' if coalesce else ('blob_tasks' if producer else ('readers' if readers else 'cache_gib')): value, 'leg': label, 'chunk_settings': chunks})
             for mode in ('flat', 'cumulative'):
+                journal('profile-' + mode)
                 command = ['go', 'tool', 'pprof', '-top', '-nodecount=35']
                 if mode == 'cumulative':
                     command.append('-cum')
                 command += [str(bundle / 'vaultic'), str(root / 'group-64/forced/cpu/cpu.pprof')]
                 with private_output(series / (label + '.cpu-' + mode + '.txt')) as output:
-                    subprocess.run(command, stdout=output, stderr=subprocess.STDOUT, check=True)
+                    export_series_profile(command, output)
             rows.append(row)
             pilot.write_json(series / (label + '.verified.json'), row)
+            journal('accepted')
             print(json.dumps({'accepted': label, 'main_seconds': row['main_seconds'],
                               'origin_bytes': row['main_encryption']['ciphertext_origin_bytes'],
                               'peak_rss_bytes': row['peak_combined_rss_bytes']}), flush=True)
         if any(pilot.digest(Path(path)) != expected for path, expected in pins.items()):
             raise ValueError('800k series pins changed before final report')
-        report = producer_comparison_report(rows) if producer else (readers_comparison_report(rows) if readers else ram32_comparison_report(rows, ram64=ram64))
+        report = producer_comparison_report(rows, coalesce=coalesce) if producer else (readers_comparison_report(rows) if readers else ram32_comparison_report(rows, ram64=ram64))
         pilot.write_json(series / 'verified-comparison.json', report)
+        journal('completed')
+        events.close()
         with private_output(series / 'SERIES-SHA256SUMS', text=True) as output:
             for path in sorted(series.iterdir()):
                 if path.is_file() and path.name != 'SERIES-SHA256SUMS':
@@ -1701,8 +1778,11 @@ def execute_ram32_series(readers=False, ram64=False, producer=False):
                           'balanced_brackets': report['balanced_brackets']}), flush=True)
     except BaseException as error:
         pilot.write_json(series / 'failed-series.json', {'accepted': False, 'completed_legs': len(rows),
-                         'failure': type(error).__name__ + ': ' + str(error)})
+                         'phase': phase, 'leg': label, 'failure': type(error).__name__ + ': ' + str(error)})
         raise
+    finally:
+        events.close()
+        signal.signal(signal.SIGTERM, previous_term)
 
 
 def ram16_comparison_report(rows):
@@ -1852,6 +1932,77 @@ def execute_chunk_series(immutable=False, reconcile=False, caches=False, pipelin
 
 
 class ChunkComparisonTests(unittest.TestCase):
+    def test_series_profile_timeout_and_error_are_bounded(self):
+        with tempfile.TemporaryFile() as output:
+            with self.assertRaises(subprocess.CalledProcessError):
+                export_series_profile([sys.executable, '-c', 'raise SystemExit(7)'], output)
+            with self.assertRaises(subprocess.TimeoutExpired):
+                export_series_profile([sys.executable, '-c', 'import signal; signal.pause()'], output, seconds=0.05)
+        with self.assertRaisesRegex(InterruptedError, 'signal 15'):
+            stop_series(signal.SIGTERM, None)
+
+    def test_coalesce_window_baselines_and_live_coverage(self):
+        counters = ('cache_hits', 'negative_hits', 'cache_misses', 'evictions', 'size_rpcs', 'size_handles',
+                    'size_rpc_nanoseconds', 'lookup_calls', 'lookup_nanoseconds', 'slot_wait_nanoseconds',
+                    'result_wait_nanoseconds', 'location_rpcs', 'location_rpc_nanoseconds', 'location_slot_wait_nanoseconds',
+                    'coalesce_groups', 'coalesce_followers', 'coalesce_collect_nanoseconds', 'coalesce_follower_nanoseconds')
+        before = dict.fromkeys(counters, 2)
+        after = dict.fromkeys(counters, 5)
+        before.update(size_rpc_duration_buckets=[2] * 8, coalesce_delay_nanoseconds=1000000)
+        after.update(size_rpc_duration_buckets=[5] * 8, coalesce_delay_nanoseconds=1000000)
+        delta = blob_lookup_counter_deltas(before, after)
+        self.assertTrue(all(delta[key] == 3 for key in counters))
+        self.assertEqual(delta['coalesce_delay_nanoseconds'], 1000000)
+        require_coalesce_coverage({'blob_lookup': delta}, 1000000)
+        with self.assertRaises(ValueError):
+            require_coalesce_coverage({'blob_lookup': delta}, 5000000)
+        after.pop('coalesce_followers')
+        with self.assertRaises(ValueError):
+            blob_lookup_counter_deltas(before, after)
+
+    def test_coalesce_routes_and_fixed_task_limit(self):
+        baseline = cache_profile_settings('db-scale800k')
+        self.assertNotEqual(COALESCE_SCHEDULE[:4], COALESCE_SCHEDULE[4:])
+        for index, delay in enumerate(COALESCE_SCHEDULE, 1):
+            label = f'leg-{index:02d}-c{delay}'
+            root, runtime, tasks = producer_leg(label)
+            self.assertEqual((root.parent, tasks), (COALESCE_ROOT, 56))
+            with patch.dict(os.environ, {'VAULTIC_PHASE35_PRODUCER_LEG': label}):
+                self.assertEqual(paths('coalesced', 800000, 'db-scale800k'), (root, runtime))
+                self.assertEqual(binaries('db-scale800k'), (COALESCE_BIN / 'vaultic', COALESCE_BIN / 'vaulticdb'))
+                settings = cache_profile_settings('db-scale800k')
+                self.assertEqual(settings, dict(baseline, batch_delay_ns=delay * 1000000))
+                flags = followup_metadata_flags(settings, None, 800000, root)
+                self.assertIn(f'--metadata-batch-delay={delay}ms', flags)
+                self.assertIn('--blob-save-concurrency=56', flags)
+                with patch.dict(os.environ, {'VAULTIC_PHASE35_RAM64_LEG': 'leg-01-16g'}):
+                    with self.assertRaises(ValueError):
+                        producer_leg(label)
+            with self.assertRaises(ValueError):
+                producer_leg(label + '/retry')
+
+    def test_coalesce_report_rejects_order_and_other_setting_drift(self):
+        rows = []
+        for index, delay in enumerate(COALESCE_SCHEDULE, 1):
+            label = f'leg-{index:02d}-c{delay}'
+            rows.append({'coalesce_ms': delay, 'leg': label, 'entries': 800000,
+                         'source_identities': {'source': str(SCALE_SOURCE), 'entries': 800000, 'metadata_records': 799076},
+                         'settings': coalesce_settings(producer_leg(label)[0], cache_profile_settings('db-scale800k')),
+                         'chunk_settings': dict(SCALE800K_CHUNKS), 'main_seconds': 400 if delay == 1 else 350,
+                         'main_encryption': {'ciphertext_origin_bytes': 100}, 'peak_combined_rss_bytes': 1, 'cli_cpu_seconds': 2})
+        report = producer_comparison_report(rows, coalesce=True)
+        self.assertAlmostEqual(report['overall']['observed_speedup'], 400 / 350)
+        self.assertEqual(len(report['balanced_brackets']), 2)
+        self.assertEqual([block['schedule'] for block in report['balanced_brackets']],
+                         [list(COALESCE_SCHEDULE[:4]), list(COALESCE_SCHEDULE[4:])])
+        for block in report['balanced_brackets']:
+            self.assertAlmostEqual(block['observed_speedup'], 400 / 350)
+        with self.assertRaises(ValueError):
+            producer_comparison_report(list(reversed(rows)), coalesce=True)
+        rows[0]['settings']['readers'] = 64
+        with self.assertRaises(ValueError):
+            producer_comparison_report(rows, coalesce=True)
+
     def test_producer_routes_and_opening_isolation(self):
         self.assertNotEqual(PRODUCER_SCHEDULE[:4], PRODUCER_SCHEDULE[4:])
         for index, enabled in enumerate(PRODUCER_SCHEDULE, 1):
@@ -2591,6 +2742,7 @@ if __name__ == '__main__':
     parser.add_argument('--ram32-series', action='store_true')
     parser.add_argument('--ram64-series', action='store_true')
     parser.add_argument('--producer-series', action='store_true')
+    parser.add_argument('--coalesce-series', action='store_true')
     parser.add_argument('--readers-series', action='store_true')
     parser.add_argument('--original-parent', action='store_true')
     parser.add_argument('--prepare-cache-parent', action='store_true')
@@ -2604,7 +2756,7 @@ if __name__ == '__main__':
         if ((arguments.mode, arguments.inode_limit, arguments.concurrency_profile) != ('coalesced', 800000, 'db-scale800k')
                 or any((arguments.series, arguments.chunk_series, arguments.immutable_series, arguments.reconcile_series,
                         arguments.cache_series, arguments.pipeline_series, arguments.ram16_series, arguments.ram32_series,
-                        arguments.readers_series, arguments.ram64_series, arguments.producer_series, arguments.prepare_cache_parent, arguments.chunk_self_test,
+                        arguments.readers_series, arguments.ram64_series, arguments.producer_series, arguments.coalesce_series, arguments.prepare_cache_parent, arguments.chunk_self_test,
                         arguments.chunk_leg is not None))):
             raise ValueError('original parent requires its exclusive coalesced 800k route')
         with patch.dict(os.environ, {'VAULTIC_PHASE35_ORIGINAL_PARENT': '1'}):
@@ -2612,15 +2764,15 @@ if __name__ == '__main__':
                 prepare(arguments.mode, arguments.inode_limit, arguments.concurrency_profile)
             else:
                 raise SystemExit(execute(arguments.mode, arguments.inode_limit, arguments.concurrency_profile))
-    elif arguments.ram32_series or arguments.readers_series or arguments.ram64_series or arguments.producer_series:
+    elif arguments.ram32_series or arguments.readers_series or arguments.ram64_series or arguments.producer_series or arguments.coalesce_series:
         if ((arguments.mode, arguments.inode_limit, arguments.concurrency_profile) != ('coalesced', 800000, 'db-scale800k')
-                or sum((arguments.ram32_series, arguments.readers_series, arguments.ram64_series, arguments.producer_series)) != 1
+                or sum((arguments.ram32_series, arguments.readers_series, arguments.ram64_series, arguments.producer_series, arguments.coalesce_series)) != 1
                 or any((arguments.prepare, arguments.series, arguments.chunk_series, arguments.immutable_series,
                         arguments.reconcile_series, arguments.cache_series, arguments.pipeline_series,
                         arguments.ram16_series, arguments.prepare_cache_parent, arguments.chunk_self_test,
                         arguments.chunk_leg is not None))):
             raise ValueError('800k series requires its exclusive route')
-        execute_ram32_series(readers=arguments.readers_series, ram64=arguments.ram64_series, producer=arguments.producer_series)
+        execute_ram32_series(readers=arguments.readers_series, ram64=arguments.ram64_series, producer=arguments.producer_series, coalesce=arguments.coalesce_series)
     elif arguments.prepare_cache_parent:
         if (arguments.mode, arguments.inode_limit, arguments.concurrency_profile) != ('coalesced', 400000, 'db-scale400k') or any((arguments.prepare, arguments.series, arguments.chunk_series, arguments.immutable_series, arguments.reconcile_series, arguments.cache_series, arguments.pipeline_series, arguments.ram16_series, arguments.chunk_self_test, arguments.chunk_leg is not None)):
             raise ValueError('cache parent preparation requires its fixed isolated 400k routing')
