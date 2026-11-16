@@ -59,6 +59,9 @@ mod tests {
         inner: InMemory,
         reads: Mutex<Vec<(String, u64, u64)>>,
         delay: Option<std::time::Duration>,
+        body_delay: Option<std::time::Duration>,
+        fail_request: bool,
+        fail_body: bool,
         payload_gate: Option<Arc<tokio::sync::Semaphore>>,
         head_gate: Option<Arc<tokio::sync::Semaphore>>,
         panic_payload: std::sync::atomic::AtomicBool,
@@ -110,6 +113,9 @@ mod tests {
             if let Some(delay) = self.delay {
                 tokio::time::sleep(delay).await;
             }
+            if self.fail_request {
+                return Err(encryption_error(EncryptionError::Length));
+            }
             let head = options.head;
             let result = self.inner.get_opts(location, options).await?;
             let mut meta = result.meta.clone();
@@ -130,8 +136,21 @@ mod tests {
                 range.start,
                 bytes.len() as u64,
             ));
+            let body_delay = self.body_delay;
+            let fail_body = self.fail_body;
             Ok(GetResult {
-                payload: GetResultPayload::Stream(stream::once(async { Ok(bytes) }).boxed()),
+                payload: GetResultPayload::Stream(
+                    stream::once(async move {
+                        if let Some(delay) = body_delay {
+                            tokio::time::sleep(delay).await;
+                        }
+                        if fail_body {
+                            return Err(encryption_error(EncryptionError::Length));
+                        }
+                        Ok(bytes)
+                    })
+                    .boxed(),
+                ),
                 meta,
                 range,
                 attributes,
@@ -167,47 +186,183 @@ mod tests {
 
     #[tokio::test]
     async fn encrypted_read_work_attribution() {
+        for body_delay in [false, true] {
+            let inner = Arc::new(CountingStore {
+                delay: (!body_delay).then_some(std::time::Duration::from_millis(5)),
+                body_delay: body_delay.then_some(std::time::Duration::from_millis(5)),
+                ..Default::default()
+            });
+            let encrypted = store(inner.clone(), "attribution");
+            let path = Path::from("metadata");
+            encrypted
+                .put(
+                    &path,
+                    Bytes::from_static(b"0123456789abcdef0123456789abcdef").into(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                encrypted.get_range(&path, 3..7).await.unwrap(),
+                Bytes::from_static(b"3456")
+            );
+            let first = encrypted.read_metrics.snapshot();
+            assert_eq!(
+                encrypted.get_range(&path, 3..7).await.unwrap(),
+                Bytes::from_static(b"3456")
+            );
+            let metrics = encrypted.read_metrics.snapshot();
+            assert_eq!(metrics["reads"], 2);
+            assert_eq!(metrics["range_reads"], 2);
+            assert_eq!(metrics["requested_plaintext_bytes"], 8);
+            assert_eq!(metrics["rounded_ciphertext_bytes"], 32);
+            assert_eq!(metrics["ciphertext_origin_calls"], 2);
+            assert_eq!(
+                metrics["ciphertext_origin_bytes"],
+                (HEADER_SIZE + 32) as u64
+            );
+            assert_eq!(metrics["header_cache_misses"], 1);
+            assert_eq!(metrics["header_cache_hits"], 1);
+            assert_eq!(metrics["crypto_jobs"], 1);
+            assert_eq!(metrics["chunk_cache_hits"], 1);
+            assert_eq!(metrics["chunk_cache_misses"], 1);
+            assert_eq!(metrics["chunk_cache_bytes"], 16);
+            assert_eq!(metrics["header_validation_calls"], 1);
+            if !body_delay {
+                assert!(metrics["header_validation_ns"].as_u64().unwrap() >= 5_000_000);
+            }
+            assert!(metrics["ciphertext_origin_ns"].as_u64().unwrap() >= 10_000_000);
+            assert_eq!(metrics["ciphertext_origin_body_calls"], 2);
+            assert_eq!(metrics["ciphertext_origin_request_successes"], 2);
+            assert_eq!(metrics["ciphertext_origin_body_successes"], 2);
+            assert_eq!(metrics["ciphertext_origin_request_active"], 0);
+            assert_eq!(metrics["ciphertext_origin_body_active"], 0);
+            let delayed_stage = if body_delay {
+                "ciphertext_origin_body_ns"
+            } else {
+                "ciphertext_origin_request_ns"
+            };
+            assert!(metrics[delayed_stage].as_u64().unwrap() >= 10_000_000);
+            let request_ns = metrics["ciphertext_origin_request_ns"].as_u64().unwrap();
+            let body_ns = metrics["ciphertext_origin_body_ns"].as_u64().unwrap();
+            assert!(metrics["ciphertext_origin_ns"].as_u64().unwrap() >= request_ns + body_ns);
+            for key in [
+                "ciphertext_origin_request_ns",
+                "ciphertext_origin_body_ns",
+                "ciphertext_origin_body_calls",
+            ] {
+                assert_eq!(metrics[key], first[key], "cached read changed {key}");
+            }
+            assert!(metrics["crypto_service_ns"].as_u64().unwrap() > 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_object_origin_request_has_no_body() {
         let inner = Arc::new(CountingStore {
             delay: Some(std::time::Duration::from_millis(5)),
             ..Default::default()
         });
-        let encrypted = store(inner.clone(), "attribution");
-        let path = Path::from("metadata");
-        encrypted
-            .put(
-                &path,
-                Bytes::from_static(b"0123456789abcdef0123456789abcdef").into(),
-            )
+        let encrypted = store(inner, "missing-origin");
+        let error = encrypted
+            .get_range(&Path::from("missing.sst"), 0..1)
             .await
-            .unwrap();
-        assert_eq!(
-            encrypted.get_range(&path, 3..7).await.unwrap(),
-            Bytes::from_static(b"3456")
-        );
-        assert_eq!(
-            encrypted.get_range(&path, 3..7).await.unwrap(),
-            Bytes::from_static(b"3456")
-        );
+            .unwrap_err();
+        assert!(matches!(error, object_store::Error::NotFound { .. }));
         let metrics = encrypted.read_metrics.snapshot();
-        assert_eq!(metrics["reads"], 2);
-        assert_eq!(metrics["range_reads"], 2);
-        assert_eq!(metrics["requested_plaintext_bytes"], 8);
-        assert_eq!(metrics["rounded_ciphertext_bytes"], 32);
-        assert_eq!(metrics["ciphertext_origin_calls"], 2);
-        assert_eq!(
-            metrics["ciphertext_origin_bytes"],
-            (HEADER_SIZE + 32) as u64
-        );
-        assert_eq!(metrics["header_cache_misses"], 1);
-        assert_eq!(metrics["header_cache_hits"], 1);
-        assert_eq!(metrics["crypto_jobs"], 1);
-        assert_eq!(metrics["chunk_cache_hits"], 1);
-        assert_eq!(metrics["chunk_cache_misses"], 1);
-        assert_eq!(metrics["chunk_cache_bytes"], 16);
-        assert_eq!(metrics["header_validation_calls"], 1);
-        assert!(metrics["header_validation_ns"].as_u64().unwrap() >= 5_000_000);
-        assert!(metrics["ciphertext_origin_ns"].as_u64().unwrap() >= 10_000_000);
-        assert!(metrics["crypto_service_ns"].as_u64().unwrap() > 0);
+        assert_eq!(metrics["ciphertext_origin_calls"], 1);
+        assert_eq!(metrics["ciphertext_origin_body_calls"], 0);
+        assert_eq!(metrics["ciphertext_origin_request_not_found"], 1);
+        for name in [
+            "ciphertext_origin_request_successes",
+            "ciphertext_origin_request_errors",
+            "ciphertext_origin_request_cancellations",
+            "ciphertext_origin_request_active",
+            "ciphertext_origin_body_successes",
+            "ciphertext_origin_body_errors",
+            "ciphertext_origin_body_cancellations",
+            "ciphertext_origin_body_active",
+            "ciphertext_origin_identity_rejections",
+        ] {
+            assert_eq!(metrics[name], 0, "unexpected {name}");
+        }
+        assert_eq!(metrics["ciphertext_origin_body_ns"], 0);
+        assert_eq!(metrics["ciphertext_origin_bytes"], 0);
+        let request_ns = metrics["ciphertext_origin_request_ns"].as_u64().unwrap();
+        assert!(request_ns >= 5_000_000);
+        assert!(metrics["ciphertext_origin_ns"].as_u64().unwrap() >= request_ns);
+    }
+
+    #[tokio::test]
+    async fn origin_failures_and_cancellations_are_classified() {
+        for stage in [
+            "request_error",
+            "body_error",
+            "request_cancel",
+            "body_cancel",
+        ] {
+            let inner = Arc::new(CountingStore {
+                fail_request: stage == "request_error",
+                fail_body: stage == "body_error",
+                delay: (stage == "request_cancel").then_some(std::time::Duration::from_secs(60)),
+                body_delay: (stage == "body_cancel").then_some(std::time::Duration::from_secs(60)),
+                ..Default::default()
+            });
+            let encrypted = store(inner, "origin-outcomes");
+            let location = Path::from("metadata");
+            encrypted
+                .put(&location, Bytes::from_static(b"payload").into())
+                .await
+                .unwrap();
+            {
+                let reader = encrypted.get_range(&location, 0..1);
+                tokio::pin!(reader);
+                if stage.ends_with("cancel") {
+                    assert!(futures_util::poll!(reader.as_mut()).is_pending());
+                    let active = if stage == "request_cancel" {
+                        "ciphertext_origin_request_active"
+                    } else {
+                        "ciphertext_origin_body_active"
+                    };
+                    assert_eq!(encrypted.read_metrics.snapshot()[active], 1);
+                } else {
+                    assert!(reader.await.is_err());
+                }
+            }
+            let metrics = encrypted.read_metrics.snapshot();
+            let body_started = stage.starts_with("body");
+            assert_eq!(metrics["ciphertext_origin_calls"], 1);
+            assert_eq!(
+                metrics["ciphertext_origin_request_successes"],
+                u64::from(body_started)
+            );
+            assert_eq!(metrics["ciphertext_origin_body_calls"], u64::from(body_started));
+            for (name, expected) in [
+                (
+                    "ciphertext_origin_request_errors",
+                    stage == "request_error",
+                ),
+                ("ciphertext_origin_body_errors", stage == "body_error"),
+                (
+                    "ciphertext_origin_request_cancellations",
+                    stage == "request_cancel",
+                ),
+                (
+                    "ciphertext_origin_body_cancellations",
+                    stage == "body_cancel",
+                ),
+            ] {
+                assert_eq!(metrics[name], u64::from(expected), "{stage}: {name}");
+            }
+            for name in [
+                "ciphertext_origin_request_active",
+                "ciphertext_origin_body_active",
+                "ciphertext_origin_request_not_found",
+                "ciphertext_origin_identity_rejections",
+                "ciphertext_origin_body_successes",
+            ] {
+                assert_eq!(metrics[name], 0, "{stage}: {name}");
+            }
+        }
     }
 
     #[tokio::test]
@@ -1051,6 +1206,12 @@ mod tests {
             .unwrap();
         gate.add_permits(1);
         assert!(is_integrity_error(&reader.await.unwrap().unwrap_err()));
+        let metrics = encrypted.read_metrics.snapshot();
+        assert_eq!(metrics["ciphertext_origin_identity_rejections"], 1);
+        assert_eq!(metrics["ciphertext_origin_request_successes"], 2);
+        assert_eq!(metrics["ciphertext_origin_body_calls"], 1);
+        assert_eq!(metrics["ciphertext_origin_request_active"], 0);
+        assert_eq!(metrics["ciphertext_origin_body_active"], 0);
         assert_eq!(
             encrypted
                 .read_metrics

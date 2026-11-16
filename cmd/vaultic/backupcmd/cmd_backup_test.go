@@ -124,6 +124,17 @@ func TestBackupEncryptionReadDelta(test *testing.T) {
 		current  *uint64
 		read     func(*daemon.EncryptionReadMetrics) uint64
 	}{
+		{&baseline.CiphertextOriginRequestNS, &current.CiphertextOriginRequestNS, func(value *daemon.EncryptionReadMetrics) uint64 { return value.CiphertextOriginRequestNS }},
+		{&baseline.CiphertextOriginBodyNS, &current.CiphertextOriginBodyNS, func(value *daemon.EncryptionReadMetrics) uint64 { return value.CiphertextOriginBodyNS }},
+		{&baseline.CiphertextOriginBodyCalls, &current.CiphertextOriginBodyCalls, func(value *daemon.EncryptionReadMetrics) uint64 { return value.CiphertextOriginBodyCalls }},
+		{&baseline.CiphertextOriginRequestSuccesses, &current.CiphertextOriginRequestSuccesses, func(value *daemon.EncryptionReadMetrics) uint64 { return value.CiphertextOriginRequestSuccesses }},
+		{&baseline.CiphertextOriginRequestNotFound, &current.CiphertextOriginRequestNotFound, func(value *daemon.EncryptionReadMetrics) uint64 { return value.CiphertextOriginRequestNotFound }},
+		{&baseline.CiphertextOriginRequestErrors, &current.CiphertextOriginRequestErrors, func(value *daemon.EncryptionReadMetrics) uint64 { return value.CiphertextOriginRequestErrors }},
+		{&baseline.CiphertextOriginRequestCancellations, &current.CiphertextOriginRequestCancellations, func(value *daemon.EncryptionReadMetrics) uint64 { return value.CiphertextOriginRequestCancellations }},
+		{&baseline.CiphertextOriginIdentityRejections, &current.CiphertextOriginIdentityRejections, func(value *daemon.EncryptionReadMetrics) uint64 { return value.CiphertextOriginIdentityRejections }},
+		{&baseline.CiphertextOriginBodySuccesses, &current.CiphertextOriginBodySuccesses, func(value *daemon.EncryptionReadMetrics) uint64 { return value.CiphertextOriginBodySuccesses }},
+		{&baseline.CiphertextOriginBodyErrors, &current.CiphertextOriginBodyErrors, func(value *daemon.EncryptionReadMetrics) uint64 { return value.CiphertextOriginBodyErrors }},
+		{&baseline.CiphertextOriginBodyCancellations, &current.CiphertextOriginBodyCancellations, func(value *daemon.EncryptionReadMetrics) uint64 { return value.CiphertextOriginBodyCancellations }},
 		{&baseline.HeaderValidationCalls, &current.HeaderValidationCalls, func(value *daemon.EncryptionReadMetrics) uint64 { return value.HeaderValidationCalls }},
 		{&baseline.HeaderValidationNanoseconds, &current.HeaderValidationNanoseconds, func(value *daemon.EncryptionReadMetrics) uint64 { return value.HeaderValidationNanoseconds }},
 		{&baseline.HeaderValidationCoalescedReads, &current.HeaderValidationCoalescedReads, func(value *daemon.EncryptionReadMetrics) uint64 { return value.HeaderValidationCoalescedReads }},
@@ -151,6 +162,12 @@ func TestBackupEncryptionReadDelta(test *testing.T) {
 			test.Fatal("chunk counter reset became a valid interval")
 		}
 		*field.baseline, *field.current = 0, 0
+	}
+	baseline.CiphertextOriginRequestActive, baseline.CiphertextOriginBodyActive = 5, 6
+	current.CiphertextOriginRequestActive, current.CiphertextOriginBodyActive = 1, 2
+	actual = backupEncryptionReadDelta(current, baseline)
+	if actual == nil || actual.CiphertextOriginRequestActive != 1 || actual.CiphertextOriginBodyActive != 2 {
+		test.Fatal("origin active gauges were differenced as monotonic counters")
 	}
 }
 

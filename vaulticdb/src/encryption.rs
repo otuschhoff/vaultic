@@ -130,6 +130,19 @@ struct EncryptionReadMetrics {
     ciphertext_origin_calls: AtomicU64,
     ciphertext_origin_bytes: AtomicU64,
     ciphertext_origin_ns: AtomicU64,
+    ciphertext_origin_request_ns: AtomicU64,
+    ciphertext_origin_body_ns: AtomicU64,
+    ciphertext_origin_body_calls: AtomicU64,
+    ciphertext_origin_request_successes: AtomicU64,
+    ciphertext_origin_request_not_found: AtomicU64,
+    ciphertext_origin_request_errors: AtomicU64,
+    ciphertext_origin_request_cancellations: AtomicU64,
+    ciphertext_origin_request_active: AtomicU64,
+    ciphertext_origin_identity_rejections: AtomicU64,
+    ciphertext_origin_body_successes: AtomicU64,
+    ciphertext_origin_body_errors: AtomicU64,
+    ciphertext_origin_body_cancellations: AtomicU64,
+    ciphertext_origin_body_active: AtomicU64,
     ciphertext_origin_latency: ReadLatencyBuckets,
     chunk_wait_ns: AtomicU64,
     chunk_wait_latency: ReadLatencyBuckets,
@@ -195,6 +208,37 @@ impl ReadLatencyBuckets {
 
     fn snapshot(&self) -> [u64; 8] {
         std::array::from_fn(|index| self.counts[index].load(Ordering::Relaxed))
+    }
+}
+
+struct ReadOutcome<'counter> {
+    active: &'counter AtomicU64,
+    cancellations: &'counter AtomicU64,
+    finished: bool,
+}
+
+impl<'counter> ReadOutcome<'counter> {
+    fn new(active: &'counter AtomicU64, cancellations: &'counter AtomicU64) -> Self {
+        active.fetch_add(1, Ordering::Relaxed);
+        Self {
+            active,
+            cancellations,
+            finished: false,
+        }
+    }
+
+    fn finish(&mut self, counter: &AtomicU64) {
+        counter.fetch_add(1, Ordering::Relaxed);
+        self.finished = true;
+    }
+}
+
+impl Drop for ReadOutcome<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.cancellations.fetch_add(1, Ordering::Relaxed);
+        }
+        self.active.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -270,7 +314,7 @@ impl EncryptionReadMetrics {
     }
 
     fn snapshot(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut snapshot = serde_json::json!({
             "reads": self.reads.load(Ordering::Relaxed),
             "requested_plaintext_bytes": self.requested_plaintext_bytes.load(Ordering::Relaxed),
             "rounded_ciphertext_bytes": self.rounded_ciphertext_bytes.load(Ordering::Relaxed),
@@ -311,7 +355,62 @@ impl EncryptionReadMetrics {
             "chunk_sampled_refetch_within_1g": self.chunk_sampled_refetch_within_1g.load(Ordering::Relaxed),
             "read_windows": *self.read_windows.lock().unwrap_or_else(|error| error.into_inner()),
             "read_windows_dropped": self.read_windows_dropped.load(Ordering::Relaxed),
-        })
+        });
+        snapshot["ciphertext_origin_request_ns"] = self
+            .ciphertext_origin_request_ns
+            .load(Ordering::Relaxed)
+            .into();
+        snapshot["ciphertext_origin_body_ns"] =
+            self.ciphertext_origin_body_ns.load(Ordering::Relaxed).into();
+        snapshot["ciphertext_origin_body_calls"] = self
+            .ciphertext_origin_body_calls
+            .load(Ordering::Relaxed)
+            .into();
+        for (name, counter) in [
+            (
+                "ciphertext_origin_request_successes",
+                &self.ciphertext_origin_request_successes,
+            ),
+            (
+                "ciphertext_origin_request_not_found",
+                &self.ciphertext_origin_request_not_found,
+            ),
+            (
+                "ciphertext_origin_request_errors",
+                &self.ciphertext_origin_request_errors,
+            ),
+            (
+                "ciphertext_origin_request_cancellations",
+                &self.ciphertext_origin_request_cancellations,
+            ),
+            (
+                "ciphertext_origin_request_active",
+                &self.ciphertext_origin_request_active,
+            ),
+            (
+                "ciphertext_origin_identity_rejections",
+                &self.ciphertext_origin_identity_rejections,
+            ),
+            (
+                "ciphertext_origin_body_successes",
+                &self.ciphertext_origin_body_successes,
+            ),
+            (
+                "ciphertext_origin_body_errors",
+                &self.ciphertext_origin_body_errors,
+            ),
+            (
+                "ciphertext_origin_body_cancellations",
+                &self.ciphertext_origin_body_cancellations,
+            ),
+            (
+                "ciphertext_origin_body_active",
+                &self.ciphertext_origin_body_active,
+            ),
+        ] {
+            snapshot[name] = counter.load(Ordering::Relaxed).into();
+        }
+        snapshot
     }
 }
 
@@ -1486,6 +1585,42 @@ impl EncryptedObjectStore {
         })
     }
 
+    async fn origin_request(&self, location: &Path, options: GetOptions) -> Result<GetResult> {
+        let metrics = &self.read_metrics;
+        let mut outcome = ReadOutcome::new(
+            &metrics.ciphertext_origin_request_active,
+            &metrics.ciphertext_origin_request_cancellations,
+        );
+        let _request = ReadTiming::new(&self.read_metrics.ciphertext_origin_request_ns);
+        let result = self.inner.get_opts(location, options).await;
+        outcome.finish(match &result {
+            Ok(_) => &metrics.ciphertext_origin_request_successes,
+            Err(slatedb::object_store::Error::NotFound { .. }) => {
+                &metrics.ciphertext_origin_request_not_found
+            }
+            Err(_) => &metrics.ciphertext_origin_request_errors,
+        });
+        result
+    }
+
+    async fn origin_body(&self, result: GetResult) -> Result<Bytes> {
+        self.read_metrics
+            .ciphertext_origin_body_calls
+            .fetch_add(1, Ordering::Relaxed);
+        let mut outcome = ReadOutcome::new(
+            &self.read_metrics.ciphertext_origin_body_active,
+            &self.read_metrics.ciphertext_origin_body_cancellations,
+        );
+        let _body = ReadTiming::new(&self.read_metrics.ciphertext_origin_body_ns);
+        let result = result.bytes().await;
+        outcome.finish(if result.is_ok() {
+            &self.read_metrics.ciphertext_origin_body_successes
+        } else {
+            &self.read_metrics.ciphertext_origin_body_errors
+        });
+        result
+    }
+
     async fn fetch_chunk(
         &self,
         location: &Path,
@@ -1508,12 +1643,15 @@ impl EncryptedObjectStore {
             .fetch_add(1, Ordering::Relaxed);
         let timing = ReadTiming::new(&self.read_metrics.ciphertext_origin_ns)
             .with_histogram(&self.read_metrics.ciphertext_origin_latency);
-        let encrypted = self.inner.get_opts(location, options).await?;
+        let encrypted = self.origin_request(location, options).await?;
         if encrypted.meta != expected {
+            self.read_metrics
+                .ciphertext_origin_identity_rejections
+                .fetch_add(1, Ordering::Relaxed);
             self.invalidate_header(location);
             return Err(encryption_error(EncryptionError::Authentication));
         }
-        let ciphertext = encrypted.bytes().await?;
+        let ciphertext = self.origin_body(encrypted).await?;
         self.read_metrics
             .ciphertext_origin_bytes
             .fetch_add(ciphertext.len() as u64, Ordering::Relaxed);
@@ -1667,11 +1805,11 @@ impl EncryptedObjectStore {
             .fetch_add(1, Ordering::Relaxed);
         let fetch = ReadTiming::new(&self.read_metrics.ciphertext_origin_ns)
             .with_histogram(&self.read_metrics.ciphertext_origin_latency);
-        let result = self.inner.get_opts(location, options).await?;
+        let result = self.origin_request(location, options).await?;
         let meta = result.meta.clone();
         let attributes = result.attributes.clone();
         let extensions = result.extensions.clone();
-        let bytes = result.bytes().await?;
+        let bytes = self.origin_body(result).await?;
         self.read_metrics
             .ciphertext_origin_bytes
             .fetch_add(bytes.len() as u64, Ordering::Relaxed);
@@ -1880,18 +2018,21 @@ impl ObjectStore for EncryptedObjectStore {
                 .fetch_add(1, Ordering::Relaxed);
             let fetch = ReadTiming::new(&self.read_metrics.ciphertext_origin_ns)
                 .with_histogram(&self.read_metrics.ciphertext_origin_latency);
-            let encrypted = self.inner.get_opts(location, options).await?;
+            let encrypted = self.origin_request(location, options).await?;
             if cached_meta
                 .as_ref()
                 .is_some_and(|cached| cached != &encrypted.meta)
             {
+                self.read_metrics
+                    .ciphertext_origin_identity_rejections
+                    .fetch_add(1, Ordering::Relaxed);
                 self.invalidate_header(location);
                 return Err(encryption_error(EncryptionError::Authentication));
             }
             let encrypted_meta = encrypted.meta.clone();
             let attributes = encrypted.attributes.clone();
             let extensions = encrypted.extensions.clone();
-            let ciphertext = encrypted.bytes().await?;
+            let ciphertext = self.origin_body(encrypted).await?;
             self.read_metrics
                 .ciphertext_origin_bytes
                 .fetch_add(ciphertext.len() as u64, Ordering::Relaxed);

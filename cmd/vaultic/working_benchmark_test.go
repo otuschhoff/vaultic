@@ -230,6 +230,15 @@ func TestPublicationQualificationNativeLookup(t *testing.T) {
 	if reads.Completed+transactionReads.Completed == 0 || reads.Active+transactionReads.Active != 0 {
 		t.Fatalf("authenticated native lookup lost storage read attribution: database=%+v transaction=%+v", reads, transactionReads)
 	}
+	encryption := state.Attribution.EncryptionReads
+	if encryption == nil || encryption.CiphertextOriginCalls == 0 ||
+		encryption.CiphertextOriginCalls != encryption.CiphertextOriginRequestSuccesses+encryption.CiphertextOriginRequestNotFound+encryption.CiphertextOriginRequestErrors+encryption.CiphertextOriginRequestCancellations ||
+		encryption.CiphertextOriginRequestSuccesses != encryption.CiphertextOriginBodyCalls+encryption.CiphertextOriginIdentityRejections ||
+		encryption.CiphertextOriginBodyCalls != encryption.CiphertextOriginBodySuccesses+encryption.CiphertextOriginBodyErrors+encryption.CiphertextOriginBodyCancellations ||
+		encryption.CiphertextOriginRequestActive != 0 || encryption.CiphertextOriginBodyActive != 0 ||
+		encryption.CiphertextOriginRequestErrors+encryption.CiphertextOriginRequestCancellations+encryption.CiphertextOriginIdentityRejections+encryption.CiphertextOriginBodyErrors+encryption.CiphertextOriginBodyCancellations != 0 {
+		t.Fatalf("authenticated encrypted lookup lost settled origin outcomes: %+v", encryption)
+	}
 	previous := client
 	rtest.OK(t, publicationQualificationReopen(t.Context(), &client, options))
 	if client == nil || client == previous {
@@ -899,6 +908,8 @@ const publicationCoalesce800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-coales
 const publicationCoalesce800kBin = "/root/proj/vaultic/bin/phase35-ncl1-coalesce800k-20261115/linux-amd64"
 const publicationNativeRead800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-native-read-fme-cae1-20261116-800k"
 const publicationNativeRead800kBin = "/root/proj/vaultic/bin/phase35-ncl1-native-read800k-20261116/linux-amd64"
+const publicationOriginRead800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-origin-read-fme-cae1-20261116-800k"
+const publicationOriginRead800kBin = "/root/proj/vaultic/bin/phase35-ncl1-origin-read800k-20261116/linux-amd64"
 
 func publicationCoalesceDelay(root, label string) (int, error) {
 	for index, delay := range []int{1, 5, 5, 1, 5, 1, 1, 5} {
@@ -932,7 +943,36 @@ func publicationProducerLeg(root, label string) (int, error) {
 	if label == "leg-01-native" && root == filepath.Join(publicationNativeRead800kRoot, label) {
 		return 56, nil
 	}
+	if label == "leg-01-origin" && root == filepath.Join(publicationOriginRead800kRoot, label) {
+		return 56, nil
+	}
 	return 0, fmt.Errorf("producer comparison requires its exact scheduled private leg")
+}
+
+func TestPublicationOriginReadPolicy(t *testing.T) {
+	for _, key := range []string{"VAULTIC_PHASE35_READERS_LEG", "VAULTIC_PHASE35_RAM32_LEG", "VAULTIC_PHASE35_RAM64_LEG", "VAULTIC_PHASE35_ORIGINAL_PARENT", "VAULTIC_PHASE35_PRODUCER_LEG"} {
+		t.Setenv(key, "")
+	}
+	baseline, err := publicationDBProfile("db-scale800k")
+	rtest.OK(t, err)
+	root, label := filepath.Join(publicationOriginRead800kRoot, "leg-01-origin"), "leg-01-origin"
+	t.Setenv("VAULTIC_PHASE35_PRODUCER_LEG", label)
+	t.Setenv("VAULTIC_PHASE35_THROUGHPUT_ROOT", root)
+	tasks, err := publicationProducerLeg(root, label)
+	rtest.OK(t, err)
+	tuning, err := publicationDBProfile("db-scale800k")
+	rtest.OK(t, err)
+	want := append(slices.Clone(baseline.Flags), "--read-open-in-workers", "--blob-save-concurrency=56")
+	if tasks != 56 || !slices.Equal(tuning.Flags, want) || tuning.MetaCacheBytes != baseline.MetaCacheBytes || tuning.BlockCacheBytes != baseline.BlockCacheBytes || tuning.CryptoThreads != baseline.CryptoThreads {
+		t.Fatal("origin-read diagnostic changed control settings")
+	}
+	if _, err := publicationProducerLeg(root+"/retry", label); err == nil {
+		t.Fatal("origin-read diagnostic accepted a child path")
+	}
+	t.Setenv("VAULTIC_PHASE35_RAM64_LEG", "leg-01-16g")
+	if _, err := publicationDBProfile("db-scale800k"); err == nil {
+		t.Fatal("origin-read diagnostic accepted simultaneous cache tuning")
+	}
 }
 
 func TestPublicationNativeReadPolicy(t *testing.T) {
@@ -2957,6 +2997,9 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 			}
 			if root == filepath.Join(publicationNativeRead800kRoot, "leg-01-native") {
 				candidate, binary = filepath.Join(publicationNativeRead800kBin, "vaultic"), filepath.Join(publicationNativeRead800kBin, "vaulticdb")
+			}
+			if root == filepath.Join(publicationOriginRead800kRoot, "leg-01-origin") {
+				candidate, binary = filepath.Join(publicationOriginRead800kBin, "vaultic"), filepath.Join(publicationOriginRead800kBin, "vaulticdb")
 			}
 		}
 		if os.Getenv("VAULTIC_PHASE35_RAM32_LEG") != "" {

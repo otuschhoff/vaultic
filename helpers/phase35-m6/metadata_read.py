@@ -79,6 +79,13 @@ COALESCE_BIN = WORKSPACE / 'bin/phase35-ncl1-coalesce800k-20261115/linux-amd64'
 COALESCE_SCHEDULE = (1, 5, 5, 1, 5, 1, 1, 5)
 NATIVE_READ_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-native-read-fme-cae1-20261116-800k')
 NATIVE_READ_BIN = WORKSPACE / 'bin/phase35-ncl1-native-read800k-20261116/linux-amd64'
+ORIGIN_READ_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-origin-read-fme-cae1-20261116-800k')
+ORIGIN_READ_BIN = WORKSPACE / 'bin/phase35-ncl1-origin-read800k-20261116/linux-amd64'
+ORIGIN_OUTCOME_COUNTERS = ('ciphertext_origin_request_successes', 'ciphertext_origin_request_not_found',
+                           'ciphertext_origin_request_errors', 'ciphertext_origin_request_cancellations',
+                           'ciphertext_origin_identity_rejections', 'ciphertext_origin_body_successes',
+                           'ciphertext_origin_body_errors', 'ciphertext_origin_body_cancellations')
+ORIGIN_OUTCOME_GAUGES = ('ciphertext_origin_request_active', 'ciphertext_origin_body_active')
 ACCEPTED = Path('/volume2/NASDA2/vaultic-test-m6/critical-path-fme_cae1-20261102-production-cap100k/group-64')
 SEED = Path('/ncl1-1-vs-50/fme_dump/amakura/db.begin-readiness-20261001-fuU56R')
 CANDIDATE = WORKSPACE / 'bin/phase35-metadata-read/linux-amd64/vaultic'
@@ -173,6 +180,8 @@ def producer_leg(label):
             return COALESCE_ROOT / label, Path('/run/vaultic-unchanged-ncl1-coalesce800k-' + label), 56
     if label == 'leg-01-native':
         return NATIVE_READ_ROOT / label, Path('/run/vaultic-unchanged-ncl1-native-read800k-' + label), 56
+    if label == 'leg-01-origin':
+        return ORIGIN_READ_ROOT / label, Path('/run/vaultic-unchanged-ncl1-origin-read800k-' + label), 56
     raise ValueError('producer comparison requires its exact scheduled private leg')
 
 
@@ -264,6 +273,8 @@ def binaries(profile):
         bundle = COALESCE_BIN if root.parent == COALESCE_ROOT else PRODUCER_BIN
         if root.parent == NATIVE_READ_ROOT:
             bundle = NATIVE_READ_BIN
+        if root.parent == ORIGIN_READ_ROOT:
+            bundle = ORIGIN_READ_BIN
         return bundle / 'vaultic', bundle / 'vaulticdb'
     if os.environ.get('VAULTIC_PHASE35_RAM64_LEG'):
         original_parent_selected()
@@ -974,6 +985,10 @@ def encryption_counter_deltas(first, last):
             if any(now < earlier for now, earlier in zip(after, before)):
                 raise ValueError('follow-up latency counter reset')
             result[name] = [now - earlier for now, earlier in zip(after, before)]
+        elif name in ORIGIN_OUTCOME_GAUGES:
+            if any(type(value) is not int or value < 0 for value in (before, after)):
+                raise ValueError('invalid origin active gauge')
+            result[name] = after
         else:
             if after < before:
                 raise ValueError('follow-up encryption counter reset')
@@ -1093,7 +1108,7 @@ def followup_metadata_flags(settings, variant, inode_limit, root):
     flags += reconciliation_flags(variant)
     if inode_limit == 800000:
         flags += ['--metadata-reconciliation-batch-size=5000', '--metadata-reconciliation-read-ahead=1']
-        if root.parent in (PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT):
+        if root.parent in (PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT):
             flags += ['--read-open-in-workers', f'--blob-save-concurrency={producer_leg(root.name)[2]}']
     return flags
 
@@ -1104,7 +1119,7 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
     variant = root.name.rsplit('-', 1)[-1] if inode_limit == 400000 and root.parent in (RECONCILE_ROOT, CACHE_ROOT, PIPELINE_ROOT, RAM16_ROOT) else None
     settings = cache_profile_settings(profile, variant)
     settings = coalesce_settings(root, settings)
-    if root.parent in (READERS_ROOT, RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT):
+    if root.parent in (READERS_ROOT, RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT):
         if (profile, inode_limit) != ('db-scale800k', 800000):
             raise ValueError('reader receipt requires its exact 800k profile')
         if root.parent == READERS_ROOT:
@@ -1172,16 +1187,18 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
         else:
             deltas[field] = encryption_counter_deltas(first, last)
     critical = measured['critical_path']
-    identities = validated_source_identities(root, expected_entries) if root.parent in (READERS_ROOT, RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT) else None
-    if root.parent in (RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT):
+    identities = validated_source_identities(root, expected_entries) if root.parent in (READERS_ROOT, RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT) else None
+    if root.parent in (RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT):
         require_dependency_coverage(critical, expected_regular)
-    if root.parent in (PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT):
+    if root.parent in (PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT):
         require_producer_coverage(critical, producer_leg(root.name)[2])
         if root.parent == COALESCE_ROOT:
             require_coalesce_coverage(critical, settings['batch_delay_ns'])
-        if root.parent == NATIVE_READ_ROOT:
+        if root.parent in (NATIVE_READ_ROOT, ORIGIN_READ_ROOT):
             require_coalesce_coverage(critical, 1000000)
             require_native_read_coverage(critical)
+        if root.parent == ORIGIN_READ_ROOT:
+            require_origin_read_coverage(critical)
     if inode_limit == 800000:
         require_cache_reuse(critical['reconciliation'], expected_entries, None if identities is None else identities['metadata_records'])
         cpu = root / 'group-64/forced/cpu/cpu.pprof'
@@ -1510,6 +1527,36 @@ def require_producer_coverage(critical, blob_tasks, entries=800000):
     for stage in traversal.values():
         if set(stage) != {'calls', 'ns'} or any(type(value) is not int or value <= 0 for value in stage.values()):
             raise ValueError('missing producer traversal timing')
+
+
+def require_origin_read_coverage(critical):
+    metrics = critical.get('encryption_reads') or {}
+    names = ('ciphertext_origin_calls', 'ciphertext_origin_body_calls', 'ciphertext_origin_ns',
+             'ciphertext_origin_request_ns', 'ciphertext_origin_body_ns')
+    if any(type(metrics.get(name)) is not int or metrics[name] <= 0 for name in names):
+        raise ValueError('origin request/body stages missing or unmeasured')
+    if metrics['ciphertext_origin_request_ns'] + metrics['ciphertext_origin_body_ns'] > metrics['ciphertext_origin_ns']:
+        raise ValueError('origin request/body coverage differs from settled total')
+    outcomes = ORIGIN_OUTCOME_COUNTERS + ORIGIN_OUTCOME_GAUGES
+    if not any(name in metrics for name in outcomes):
+        if metrics['ciphertext_origin_calls'] != metrics['ciphertext_origin_body_calls']:
+            raise ValueError('origin request/body coverage differs from settled total')
+        return
+    if any(type(metrics.get(name)) is not int or metrics[name] < 0 for name in outcomes):
+        raise ValueError('origin outcomes missing or invalid')
+    if any(metrics[name] for name in ORIGIN_OUTCOME_GAUGES):
+        raise ValueError('origin request/body work is not drained')
+    if (metrics['ciphertext_origin_calls'] != sum(metrics[name] for name in
+            ('ciphertext_origin_request_successes', 'ciphertext_origin_request_not_found',
+             'ciphertext_origin_request_errors', 'ciphertext_origin_request_cancellations'))
+            or metrics['ciphertext_origin_request_successes'] != metrics['ciphertext_origin_body_calls'] + metrics['ciphertext_origin_identity_rejections']
+            or metrics['ciphertext_origin_body_calls'] != sum(metrics[name] for name in
+                ('ciphertext_origin_body_successes', 'ciphertext_origin_body_errors', 'ciphertext_origin_body_cancellations'))):
+        raise ValueError('origin request/body outcomes do not reconcile')
+    if any(metrics[name] for name in
+           ('ciphertext_origin_request_errors', 'ciphertext_origin_request_cancellations',
+            'ciphertext_origin_identity_rejections', 'ciphertext_origin_body_errors', 'ciphertext_origin_body_cancellations')):
+        raise ValueError('origin request/body failures, cancellation or identity rejection')
 
 
 def require_native_read_coverage(critical):
@@ -1950,6 +1997,60 @@ def execute_chunk_series(immutable=False, reconcile=False, caches=False, pipelin
 
 
 class ChunkComparisonTests(unittest.TestCase):
+    def test_origin_read_control_route_and_coverage(self):
+        label = 'leg-01-origin'
+        root, runtime, tasks = producer_leg(label)
+        self.assertEqual(root.parent, ORIGIN_READ_ROOT)
+        self.assertEqual(tasks, 56)
+        with patch.dict(os.environ, {'VAULTIC_PHASE35_PRODUCER_LEG': label}):
+            self.assertEqual(paths('coalesced', 800000, 'db-scale800k'), (root, runtime))
+            self.assertEqual(binaries('db-scale800k'), (ORIGIN_READ_BIN / 'vaultic', ORIGIN_READ_BIN / 'vaulticdb'))
+            flags = followup_metadata_flags(profile_settings('db-scale800k'), None, 800000, root)
+            self.assertIn('--metadata-batch-delay=1ms', flags)
+            self.assertIn('--blob-save-concurrency=56', flags)
+            with patch.dict(os.environ, {'VAULTIC_PHASE35_RAM64_LEG': 'leg-01-16g'}):
+                with self.assertRaises(ValueError):
+                    producer_leg(label)
+        with self.assertRaises(ValueError):
+            producer_leg(label + '/retry')
+        good = {'ciphertext_origin_calls': 2, 'ciphertext_origin_body_calls': 2,
+                'ciphertext_origin_ns': 13, 'ciphertext_origin_request_ns': 3, 'ciphertext_origin_body_ns': 7}
+        require_origin_read_coverage({'encryption_reads': good})
+        for name in good:
+            for value in (None, -1, 0, True):
+                with self.assertRaises(ValueError):
+                    require_origin_read_coverage({'encryption_reads': dict(good, **{name: value})})
+        for bad in ({}, dict(good, ciphertext_origin_body_calls=1), dict(good, ciphertext_origin_request_ns=9)):
+            with self.assertRaises(ValueError):
+                require_origin_read_coverage({'encryption_reads': bad})
+        classified = {**good, **dict.fromkeys(ORIGIN_OUTCOME_COUNTERS + ORIGIN_OUTCOME_GAUGES, 0),
+                  'ciphertext_origin_request_successes': 2, 'ciphertext_origin_body_successes': 2}
+        require_origin_read_coverage({'encryption_reads': classified})
+        missing_probe = dict(classified, ciphertext_origin_calls=3, ciphertext_origin_request_not_found=1)
+        require_origin_read_coverage({'encryption_reads': missing_probe})
+        for name in ORIGIN_OUTCOME_COUNTERS + ORIGIN_OUTCOME_GAUGES:
+            for value in (None, -1, True):
+                with self.assertRaises(ValueError):
+                    require_origin_read_coverage({'encryption_reads': dict(classified, **{name: value})})
+            partial = dict(classified)
+            del partial[name]
+            with self.assertRaises(ValueError):
+                require_origin_read_coverage({'encryption_reads': partial})
+            with self.assertRaises(ValueError):
+                require_origin_read_coverage({'encryption_reads': dict(classified, **{name: classified[name] + 1})})
+        for terminal in ('ciphertext_origin_request_errors', 'ciphertext_origin_request_cancellations'):
+            with self.assertRaisesRegex(ValueError, 'failures, cancellation'):
+                require_origin_read_coverage({'encryption_reads': dict(classified, ciphertext_origin_calls=3, **{terminal: 1})})
+        for terminal in ('ciphertext_origin_body_errors', 'ciphertext_origin_body_cancellations'):
+            with self.assertRaisesRegex(ValueError, 'failures, cancellation'):
+                require_origin_read_coverage({'encryption_reads': dict(classified, ciphertext_origin_body_successes=1, **{terminal: 1})})
+        with self.assertRaisesRegex(ValueError, 'failures, cancellation'):
+            require_origin_read_coverage({'encryption_reads': dict(classified, ciphertext_origin_request_successes=3,
+                ciphertext_origin_calls=3, ciphertext_origin_identity_rejections=1)})
+        self.assertEqual(encryption_counter_deltas(
+            dict.fromkeys(ORIGIN_OUTCOME_GAUGES, 5), dict.fromkeys(ORIGIN_OUTCOME_GAUGES, 1)),
+            dict.fromkeys(ORIGIN_OUTCOME_GAUGES, 1))
+
     def test_native_read_control_route_and_coverage(self):
         label = 'leg-01-native'
         root, runtime, tasks = producer_leg(label)

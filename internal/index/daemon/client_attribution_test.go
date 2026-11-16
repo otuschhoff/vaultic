@@ -61,6 +61,108 @@ func TestEncryptionReadMetricsCompatibility(test *testing.T) {
 	}
 }
 
+func TestEncryptionOriginStagesCompatibility(test *testing.T) {
+	encoded, err := json.Marshal(EncryptionReadMetrics{
+		CiphertextOriginRequestNS: 13, CiphertextOriginBodyNS: 29, CiphertextOriginBodyCalls: 2,
+	})
+	if err != nil {
+		test.Fatal(err)
+	}
+	status := writerStatus(&vaulticdbv1.WriterStatusResponse{Attribution: &vaulticdbv1.AttributionSnapshot{EncryptionReadMetricsJson: encoded}})
+	metrics := status.Attribution.EncryptionReads
+	if metrics == nil || metrics.CiphertextOriginRequestNS != 13 || metrics.CiphertextOriginBodyNS != 29 || metrics.CiphertextOriginBodyCalls != 2 {
+		test.Fatalf("origin stages lost in status: %+v", metrics)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		test.Fatal(err)
+	}
+	names := []string{"ciphertext_origin_request_ns", "ciphertext_origin_body_ns", "ciphertext_origin_body_calls"}
+	for name := range fields {
+		if strings.HasPrefix(name, "ciphertext_origin_request_") || strings.HasPrefix(name, "ciphertext_origin_body_") || name == "ciphertext_origin_identity_rejections" {
+			delete(fields, name)
+		}
+	}
+	for _, name := range names {
+		delete(fields, name)
+	}
+	legacy, err := json.Marshal(fields)
+	if err != nil || encryptionReadMetrics(legacy) == nil {
+		test.Fatal("legacy origin metrics became unavailable")
+	}
+	for _, name := range names {
+		for _, invalid := range []string{"null", "-1", `"invalid"`, "18446744073709551616"} {
+			fields[name] = json.RawMessage(invalid)
+			malformed, err := json.Marshal(fields)
+			if err != nil || encryptionReadMetrics(malformed) != nil {
+				test.Fatalf("invalid origin stage accepted: %s=%s", name, invalid)
+			}
+		}
+		fields[name] = json.RawMessage("7")
+		partial, err := json.Marshal(fields)
+		if err != nil || encryptionReadMetrics(partial) != nil {
+			test.Fatalf("partial origin stage set accepted: %s", name)
+		}
+		delete(fields, name)
+	}
+}
+
+func TestEncryptionOriginOutcomesCompatibility(test *testing.T) {
+	expected := EncryptionReadMetrics{
+		CiphertextOriginRequestNS: 13, CiphertextOriginBodyNS: 29, CiphertextOriginBodyCalls: 2,
+		CiphertextOriginRequestSuccesses: 3, CiphertextOriginRequestNotFound: 5,
+		CiphertextOriginRequestErrors: 7, CiphertextOriginRequestCancellations: 11,
+		CiphertextOriginRequestActive: 17, CiphertextOriginIdentityRejections: 19,
+		CiphertextOriginBodySuccesses: 23, CiphertextOriginBodyErrors: 31,
+		CiphertextOriginBodyCancellations: 37, CiphertextOriginBodyActive: 41,
+	}
+	encoded, err := json.Marshal(expected)
+	if err != nil {
+		test.Fatal(err)
+	}
+	status := writerStatus(&vaulticdbv1.WriterStatusResponse{Attribution: &vaulticdbv1.AttributionSnapshot{EncryptionReadMetricsJson: encoded}})
+	if !reflect.DeepEqual(status.Attribution.EncryptionReads, &expected) {
+		test.Fatalf("origin outcomes lost in status: %+v", status.Attribution.EncryptionReads)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		test.Fatal(err)
+	}
+	names := []string{"ciphertext_origin_request_successes", "ciphertext_origin_request_not_found",
+		"ciphertext_origin_request_errors", "ciphertext_origin_request_cancellations", "ciphertext_origin_request_active",
+		"ciphertext_origin_identity_rejections", "ciphertext_origin_body_successes", "ciphertext_origin_body_errors",
+		"ciphertext_origin_body_cancellations", "ciphertext_origin_body_active"}
+	for _, name := range names {
+		original := fields[name]
+		for _, invalid := range []string{"null", "-1", `"invalid"`, "true", "18446744073709551616"} {
+			fields[name] = json.RawMessage(invalid)
+			malformed, err := json.Marshal(fields)
+			if err != nil || encryptionReadMetrics(malformed) != nil {
+				test.Fatalf("invalid origin outcome accepted: %s=%s", name, invalid)
+			}
+		}
+		delete(fields, name)
+		partial, err := json.Marshal(fields)
+		if err != nil || encryptionReadMetrics(partial) != nil {
+			test.Fatalf("partial outcomes accepted without %s", name)
+		}
+		fields[name] = original
+	}
+	delete(fields, "ciphertext_origin_request_ns")
+	missingPhase, _ := json.Marshal(fields)
+	if encryptionReadMetrics(missingPhase) != nil {
+		test.Fatal("outcomes without phase timers accepted")
+	}
+	fields["ciphertext_origin_request_ns"] = json.RawMessage("13")
+	for _, name := range names {
+		delete(fields, name)
+	}
+	legacy, err := json.Marshal(fields)
+	if err != nil || encryptionReadMetrics(legacy) == nil {
+		test.Fatal("legacy phase-only daemon rejected")
+	}
+}
+
 func TestEncryptionReadLatencyCompatibility(test *testing.T) {
 	encoded, err := json.Marshal(EncryptionReadMetrics{})
 	if err != nil {

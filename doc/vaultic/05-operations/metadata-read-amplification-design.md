@@ -1982,6 +1982,159 @@ The main interval remains below the unchanged 600-second sustained gate.
 No sustained-throughput, physical-NFS-saturation or deployment qualification
 is claimed. Production and defaults remain unchanged.
 
+### Origin Request And Body Attribution
+
+The continuation after commit `861017ad2` splits the existing inclusive
+origin timer into `ciphertext_origin_request_ns` around the underlying
+`get_opts` future and `ciphertext_origin_body_ns` around response `bytes()`
+collection. `ciphertext_origin_body_calls` counts attempted body collections;
+requests that fail or fail identity validation before collection do not
+increment it. Header reads, authenticated chunk fetches and uncached range
+reads use the same boundaries. Existing total timing, histograms, identity
+checks, decryption, caching and concurrency behavior remain unchanged.
+
+The phases pass through the typed Go status snapshot and main-interval
+subtraction with counter-reset rejection. Legacy snapshots without all three
+fields remain accepted; partial, null, negative, overflowing or nonnumeric
+phase sets are rejected. Zero fields from an older daemon mean unavailable,
+not proof that either phase is free. Request and body phases are nested in
+the inclusive origin timer, not additional costs. Body collection can include
+stream scheduling and backend file or network reads; it is not exclusively
+physical network transfer. Compare settled intervals, not partially active
+snapshots, when checking phase totals against inclusive timing.
+
+A read-only calculation from the already sealed November 16 rerun found:
+
+| Existing Main-Interval Counter | Observed |
+| --- | ---: |
+| Requested metadata plaintext bytes | 2457417655 |
+| Logical encrypted-origin bytes | 40573370604 |
+| Origin bytes per requested plaintext byte | 16.511 |
+| Origin mean milliseconds per call | 11.414 |
+| Authenticated chunk evictions | 86104 |
+| Sampled first fetches / refetches | 1679 / 686 |
+| Sampled refetches within 1 GB of intervening fetches | 0 |
+| Sampled-history evictions | 0 |
+
+The byte ratio is a logical metadata read-amplification measure, not unique
+data volume or physical NAS traffic. Sampled refetches are not an exhaustive
+refetch count; their distance counters do not isolate cache capacity as the
+cause. The combination warrants investigating authenticated-chunk rounding
+and longer-distance reuse as well as per-fetch latency. It does not justify
+a cache-policy, chunk-format or concurrency default change by itself.
+
+Validation passed 44 encryption tests, with two existing offline measurements
+ignored, and seven focused Go race tests including the authenticated native
+lookup against an explicitly rebuilt debug daemon. The delayed-store fixture
+independently injects request and streamed-body latency, requires the delay
+in the correct phase, checks settled phase totals against the inclusive timer
+and confirms cache hits leave origin phases unchanged. An initial JSON macro
+recursion-limit compile failure was repaired locally by appending structured
+fields after existing snapshot construction; no crate-wide limit changed.
+At this implementation checkpoint no representative backup had yet run with
+the split timers. The subsequent release capture is recorded below; earlier
+accepted evidence and binaries remain sealed.
+
+### Original-Source Origin Split: Failed Acceptance
+
+A fresh pinned release ran the same 800000-path testcase directly from
+`/ncl1-1-vs-50/fme_cae1`, using the qualified original-source parent and
+unchanged settings and resource guards. The backup, selected restore,
+encrypted reopen, unchanged-source and identity checks completed. All
+799076 metadata records were reused, with zero new data blobs, changed or
+failed records, publication or revision allocation. The underlying supervisor
+accepted its correctness and resource checks, but the follow-up metric gate
+rejected the diagnostic. There is no accepted follow-up or diagnostic receipt.
+
+The following are provisional measurements from that failed diagnostic,
+not accepted performance evidence:
+
+| Failed Diagnostic Measurement | Observed |
+| --- | ---: |
+| Main backup seconds | 429.001 |
+| Backup command seconds | 436.911 |
+| Peak combined RSS bytes | 68589903872 |
+| Inclusive origin worker-seconds | 1679.498 |
+| Origin request worker-seconds | 193.788 |
+| Origin body worker-seconds | 1485.363 |
+| Request share of inclusive origin time, percent | 11.538 |
+| Body share of inclusive origin time, percent | 88.441 |
+| Origin requests / body collection attempts | 153287 / 151907 |
+| Requests without body collection | 1380 |
+| Body mean milliseconds per collection attempt | 9.778 |
+| Logical origin bytes per requested plaintext byte | 16.510 |
+
+The gate required equal request and body counts. A new focused native
+regression, `missing_object_origin_request_has_no_body`, demonstrates that
+a missing-object request records request time and an origin attempt without
+ever collecting a body. That test passed, but does not establish that all
+1380 unmatched requests in this capture were expected missing-object probes.
+The counters in that capture cannot distinguish request errors, identity
+rejection or cancellation before body collection. At the failure-review
+checkpoint the gate was left unchanged. The failed run has not been
+reclassified or retried; the subsequent instrumentation is recorded below.
+
+The next bounded diagnostic is to classify request outcomes and pre-body exits
+before another representative capture. The provisional body dominance points
+toward body collection, backend I/O and blocking-worker scheduling; it does
+not isolate physical NAS traffic or justify cache, chunk-format or concurrency
+default changes. These are nested daemon worker times, not an exclusive wall
+breakdown. One changed-native run is not a causal speedup comparison, and
+429.001 seconds remains below the unchanged 600-second sustained gate.
+
+The failed capture is preserved at
+`/volume2/NASDA2/vaultic-test-m6/ncl1-origin-read-fme-cae1-20261116-800k`,
+with a separately sealed `-failure-review` sibling. Independent review
+verified build, parent and diagnostic seals, isolated capture-source and
+artifact pins, reproduced the unchanged rejection and checked the remaining
+integrity and resource gates. No owned executable survived. The private
+runtime remains preserved as failed-attempt evidence, not reported as cleaned
+up. No production data, defaults or guards changed. The capture used native
+SHA-256 `eda56f90b40428f91026980ddc6f5c7499c0490be5794791eb0f09f53b9f0d04`.
+
+### Origin Outcome Classification Follow-Up
+
+Origin attribution now counts request successes, not-found results, other
+errors and cancellations separately. Successful responses rejected by the
+existing identity check have their own counter. Body collections separately
+count successes, errors and cancellations. Request and body active gauges
+are released even when a pending future is dropped; cancellation here includes
+unwinding before a terminal result is recorded. No retry, error handling,
+object identity, caching or encryption-format behavior changed.
+
+The ten additive outcome fields travel through authenticated WriterStatus
+and main-interval reporting. Terminal counters are subtracted with reset
+rejection; active fields remain current gauges, not monotonic deltas. Legacy
+snapshots without outcomes remain decodable. Partial, null, negative,
+overflowing or nonnumeric outcome sets are rejected, as are outcome sets
+without the request/body timer fields. Legacy typed zeros do not establish
+that work was classified.
+
+For settled classified intervals the supervisor requires all three identities:
+
+- Origin attempts equal request successes plus not-found, error and cancellation outcomes.
+- Request successes equal body attempts plus pre-body identity rejections.
+- Body attempts equal body successes plus body error and cancellation outcomes.
+
+Both active gauges must be zero. Other request errors, body errors,
+cancellations and identity rejections still fail acceptance even if their
+counts reconcile. Only explicitly counted not-found requests can explain a
+successful testcase's request/body gap; the full restore, reopen, source,
+zero-publication and resource gates remain required. Boundary-straddling or
+inconsistent counters must not be repaired by discarding events. Legacy
+captures without classifications retain the strict equality rule, so the
+previous failed attempt remains rejected.
+
+Validation passed 46 native encryption tests with two existing offline cases
+ignored, eight focused Go race/integration cases and all 40 supervisor tests.
+Native fixtures cover successful and missing reads, request and body errors,
+dropping a future in either phase, and pre-body identity rejection. The
+encrypted authenticated lookup checks nonzero, reconciled, drained outcomes
+and ownership-safe reopen against a freshly rebuilt daemon. Supervisor tests
+reject missing, malformed, active, inconsistent and failed outcomes while
+allowing a precisely classified not-found gap. No new representative capture
+has run with these outcome counters, and no production defaults changed.
+
 ### Pipeline And RAM Investigation
 
 The November 8 screen completed all 20 legs at
