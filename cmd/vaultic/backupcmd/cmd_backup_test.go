@@ -331,6 +331,13 @@ func TestBackupReportsCommitRPCStats(t *testing.T) {
 }
 
 func TestBackupReportsCriticalPath(t *testing.T) {
+	stages := backupDBStages(daemon.WriterStatus{Attribution: daemon.AttributionSnapshot{
+		MultiGetDatabaseRead:    daemon.TimingSnapshot{Completed: 3, TotalUS: 7},
+		MultiGetTransactionRead: daemon.TimingSnapshot{Completed: 5, TotalUS: 11},
+	}})
+	if stages["multi_get_database_read"].TotalUS != 7 || stages["multi_get_transaction_read"].TotalUS != 11 {
+		t.Fatal("native multi-get read stages lost before interval reporting")
+	}
 	term := &ui.MockTerminal{}
 	run := &backupRun{term: term, globalOptions: global.Options{JSON: true}}
 	sample := backupCriticalPath{

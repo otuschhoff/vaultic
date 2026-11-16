@@ -223,8 +223,13 @@ func TestPublicationQualificationNativeLookup(t *testing.T) {
 		t.Fatalf("authenticated native lookup lost dependency attribution: %+v", stats)
 	}
 	rtest.OK(t, lookup.Close())
-	_, err = client.WriterStatus(t.Context())
+	state, err := client.WriterStatus(t.Context())
 	rtest.OK(t, err)
+	reads := state.Attribution.MultiGetDatabaseRead
+	transactionReads := state.Attribution.MultiGetTransactionRead
+	if reads.Completed+transactionReads.Completed == 0 || reads.Active+transactionReads.Active != 0 {
+		t.Fatalf("authenticated native lookup lost storage read attribution: database=%+v transaction=%+v", reads, transactionReads)
+	}
 	previous := client
 	rtest.OK(t, publicationQualificationReopen(t.Context(), &client, options))
 	if client == nil || client == previous {
@@ -892,6 +897,8 @@ const publicationProducer800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-blob-f
 const publicationProducer800kBin = "/root/proj/vaultic/bin/phase35-ncl1-blob800k-20261114/linux-amd64"
 const publicationCoalesce800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-coalesce-fme-cae1-20261115-800k"
 const publicationCoalesce800kBin = "/root/proj/vaultic/bin/phase35-ncl1-coalesce800k-20261115/linux-amd64"
+const publicationNativeRead800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-native-read-fme-cae1-20261116-800k"
+const publicationNativeRead800kBin = "/root/proj/vaultic/bin/phase35-ncl1-native-read800k-20261116/linux-amd64"
 
 func publicationCoalesceDelay(root, label string) (int, error) {
 	for index, delay := range []int{1, 5, 5, 1, 5, 1, 1, 5} {
@@ -922,7 +929,41 @@ func publicationProducerLeg(root, label string) (int, error) {
 	if _, err := publicationCoalesceDelay(root, label); err == nil {
 		return 56, nil
 	}
+	if label == "leg-01-native" && root == filepath.Join(publicationNativeRead800kRoot, label) {
+		return 56, nil
+	}
 	return 0, fmt.Errorf("producer comparison requires its exact scheduled private leg")
+}
+
+func TestPublicationNativeReadPolicy(t *testing.T) {
+	for _, key := range []string{"VAULTIC_PHASE35_READERS_LEG", "VAULTIC_PHASE35_RAM32_LEG", "VAULTIC_PHASE35_RAM64_LEG", "VAULTIC_PHASE35_ORIGINAL_PARENT", "VAULTIC_PHASE35_PRODUCER_LEG"} {
+		t.Setenv(key, "")
+	}
+	baseline, err := publicationDBProfile("db-scale800k")
+	rtest.OK(t, err)
+	root := filepath.Join(publicationNativeRead800kRoot, "leg-01-native")
+	t.Setenv("VAULTIC_PHASE35_PRODUCER_LEG", "leg-01-native")
+	t.Setenv("VAULTIC_PHASE35_THROUGHPUT_ROOT", root)
+	tuning, err := publicationDBProfile("db-scale800k")
+	rtest.OK(t, err)
+	want := append(slices.Clone(baseline.Flags), "--read-open-in-workers", "--blob-save-concurrency=56")
+	if !slices.Equal(tuning.Flags, want) || tuning.MetaCacheBytes != baseline.MetaCacheBytes || tuning.BlockCacheBytes != baseline.BlockCacheBytes || tuning.CryptoThreads != baseline.CryptoThreads {
+		t.Fatal("native-read diagnostic changed control settings")
+	}
+	command := backupcmd.NewCommand(&global.Options{})
+	rtest.OK(t, command.ParseFlags(tuning.Flags))
+	delay, err := command.Flags().GetDuration("metadata-batch-delay")
+	rtest.OK(t, err)
+	if delay != time.Millisecond {
+		t.Fatal("native-read diagnostic changed coalescing delay")
+	}
+	if _, err := publicationProducerLeg(root+"/retry", "leg-01-native"); err == nil {
+		t.Fatal("native-read diagnostic accepted a child path")
+	}
+	t.Setenv("VAULTIC_PHASE35_RAM64_LEG", "leg-01-16g")
+	if _, err := publicationDBProfile("db-scale800k"); err == nil {
+		t.Fatal("native-read diagnostic accepted simultaneous cache tuning")
+	}
 }
 
 func TestPublicationCoalescePolicy(t *testing.T) {
@@ -2913,6 +2954,9 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 			candidate, binary = filepath.Join(publicationProducer800kBin, "vaultic"), filepath.Join(publicationProducer800kBin, "vaulticdb")
 			if _, err := publicationCoalesceDelay(root, os.Getenv("VAULTIC_PHASE35_PRODUCER_LEG")); err == nil {
 				candidate, binary = filepath.Join(publicationCoalesce800kBin, "vaultic"), filepath.Join(publicationCoalesce800kBin, "vaulticdb")
+			}
+			if root == filepath.Join(publicationNativeRead800kRoot, "leg-01-native") {
+				candidate, binary = filepath.Join(publicationNativeRead800kBin, "vaultic"), filepath.Join(publicationNativeRead800kBin, "vaulticdb")
 			}
 		}
 		if os.Getenv("VAULTIC_PHASE35_RAM32_LEG") != "" {

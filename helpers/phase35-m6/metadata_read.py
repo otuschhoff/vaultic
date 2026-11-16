@@ -77,6 +77,8 @@ PRODUCER_SCHEDULE = (56, 112, 112, 56, 112, 56, 56, 112)
 COALESCE_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-coalesce-fme-cae1-20261115-800k')
 COALESCE_BIN = WORKSPACE / 'bin/phase35-ncl1-coalesce800k-20261115/linux-amd64'
 COALESCE_SCHEDULE = (1, 5, 5, 1, 5, 1, 1, 5)
+NATIVE_READ_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-native-read-fme-cae1-20261116-800k')
+NATIVE_READ_BIN = WORKSPACE / 'bin/phase35-ncl1-native-read800k-20261116/linux-amd64'
 ACCEPTED = Path('/volume2/NASDA2/vaultic-test-m6/critical-path-fme_cae1-20261102-production-cap100k/group-64')
 SEED = Path('/ncl1-1-vs-50/fme_dump/amakura/db.begin-readiness-20261001-fuU56R')
 CANDIDATE = WORKSPACE / 'bin/phase35-metadata-read/linux-amd64/vaultic'
@@ -169,6 +171,8 @@ def producer_leg(label):
     for index, delay in enumerate(COALESCE_SCHEDULE, 1):
         if label == f'leg-{index:02d}-c{delay}':
             return COALESCE_ROOT / label, Path('/run/vaultic-unchanged-ncl1-coalesce800k-' + label), 56
+    if label == 'leg-01-native':
+        return NATIVE_READ_ROOT / label, Path('/run/vaultic-unchanged-ncl1-native-read800k-' + label), 56
     raise ValueError('producer comparison requires its exact scheduled private leg')
 
 
@@ -258,6 +262,8 @@ def binaries(profile):
         if profile != 'db-scale800k':
             raise ValueError('producer comparison requires the exact 800k profile')
         bundle = COALESCE_BIN if root.parent == COALESCE_ROOT else PRODUCER_BIN
+        if root.parent == NATIVE_READ_ROOT:
+            bundle = NATIVE_READ_BIN
         return bundle / 'vaultic', bundle / 'vaulticdb'
     if os.environ.get('VAULTIC_PHASE35_RAM64_LEG'):
         original_parent_selected()
@@ -1087,7 +1093,7 @@ def followup_metadata_flags(settings, variant, inode_limit, root):
     flags += reconciliation_flags(variant)
     if inode_limit == 800000:
         flags += ['--metadata-reconciliation-batch-size=5000', '--metadata-reconciliation-read-ahead=1']
-        if root.parent in (PRODUCER_ROOT, COALESCE_ROOT):
+        if root.parent in (PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT):
             flags += ['--read-open-in-workers', f'--blob-save-concurrency={producer_leg(root.name)[2]}']
     return flags
 
@@ -1098,7 +1104,7 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
     variant = root.name.rsplit('-', 1)[-1] if inode_limit == 400000 and root.parent in (RECONCILE_ROOT, CACHE_ROOT, PIPELINE_ROOT, RAM16_ROOT) else None
     settings = cache_profile_settings(profile, variant)
     settings = coalesce_settings(root, settings)
-    if root.parent in (READERS_ROOT, RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT):
+    if root.parent in (READERS_ROOT, RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT):
         if (profile, inode_limit) != ('db-scale800k', 800000):
             raise ValueError('reader receipt requires its exact 800k profile')
         if root.parent == READERS_ROOT:
@@ -1166,13 +1172,16 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
         else:
             deltas[field] = encryption_counter_deltas(first, last)
     critical = measured['critical_path']
-    identities = validated_source_identities(root, expected_entries) if root.parent in (READERS_ROOT, RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT) else None
-    if root.parent in (RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT):
+    identities = validated_source_identities(root, expected_entries) if root.parent in (READERS_ROOT, RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT) else None
+    if root.parent in (RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT):
         require_dependency_coverage(critical, expected_regular)
-    if root.parent in (PRODUCER_ROOT, COALESCE_ROOT):
+    if root.parent in (PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT):
         require_producer_coverage(critical, producer_leg(root.name)[2])
         if root.parent == COALESCE_ROOT:
             require_coalesce_coverage(critical, settings['batch_delay_ns'])
+        if root.parent == NATIVE_READ_ROOT:
+            require_coalesce_coverage(critical, 1000000)
+            require_native_read_coverage(critical)
     if inode_limit == 800000:
         require_cache_reuse(critical['reconciliation'], expected_entries, None if identities is None else identities['metadata_records'])
         cpu = root / 'group-64/forced/cpu/cpu.pprof'
@@ -1501,6 +1510,15 @@ def require_producer_coverage(critical, blob_tasks, entries=800000):
     for stage in traversal.values():
         if set(stage) != {'calls', 'ns'} or any(type(value) is not int or value <= 0 for value in stage.values()):
             raise ValueError('missing producer traversal timing')
+
+
+def require_native_read_coverage(critical):
+    stages = {row['stage']: row for row in critical['db']}
+    reads = [stages.get(key, {}) for key in ('multi_get_database_read', 'multi_get_transaction_read')]
+    if (sum(row.get('completed', 0) for row in reads) <= 0
+            or sum(row.get('elapsed_worker_us', 0) for row in reads) <= 0
+            or any(row.get('active', 0) != 0 for row in reads)):
+        raise ValueError('native read stages missing, unmeasured or not drained')
 
 
 def require_coalesce_coverage(critical, delay_ns):
@@ -1932,6 +1950,29 @@ def execute_chunk_series(immutable=False, reconcile=False, caches=False, pipelin
 
 
 class ChunkComparisonTests(unittest.TestCase):
+    def test_native_read_control_route_and_coverage(self):
+        label = 'leg-01-native'
+        root, runtime, tasks = producer_leg(label)
+        self.assertEqual(root.parent, NATIVE_READ_ROOT)
+        self.assertEqual(tasks, 56)
+        with patch.dict(os.environ, {'VAULTIC_PHASE35_PRODUCER_LEG': label}):
+            self.assertEqual(paths('coalesced', 800000, 'db-scale800k'), (root, runtime))
+            self.assertEqual(binaries('db-scale800k'), (NATIVE_READ_BIN / 'vaultic', NATIVE_READ_BIN / 'vaulticdb'))
+            flags = followup_metadata_flags(profile_settings('db-scale800k'), None, 800000, root)
+            self.assertIn('--metadata-batch-delay=1ms', flags)
+            self.assertIn('--blob-save-concurrency=56', flags)
+            with patch.dict(os.environ, {'VAULTIC_PHASE35_RAM64_LEG': 'leg-01-16g'}):
+                with self.assertRaises(ValueError):
+                    producer_leg(label)
+        with self.assertRaises(ValueError):
+            producer_leg(label + '/retry')
+        good = {'db': [{'stage': 'multi_get_transaction_read', 'completed': 3, 'elapsed_worker_us': 7, 'active': 0}]}
+        require_native_read_coverage(good)
+        for bad in ({'db': []}, {'db': [dict(good['db'][0], active=1)]},
+                    {'db': [dict(good['db'][0], elapsed_worker_us=0)]}):
+            with self.assertRaises(ValueError):
+                require_native_read_coverage(bad)
+
     def test_series_profile_timeout_and_error_are_bounded(self):
         with tempfile.TemporaryFile() as output:
             with self.assertRaises(subprocess.CalledProcessError):

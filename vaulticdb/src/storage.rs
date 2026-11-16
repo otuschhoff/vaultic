@@ -3376,19 +3376,23 @@ impl Storage {
         let mut response_bytes = 0usize;
         if transaction_id.is_empty() {
             if self.slatedb_multiget {
+                let mut read_timer = self.attribution.multi_get_database_read.timer();
                 let database = self.database.read().await;
                 let values = match &*database {
-                    Database::Writer(db) => db.multi_get(keys).await.map_err(storage_error)?,
+                    Database::Writer(db) => db.multi_get(keys).await.map_err(storage_error),
                     Database::Reader(reader) => {
-                        reader.multi_get(keys).await.map_err(storage_error)?
+                        reader.multi_get(keys).await.map_err(storage_error)
                     }
                     Database::Unavailable => {
-                        return Err(VaulticDbError::StorageUnavailable {
+                        Err(VaulticDbError::StorageUnavailable {
                             message: "vaulticdb storage is transitioning".to_owned(),
                         }
                         .into())
                     }
                 };
+                read_timer.record_status_result(&values);
+                drop(read_timer);
+                let values = values?;
                 for (key, value) in keys.iter().zip(values) {
                     Self::push_multi_get_result(
                         &mut results,
@@ -3400,7 +3404,11 @@ impl Storage {
                 }
             } else {
                 for key in keys {
-                    let value = self.read_value(key).await?;
+                    let mut read_timer = self.attribution.multi_get_database_read.timer();
+                    let value = self.read_value(key).await;
+                    read_timer.record_status_result(&value);
+                    drop(read_timer);
+                    let value = value?;
                     Self::push_multi_get_result(
                         &mut results,
                         &mut response_bytes,
@@ -3420,7 +3428,11 @@ impl Storage {
                 .as_ref()
                 .ok_or_else(|| transaction_not_found("transaction was closed"))?;
             if self.slatedb_multiget {
-                let values = transaction.multi_get(keys).await.map_err(storage_error)?;
+                let mut read_timer = self.attribution.multi_get_transaction_read.timer();
+                let values = transaction.multi_get(keys).await.map_err(storage_error);
+                read_timer.record_status_result(&values);
+                drop(read_timer);
+                let values = values?;
                 for (key, value) in keys.iter().zip(values) {
                     Self::push_multi_get_result(
                         &mut results,
@@ -3432,7 +3444,11 @@ impl Storage {
                 }
             } else {
                 for key in keys {
-                    let value = transaction.get(key).await.map_err(storage_error)?;
+                    let mut read_timer = self.attribution.multi_get_transaction_read.timer();
+                    let value = transaction.get(key).await.map_err(storage_error);
+                    read_timer.record_status_result(&value);
+                    drop(read_timer);
+                    let value = value?;
                     Self::push_multi_get_result(
                         &mut results,
                         &mut response_bytes,

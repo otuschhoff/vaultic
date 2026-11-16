@@ -673,6 +673,12 @@ impl Service {
                 transaction_slot_lock_wait: Some(timing(
                     storage.attribution().transaction_slot_lock_wait.snapshot(),
                 )),
+                multi_get_database_read: Some(timing(
+                    storage.attribution().multi_get_database_read.snapshot(),
+                )),
+                multi_get_transaction_read: Some(timing(
+                    storage.attribution().multi_get_transaction_read.snapshot(),
+                )),
                 engine_get_keys: engine.get_keys,
                 engine_filter_point_positives: engine.filter_point_positives,
                 engine_filter_point_negatives: engine.filter_point_negatives,

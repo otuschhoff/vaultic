@@ -373,6 +373,8 @@ func backupDBStages(state daemon.WriterStatus) map[string]daemon.TimingSnapshot 
 		"transaction_begin":          state.Attribution.TransactionBegin,
 		"transaction_map_lock_wait":  state.Attribution.TransactionMapLockWait,
 		"transaction_slot_lock_wait": state.Attribution.TransactionSlotLockWait,
+		"multi_get_database_read":    state.Attribution.MultiGetDatabaseRead,
+		"multi_get_transaction_read": state.Attribution.MultiGetTransactionRead,
 		"engine_submit":              state.Attribution.EngineSubmit,
 		"durable_wait":               state.Attribution.DurableWait,
 	}

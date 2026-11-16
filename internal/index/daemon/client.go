@@ -574,6 +574,8 @@ type AttributionSnapshot struct {
 	TransactionBegin                       TimingSnapshot          `json:"transaction_begin"`
 	TransactionMapLockWait                 TimingSnapshot          `json:"transaction_map_lock_wait"`
 	TransactionSlotLockWait                TimingSnapshot          `json:"transaction_slot_lock_wait"`
+	MultiGetDatabaseRead                   TimingSnapshot          `json:"multi_get_database_read"`
+	MultiGetTransactionRead                TimingSnapshot          `json:"multi_get_transaction_read"`
 	EngineSubmit                           TimingSnapshot          `json:"engine_submit"`
 	DurableWait                            TimingSnapshot          `json:"durable_wait"`
 	Finalization                           TimingSnapshot          `json:"finalization"`
@@ -2037,6 +2039,8 @@ func attributionSnapshot(response *vaulticdbv1.AttributionSnapshot) AttributionS
 		TransactionBegin:                       timingSnapshot(response.GetTransactionBegin()),
 		TransactionMapLockWait:                 timingSnapshot(response.GetTransactionMapLockWait()),
 		TransactionSlotLockWait:                timingSnapshot(response.GetTransactionSlotLockWait()),
+		MultiGetDatabaseRead:                   timingSnapshot(response.GetMultiGetDatabaseRead()),
+		MultiGetTransactionRead:                timingSnapshot(response.GetMultiGetTransactionRead()),
 		EngineSubmit:                           timingSnapshot(response.GetEngineSubmit()),
 		DurableWait:                            timingSnapshot(response.GetDurableWait()),
 		Finalization:                           timingSnapshot(response.GetFinalization()),

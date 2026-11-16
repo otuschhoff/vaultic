@@ -1830,6 +1830,158 @@ This is not sustained throughput, larger-history growth, causal production
 speedup or physical NAS traffic qualification. Production and defaults remain
 unchanged. No additional backup run was substituted for a retained result.
 
+### Native Read-Path Attribution Follow-Up
+
+The November 16 follow-up traced `Storage::multi_get` below the service's
+inclusive storage timer. That path validates keys, obtains any transaction
+and read guards, awaits SlateDB reads and builds the bounded response. New
+`multi_get_database_read` and `multi_get_transaction_read` timing stages now
+cover the read futures before response assembly, with attempts, outcomes,
+elapsed time, histograms and drained active gauges. Nontransactional database
+read timing includes the database read-lock wait; transactional read timing
+starts after the separately measured transaction-map and slot-lock waits.
+Scalar mode counts one read per key, while native multi-get mode counts one
+read per batch. These counts must not be interpreted as identical RPC counts.
+
+The stages respect the existing attribution enablement policy, use additive
+protobuf fields and pass through the authenticated status snapshot to Go and
+main-interval backup DB-stage deltas. Older daemons leave the new stages zero;
+that means unavailable attribution, not proof of zero database cost. The
+change adds measurement only, not a read/cache/concurrency/default change.
+
+Existing encryption metrics already separate underlying origin fetch,
+chunk completion, admission, crypto queueing and crypto service. A read-only
+reanalysis of all four sealed 1 ms / 56-task controls from the November 15
+eight-leg original-source series found these medians:
+
+| Existing Main-Interval Metric | Median |
+| --- | ---: |
+| Origin request plus body collection, worker seconds | 1568.756 |
+| Chunk completion wait, worker seconds | 1794.751 |
+| Chunk admission wait, worker seconds | 0.000 |
+| Crypto queue, job seconds | 3.494 |
+| Crypto service, job seconds | 22.640 |
+| Header validation, worker seconds | 38.829 |
+| Origin calls | 152834 |
+| Authenticated chunk cache hits | 251541 |
+| Authenticated chunk cache misses | 151465 |
+
+The origin timer covers the underlying object-store request and collection
+of its response body, stopping before encrypted chunk decryption. Chunk wait
+overlaps origin and crypto work, and these daemon-wide main-interval metrics
+also include reads outside blob-size RPCs. They are not additive exclusive
+wall time and cannot be subtracted from blob-lookup caller totals. The
+measurements make origin-fetch/chunk completion the next diagnostic lead;
+they do not support increasing crypto workers or blaming chunk admission
+waiting for the observed dependency. They do not prove physical NFS
+saturation, isolate transport versus filesystem/backend waiting, or qualify
+a particular prefetch/cache change.
+
+All original series/analysis/correction seals and the four control follow-up
+seals were checked, and each actual receipt replayed identically before the
+reanalysis was sealed at
+`ncl1-coalesce-fme-cae1-20261115-800k-native-read-review-20261116` beside the
+capture. No new representative backup was needed for these existing-counter
+medians. Every reused representative backup read `/ncl1-1-vs-50/fme_cae1`
+directly. The new native-read timers were not present in those captures and
+are not retroactively claimed as representative measurements.
+
+Focused native tests cover scalar/batched reads, transaction ordering,
+missing values and response limits with exact read-counter coverage. Go
+tests cover the wire mapping, absent legacy fields and backup-stage
+forwarding. A race-enabled encrypted authenticated lookup fixture against
+the explicitly rebuilt diagnostic native daemon confirms completed/drained
+read counters, owner usability after borrowed-reader close and encrypted
+reopen. An initial local Go test compile failure used the wrong timing-field
+name and attempted to compare a slice-containing snapshot; both assertions
+were repaired and the same focused test passed. No new production benchmark
+or throughput improvement is claimed; production and defaults remain unchanged.
+
+### Original-Source 800k Native-Read Diagnostic
+
+The requested November 16 rerun used a freshly rebuilt, isolated release
+native daemon, CLI and qualifier with the new read stages. The single fresh
+`leg-01-native` read `/ncl1-1-vs-50/fme_cae1` directly, using the same qualified
+parent and exact 800000-path manifest: 677957 regular files and 54715539376
+source bytes. Worker opening, 128 readers, 32 metadata RPC slots, 56 blob
+tasks, 1 ms coalescing, batch size 5000 and all cache settings stayed fixed.
+Old capture roots and binary bundles were not repointed or overwritten.
+
+| Diagnostic Metric | Observed |
+| --- | ---: |
+| Main backup seconds | 282.724 |
+| Entries per second | 2829.611 |
+| Whole backup-command seconds | 291.196 |
+| Whole-CLI CPU seconds | 910.805 |
+| Peak combined owned RSS bytes | 69006422016 |
+| Database-read batches / mean milliseconds | 26176 / 3.824 |
+| Transaction-read batches / mean milliseconds | 82469 / 13.536 |
+| Database-read worker seconds | 100.084 |
+| Transaction-read worker seconds | 1116.339 |
+| MultiGet server-storage worker seconds | 1217.643 |
+| MultiGet outside-handler worker seconds | 68.706 |
+| Lookup result-wait worker seconds | 7564.850 |
+| Lookup RPC-slot-wait worker seconds | 0.866 |
+| Coalescer follower-wait seconds | 5928.199 |
+| Writer prepared-work wait seconds | 132.544 |
+| Writer batch-processing seconds | 116.827 |
+| Origin request plus body collection, worker seconds | 1744.159 |
+| Chunk completion wait, worker seconds | 1914.319 |
+| Chunk admission wait, worker seconds | 0.000 |
+| Crypto queue, job seconds | 3.500 |
+| Crypto service, job seconds | 22.297 |
+| Logical encrypted-origin bytes | 40573370604 |
+
+The two native-read stages total 1216.423 worker seconds, close to the
+1217.643 MultiGet storage worker seconds. This is consistent with the
+measured storage service mostly awaiting the native read futures, rather
+than response assembly. Transaction-map and slot-lock waits were only
+0.013444 and 0.002327 worker seconds, respectively; durable wait was
+0.457205 worker seconds. All 108645 MultiGet calls completed without RPC
+failures, invalid server timings or active work. Both native read stages
+reported only successes, with no failures, cancellations or timeouts.
+
+Blob lookup remained a large completion dependency: 811726 logical calls,
+82469 size RPCs and 415619 size handles, with mean size-RPC time 14.265 ms,
+mean collection time 1.149 ms and mean follower wait 17.794 ms. Blob-task
+admission accumulated 7678.373 worker seconds, while RPC-slot wait was small.
+All 677957 file lifecycles and worker opens completed; all 811726 blobs were
+already known. Source reads accumulated 988.368 worker seconds, with zero
+errors. The writer still experienced prepared-work supply gaps as well as
+substantial batch processing. Origin-fetch/chunk completion, not crypto
+queueing, remains the strongest lower-layer diagnostic lead. This does not
+justify increasing task limits or coalescing delay; prior screens were
+negative for those changes.
+
+Every integrity gate passed: selected restore, encrypted reopen, unchanged
+source and source identities, all 800000 observed/scanned paths, 799076
+reused records, zero changed/failed/deferred/reconciled records, zero new
+data blobs and zero new inode/directory publication or revision allocation.
+All live gauges drained, owned children exited and the private runtime was
+absent. Source/fixture/RSS/free-space/deadline guards and the private
+read-only mount namespace remained in force. Independent verification
+checked build/parent/diagnostic/follow-up seals and source pins, replayed
+the actual receipt identically and rechecked all four historical controls.
+
+Evidence is sealed beneath
+`/volume2/NASDA2/vaultic-test-m6/ncl1-native-read-fme-cae1-20261116-800k`
+and its `-analysis` sibling. The rebuilt native SHA-256 is
+`fa7114f3043069229c1f0431a4c05bc56781db9871252c7c22dcf2ca16406317`;
+the bundle is `bin/phase35-ncl1-native-read800k-20261116/linux-amd64`.
+Release validation passed four native MultiGet tests, twelve timing tests,
+fourteen focused Go race tests, twelve compiled qualifier policies/integration
+cases, 39 supervisor tests and seven observer tests.
+
+These are overlapping worker/caller/group/RPC metrics, not additive exclusive
+wall time. Native DB stages cover all daemon clients; encryption metrics
+are not exclusive blob-size RPCs, and origin bytes are not measured physical
+NAS traffic. The whole-CLI CPU profile is neither exact-main nor native CPU.
+The historical 1 ms control median was 289.277 seconds, but one rerun with
+new native bytes does not establish a speedup or instrumentation overhead.
+The main interval remains below the unchanged 600-second sustained gate.
+No sustained-throughput, physical-NFS-saturation or deployment qualification
+is claimed. Production and defaults remain unchanged.
+
 ### Pipeline And RAM Investigation
 
 The November 8 screen completed all 20 legs at

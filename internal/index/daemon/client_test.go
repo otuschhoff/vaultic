@@ -27,6 +27,24 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+func TestMultiGetReadAttributionSnapshot(t *testing.T) {
+	state := attributionSnapshot(&vaulticdbv1.AttributionSnapshot{
+		MultiGetDatabaseRead:    &vaulticdbv1.TimingSnapshot{Attempts: 3, Completed: 2, Failures: 1, TotalUs: 17},
+		MultiGetTransactionRead: &vaulticdbv1.TimingSnapshot{Attempts: 5, Completed: 4, Active: 1, TotalUs: 23},
+	})
+	if state.MultiGetDatabaseRead.Attempts != 3 || state.MultiGetDatabaseRead.Completed != 2 ||
+		state.MultiGetDatabaseRead.Failures != 1 || state.MultiGetDatabaseRead.TotalUS != 17 ||
+		state.MultiGetTransactionRead.Attempts != 5 || state.MultiGetTransactionRead.Completed != 4 ||
+		state.MultiGetTransactionRead.Active != 1 || state.MultiGetTransactionRead.TotalUS != 23 {
+		t.Fatalf("native multi-get read attribution lost: %+v", state)
+	}
+	legacy := attributionSnapshot(&vaulticdbv1.AttributionSnapshot{})
+	if legacy.MultiGetDatabaseRead.Attempts != 0 || legacy.MultiGetTransactionRead.Attempts != 0 ||
+		legacy.MultiGetDatabaseRead.TotalUS != 0 || legacy.MultiGetTransactionRead.TotalUS != 0 {
+		t.Fatal("older snapshot fabricated multi-get read attribution")
+	}
+}
+
 func TestM4RPCAdmissionPreservesOutcome(t *testing.T) {
 	policy, _ := workingkv.NewPolicy(workingkv.ModeRAM, 32<<20, "")
 	ctx := workingkv.WithPolicy(t.Context(), policy)

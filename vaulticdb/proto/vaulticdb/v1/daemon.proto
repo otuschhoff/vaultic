@@ -446,6 +446,8 @@ message AttributionSnapshot {
   bool engine_multi_get_metrics_available = 57;
   bytes encryption_read_metrics_json = 58;
   bytes cache_read_metrics_json = 59;
+  TimingSnapshot multi_get_database_read = 60;
+  TimingSnapshot multi_get_transaction_read = 61;
 }
 
 message DemoteWriterRequest {

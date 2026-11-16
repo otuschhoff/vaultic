@@ -2664,6 +2664,9 @@ mod tests {
                 .unwrap();
             assert_eq!(committed[0].value, b"stored");
             assert!(!committed[1].found);
+            let reads = storage.attribution.multi_get_database_read.snapshot();
+            assert_eq!(reads.completed, if slatedb_multiget { 1 } else { 2 });
+            assert_eq!(reads.active, 0);
 
             let transaction_id = storage.begin().await.unwrap().transaction_id;
             storage
@@ -2712,6 +2715,9 @@ mod tests {
             assert_eq!(results[0].value, b"value");
             assert!(!results[1].found);
             assert_eq!(results[2].value, b"value");
+            let reads = storage.attribution.multi_get_transaction_read.snapshot();
+            assert_eq!(reads.completed, if slatedb_multiget { 1 } else { 3 });
+            assert_eq!(reads.active, 0);
             assert!(
                 storage
                     .get(b"present", &transaction_id)
@@ -2756,6 +2762,27 @@ mod tests {
                 tonic::Code::NotFound
             );
             storage.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn multi_get_read_failure_attribution() {
+        for slatedb_multiget in [false, true] {
+            let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let mut storage = transition_storage(
+                Database::Unavailable,
+                format!("multi-get-unavailable-{}", rand::random::<u64>()),
+                object_store,
+                1,
+            );
+            storage.slatedb_multiget = slatedb_multiget;
+            let error = storage.multi_get(&[b"key".to_vec()], "", usize::MAX).await.unwrap_err();
+            assert_eq!(error.code(), tonic::Code::Unavailable);
+            let reads = storage.attribution.multi_get_database_read.snapshot();
+            assert_eq!(reads.completed, 1);
+            assert_eq!(reads.failures, 1);
+            assert_eq!(reads.cancellations, 0);
+            assert_eq!(reads.active, 0);
         }
     }
 
