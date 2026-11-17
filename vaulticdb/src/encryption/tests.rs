@@ -61,6 +61,7 @@ mod tests {
         delay: Option<std::time::Duration>,
         body_delay: Option<std::time::Duration>,
         fail_request: bool,
+        request_not_modified: bool,
         fail_body: bool,
         payload_gate: Option<Arc<tokio::sync::Semaphore>>,
         head_gate: Option<Arc<tokio::sync::Semaphore>>,
@@ -115,6 +116,12 @@ mod tests {
             }
             if self.fail_request {
                 return Err(encryption_error(EncryptionError::Length));
+            }
+            if self.request_not_modified {
+                return Err(slatedb::object_store::Error::NotModified {
+                    path: location.to_string(),
+                    source: Box::new(EncryptionError::Length),
+                });
             }
             let head = options.head;
             let result = self.inner.get_opts(location, options).await?;
@@ -349,6 +356,7 @@ mod tests {
         }
         let metrics = encrypted.read_metrics.snapshot();
         assert_eq!(metrics["ciphertext_origin_request_errors"], 2);
+        assert_eq!(metrics["ciphertext_origin_request_not_modified"], 1);
         assert_eq!(metrics["ciphertext_origin_body_calls"], 0);
         assert_eq!(metrics["ciphertext_origin_request_error_counts"]["dropped"], 0);
         assert!(!metrics["ciphertext_origin_request_error_counts"].to_string().contains("private-object-name"));
@@ -357,6 +365,69 @@ mod tests {
             source: Box::new(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "private-error-text")),
         };
         assert_eq!(origin_request_error_key(OriginReadSite::Range, false, &error), "range/generic/plain/io_permission_denied");
+    }
+
+    #[tokio::test]
+    async fn origin_not_modified_requires_matching_request_condition() {
+        for (options, expected) in [
+            (GetOptions::default(), 0),
+            (GetOptions { if_match: Some("tag".to_owned()), ..Default::default() }, 0),
+            (GetOptions { if_unmodified_since: Some("2026-01-01T00:00:00Z".parse().unwrap()), ..Default::default() }, 0),
+            (GetOptions { if_none_match: Some("tag".to_owned()), ..Default::default() }, 1),
+            (GetOptions { if_modified_since: Some("2026-01-01T00:00:00Z".parse().unwrap()), ..Default::default() }, 1),
+        ] {
+            let encrypted = store(Arc::new(CountingStore { request_not_modified: true, ..Default::default() }), "conditional-origin");
+            assert!(matches!(encrypted.get_opts(&Path::from("metadata"), options).await,
+                Err(slatedb::object_store::Error::NotModified { .. })));
+            let metrics = encrypted.read_metrics.snapshot();
+            assert_eq!(metrics["ciphertext_origin_request_errors"], 1);
+            assert_eq!(metrics["ciphertext_origin_request_not_modified"], expected);
+            assert_eq!(metrics["ciphertext_origin_body_calls"], 0);
+            assert_eq!(metrics["ciphertext_origin_request_active"], 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn origin_boundary_consumer_reuses_conditional_header() {
+        use slatedb_txn_obj::{object_store::ObjectStoreBoundaryObject, BoundaryObject, MonotonicId, TransactionalObjectError};
+        let directory = std::env::temp_dir().join(format!("vaulticdb-origin-boundary-{}", rand::random::<u64>()));
+        std::fs::create_dir(&directory).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let encrypted = Arc::new(EncryptedObjectStore::new(
+            Arc::new(LocalFileSystem::new_with_prefix(&directory).unwrap()),
+            "boundary-origin", vec![EncryptionKey::new(1, [7; 32])], 1,
+        ).unwrap());
+        let root = Path::from("root");
+        let location = root.clone().join("gc").join("manifest.boundary");
+        let boundary = ObjectStoreBoundaryObject::new(&root, encrypted.clone(), "manifest");
+        boundary.check(MonotonicId::new(3)).await.unwrap();
+        encrypted.put(&location, Bytes::from_static(b"2").into()).await.unwrap();
+        assert!(encrypted.get(&location).await.unwrap().meta.e_tag.is_some(), "encrypted boundary must expose an ETag");
+        boundary.check(MonotonicId::new(3)).await.unwrap();
+        let before = encrypted.read_metrics.snapshot();
+        encrypted.invalidate_header(&location);
+        boundary.check(MonotonicId::new(3)).await.unwrap();
+        let after = encrypted.read_metrics.snapshot();
+        assert_eq!(after["ciphertext_origin_request_not_modified"], 1, "before={before}, after={after}");
+        assert_eq!(after["ciphertext_origin_request_errors"], 1);
+        assert_eq!(after["ciphertext_origin_body_calls"], before["ciphertext_origin_body_calls"]);
+        assert_eq!(after["ciphertext_origin_request_error_counts"]["header/not_modified/conditional/io_unclassified"], 1);
+        encrypted.put(&location, Bytes::from_static(b"40").into()).await.unwrap();
+        assert!(matches!(boundary.check(MonotonicId::new(3)).await,
+            Err(TransactionalObjectError::ObjectVersionExists)));
+        boundary.check(MonotonicId::new(41)).await.unwrap();
+        encrypted.delete(&location).await.unwrap();
+        boundary.check(MonotonicId::new(41)).await.unwrap();
+        let metrics = encrypted.read_metrics.snapshot();
+        assert_eq!(metrics["ciphertext_origin_request_not_found"], 2);
+        assert_eq!(metrics["ciphertext_origin_request_errors"], metrics["ciphertext_origin_request_not_modified"]);
+        assert_eq!(metrics["ciphertext_origin_request_active"], 0);
+        assert_eq!(metrics["ciphertext_origin_body_active"], 0);
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     #[tokio::test]

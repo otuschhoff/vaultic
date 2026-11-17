@@ -2246,6 +2246,108 @@ forwarding. These fixtures establish discrimination, not the cause of the
 No representative backup, production modification, default or guard change
 was part of this local follow-up.
 
+### Original-Source Detail Capture: Conditional Not-Modified
+
+After commit `f48cdc213`, a fresh isolated release plus two exact routing
+overlays ran the 800000-path testcase directly from
+`/ncl1-1-vs-50/fme_cae1`. The new `leg-01-detail` route required both outcome
+and bounded error-detail coverage. All control settings and source, parent,
+read-only namespace, resource and runtime guards remained unchanged.
+
+Backup, restore, encrypted reopen, unchanged-source and zero-publication
+checks passed. Final diagnostic acceptance still failed at the unchanged
+non-not-found request-error gate. These are measurements from that rejected
+diagnostic, not accepted performance evidence:
+
+| Detail Capture Measurement | Observed |
+| --- | ---: |
+| Main backup seconds | 302.044 |
+| Backup command seconds | 310.328 |
+| Peak combined RSS bytes | 68284039168 |
+| Origin request attempts | 152872 |
+| Successful requests / body attempts / successful bodies | 151908 / 151908 / 151908 |
+| Header not-found, plain request, I/O not-found | 482 |
+| Header not-modified, conditional request, I/O unclassified | 482 |
+| Dropped request-error detail events | 0 |
+| Requests without body collection | 964 |
+| Inclusive origin worker-seconds | 1504.023 |
+| Origin request worker-seconds | 183.622 |
+| Origin body worker-seconds | 1319.998 |
+| Body share of inclusive origin time, percent | 87.765 |
+| Body mean milliseconds per collection attempt | 8.689 |
+| MultiGet RPC calls / failures | 112949 / 0 |
+
+All 482 other main-interval request errors were precisely
+`header/not_modified/conditional/io_unclassified`. The separate not-found
+bucket was `header/not_found/plain/io_not_found`. Both detail totals reconcile
+with the aggregate counters, with no other categories or dropped events.
+Request/body cancellation, identity rejection, body errors and active gauges
+were zero. The settled wider native interval recorded 497 of each response
+category, not interchangeable with the main interval. All native MultiGet
+and RPC outcomes succeeded.
+
+Independent review verified actual and isolated-build pins, selection and
+source identity, integrity/resource gates, detail accounting and both earlier
+failed captures' raw pins and seals. No owned executable survived; the failed
+runtime remains preserved. Evidence is beneath
+`/volume2/NASDA2/vaultic-test-m6/ncl1-origin-detail-fme-cae1-20261117-800k`,
+with a separately sealed `-failure-review` sibling. Native SHA-256 is
+`5e2c6a9957c3bc45a1bed35b8af381502437cb16fbbe36858d290921317fc9eb`.
+Release qualification passed 48 encryption tests with two existing cases
+ignored, four MultiGet and twelve timing tests, 26 top-level Go race checks,
+15 top-level compiled qualifier checks, 43 supervisor tests and seven observer
+tests.
+
+The next focused change is to prove the conditional-response handling path
+and distinguish expected not-modified responses from actual request failures
+in outcome accounting. No such reclassification or acceptance change was
+made for this capture. Its measured variants do not retroactively identify
+the previous 473 errors or the older 1380-request gap. All three diagnostics
+remain rejected; no cache, concurrency, production or default change followed.
+The main interval remains below the unchanged 600-second sustained gate, and
+the overlapping worker timers do not establish physical NAS traffic or a
+causal speedup.
+
+### Conditional Boundary Consumer And Subcounter
+
+The next local follow-up traced the response to SlateDB's pinned
+`ObjectStoreBoundaryObject` implementation. It sends its cached ETag as
+`If-None-Match` and consumes `NotModified` by reusing the cached boundary.
+A missing cache is invalid state. An encrypted local-filesystem fixture now
+exercises this actual consumer, proves unchanged-boundary reuse without body
+collection, rejects an old ID after the boundary changes and observes deletion
+through a fresh missing-object read. It uses a dev-only dependency on the
+already pinned transactional-object crate; no dependency versions changed.
+
+The optional `ciphertext_origin_request_not_modified` counter identifies
+origin `NotModified` responses only when the underlying request contains
+`If-None-Match` or `If-Modified-Since`. Plain requests and requests containing
+only `If-Match` or `If-Unmodified-Since` do not qualify. Precondition failures
+remain separate. This is a subset of the existing
+`ciphertext_origin_request_errors`, not an additional terminal outcome:
+aggregate counters and all existing attempt identities retain their meaning.
+The aggregate minus the subcounter distinguishes the remaining request errors
+when this instrumentation is available.
+
+Typed authenticated reporting preserves legacy absence separately from a
+measured zero. Interval subtraction rejects resets and does not alias source
+snapshots. The supervisor validates the subcounter's type, availability and
+bounds against both aggregate errors and conditional not-modified details.
+It still rejects aggregate request errors, including those explained by this
+subcounter. No acceptance gate or historical measurement was changed.
+
+The header-validation cache can produce a conditional response without another
+origin fetch. The consumer fixture explicitly invalidates its cached header
+to reach the cold-header origin branch measured by the rejected capture;
+it does not disable or change production caching. Caller-level conditional
+responses are therefore not interchangeable with this origin-only counter.
+
+Local validation passed 50 encryption tests with two existing cases ignored,
+12 Go race/integration checks against a freshly rebuilt daemon and all 44
+supervisor tests. All three failed captures reproduced their original strict
+rejection, with their seals and raw-file pins verified unchanged. No new
+representative backup, commit, default, cache or concurrency change was made.
+
 ### Pipeline And RAM Investigation
 
 The November 8 screen completed all 20 legs at

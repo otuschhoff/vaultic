@@ -83,12 +83,15 @@ ORIGIN_READ_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-origin-read-fme-ca
 ORIGIN_READ_BIN = WORKSPACE / 'bin/phase35-ncl1-origin-read800k-20261116/linux-amd64'
 ORIGIN_OUTCOME_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-origin-outcome-fme-cae1-20261116-800k')
 ORIGIN_OUTCOME_BIN = WORKSPACE / 'bin/phase35-ncl1-origin-outcome800k-20261116/linux-amd64'
+ORIGIN_DETAIL_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-origin-detail-fme-cae1-20261117-800k')
+ORIGIN_DETAIL_BIN = WORKSPACE / 'bin/phase35-ncl1-origin-detail800k-20261117/linux-amd64'
 ORIGIN_OUTCOME_COUNTERS = ('ciphertext_origin_request_successes', 'ciphertext_origin_request_not_found',
                            'ciphertext_origin_request_errors', 'ciphertext_origin_request_cancellations',
                            'ciphertext_origin_identity_rejections', 'ciphertext_origin_body_successes',
                            'ciphertext_origin_body_errors', 'ciphertext_origin_body_cancellations')
 ORIGIN_OUTCOME_GAUGES = ('ciphertext_origin_request_active', 'ciphertext_origin_body_active')
 ORIGIN_ERROR_COUNTS = 'ciphertext_origin_request_error_counts'
+ORIGIN_NOT_MODIFIED = 'ciphertext_origin_request_not_modified'
 ORIGIN_ERROR_KEY_PARTS = (
     ('header', 'chunk', 'range'),
     ('generic', 'not_found', 'invalid_path', 'join_error', 'not_supported', 'already_exists',
@@ -195,6 +198,8 @@ def producer_leg(label):
         return ORIGIN_READ_ROOT / label, Path('/run/vaultic-unchanged-ncl1-origin-read800k-' + label), 56
     if label == 'leg-01-outcome':
         return ORIGIN_OUTCOME_ROOT / label, Path('/run/vaultic-unchanged-ncl1-origin-outcome800k-' + label), 56
+    if label == 'leg-01-detail':
+        return ORIGIN_DETAIL_ROOT / label, Path('/run/vaultic-unchanged-ncl1-origin-detail800k-' + label), 56
     raise ValueError('producer comparison requires its exact scheduled private leg')
 
 
@@ -290,6 +295,8 @@ def binaries(profile):
             bundle = ORIGIN_READ_BIN
         if root.parent == ORIGIN_OUTCOME_ROOT:
             bundle = ORIGIN_OUTCOME_BIN
+        if root.parent == ORIGIN_DETAIL_ROOT:
+            bundle = ORIGIN_DETAIL_BIN
         return bundle / 'vaultic', bundle / 'vaulticdb'
     if os.environ.get('VAULTIC_PHASE35_RAM64_LEG'):
         original_parent_selected()
@@ -997,8 +1004,9 @@ def origin_request_error_counts(values):
 
 def encryption_counter_deltas(first, last):
     result = {}
-    if (ORIGIN_ERROR_COUNTS in first) != (ORIGIN_ERROR_COUNTS in last):
-        raise ValueError('origin request-error detail availability changed')
+    for name in (ORIGIN_ERROR_COUNTS, ORIGIN_NOT_MODIFIED):
+        if (name in first) != (name in last):
+            raise ValueError('origin request-error classification availability changed')
     for name, before in first.items():
         if name == 'read_windows':
             continue
@@ -1009,6 +1017,10 @@ def encryption_counter_deltas(first, last):
             if any(key not in after or after[key] < value for key, value in before.items()):
                 raise ValueError('origin request-error detail counter reset')
             result[name] = {key: value - before.get(key, 0) for key, value in after.items()}
+        elif name == ORIGIN_NOT_MODIFIED:
+            if any(type(value) is not int or not 0 <= value <= (1 << 64) - 1 for value in (before, after)) or after < before:
+                raise ValueError('origin conditional not-modified counter invalid or reset')
+            result[name] = after - before
         elif name == 'file_pipeline':
             result[name] = dependency_counter_deltas(before, after, ('admitting', 'active', 'awaiting_blobs', 'pending_blobs'))
         elif name == 'traversal':
@@ -1145,7 +1157,7 @@ def followup_metadata_flags(settings, variant, inode_limit, root):
     flags += reconciliation_flags(variant)
     if inode_limit == 800000:
         flags += ['--metadata-reconciliation-batch-size=5000', '--metadata-reconciliation-read-ahead=1']
-        if root.parent in (PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT):
+        if root.parent in (PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT):
             flags += ['--read-open-in-workers', f'--blob-save-concurrency={producer_leg(root.name)[2]}']
     return flags
 
@@ -1156,7 +1168,7 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
     variant = root.name.rsplit('-', 1)[-1] if inode_limit == 400000 and root.parent in (RECONCILE_ROOT, CACHE_ROOT, PIPELINE_ROOT, RAM16_ROOT) else None
     settings = cache_profile_settings(profile, variant)
     settings = coalesce_settings(root, settings)
-    if root.parent in (READERS_ROOT, RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT):
+    if root.parent in (READERS_ROOT, RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT):
         if (profile, inode_limit) != ('db-scale800k', 800000):
             raise ValueError('reader receipt requires its exact 800k profile')
         if root.parent == READERS_ROOT:
@@ -1224,18 +1236,19 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
         else:
             deltas[field] = encryption_counter_deltas(first, last)
     critical = measured['critical_path']
-    identities = validated_source_identities(root, expected_entries) if root.parent in (READERS_ROOT, RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT) else None
-    if root.parent in (RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT):
+    identities = validated_source_identities(root, expected_entries) if root.parent in (READERS_ROOT, RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT) else None
+    if root.parent in (RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT):
         require_dependency_coverage(critical, expected_regular)
-    if root.parent in (PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT):
+    if root.parent in (PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT):
         require_producer_coverage(critical, producer_leg(root.name)[2])
         if root.parent == COALESCE_ROOT:
             require_coalesce_coverage(critical, settings['batch_delay_ns'])
-        if root.parent in (NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT):
+        if root.parent in (NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT):
             require_coalesce_coverage(critical, 1000000)
             require_native_read_coverage(critical)
-        if root.parent in (ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT):
-            require_origin_read_coverage(critical, require_outcomes=root.parent == ORIGIN_OUTCOME_ROOT)
+        if root.parent in (ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT):
+            require_origin_read_coverage(critical, require_outcomes=root.parent in (ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT),
+                                         require_details=root.parent == ORIGIN_DETAIL_ROOT)
     if inode_limit == 800000:
         require_cache_reuse(critical['reconciliation'], expected_entries, None if identities is None else identities['metadata_records'])
         cpu = root / 'group-64/forced/cpu/cpu.pprof'
@@ -1566,7 +1579,7 @@ def require_producer_coverage(critical, blob_tasks, entries=800000):
             raise ValueError('missing producer traversal timing')
 
 
-def require_origin_read_coverage(critical, require_outcomes=False):
+def require_origin_read_coverage(critical, require_outcomes=False, require_details=False):
     metrics = critical.get('encryption_reads') or {}
     names = ('ciphertext_origin_calls', 'ciphertext_origin_body_calls', 'ciphertext_origin_ns',
              'ciphertext_origin_request_ns', 'ciphertext_origin_body_ns')
@@ -1575,11 +1588,15 @@ def require_origin_read_coverage(critical, require_outcomes=False):
     if metrics['ciphertext_origin_request_ns'] + metrics['ciphertext_origin_body_ns'] > metrics['ciphertext_origin_ns']:
         raise ValueError('origin request/body coverage differs from settled total')
     outcomes = ORIGIN_OUTCOME_COUNTERS + ORIGIN_OUTCOME_GAUGES
+    if require_details and ORIGIN_ERROR_COUNTS not in metrics:
+        raise ValueError('origin request-error detail classification is required')
     details = None
     if ORIGIN_ERROR_COUNTS in metrics:
         details = origin_request_error_counts(metrics[ORIGIN_ERROR_COUNTS])
         if not all(name in metrics for name in outcomes):
             raise ValueError('origin request-error details require classified outcomes')
+    if ORIGIN_NOT_MODIFIED in metrics and details is None:
+        raise ValueError('origin conditional not-modified count requires request-error details')
     if not any(name in metrics for name in outcomes):
         if require_outcomes:
             raise ValueError('origin outcome classification is required')
@@ -1603,6 +1620,12 @@ def require_origin_read_coverage(critical, require_outcomes=False):
         not_found = sum(value for key, value in details.items() if key != 'dropped' and key.split('/')[1] == 'not_found')
         if not_found != metrics['ciphertext_origin_request_not_found']:
             raise ValueError('origin request-error detail not-found count differs')
+    if ORIGIN_NOT_MODIFIED in metrics:
+        count = metrics[ORIGIN_NOT_MODIFIED]
+        conditional_details = sum(value for key, value in details.items()
+                                  if key != 'dropped' and key.split('/')[1:3] == ['not_modified', 'conditional'])
+        if type(count) is not int or not 0 <= count <= min((1 << 64) - 1, metrics['ciphertext_origin_request_errors'], conditional_details):
+            raise ValueError('origin conditional not-modified subcounter invalid or inconsistent')
     if any(metrics[name] for name in
            ('ciphertext_origin_request_errors', 'ciphertext_origin_request_cancellations',
             'ciphertext_origin_identity_rejections', 'ciphertext_origin_body_errors', 'ciphertext_origin_body_cancellations')):
@@ -2047,6 +2070,61 @@ def execute_chunk_series(immutable=False, reconcile=False, caches=False, pipelin
 
 
 class ChunkComparisonTests(unittest.TestCase):
+    def test_origin_conditional_not_modified_subcounter(self):
+        self.assertEqual(encryption_counter_deltas({ORIGIN_NOT_MODIFIED: 3}, {ORIGIN_NOT_MODIFIED: 8}), {ORIGIN_NOT_MODIFIED: 5})
+        for invalid in (None, True, -1, '8', 1 << 64, 1):
+            with self.assertRaises(ValueError):
+                encryption_counter_deltas({ORIGIN_NOT_MODIFIED: 3}, {ORIGIN_NOT_MODIFIED: invalid})
+        for first, last in (({}, {ORIGIN_NOT_MODIFIED: 0}), ({ORIGIN_NOT_MODIFIED: 0}, {})):
+            with self.assertRaises(ValueError):
+                encryption_counter_deltas(first, last)
+        key = 'header/not_found/plain/io_not_found'
+        classified = {**dict.fromkeys(ORIGIN_OUTCOME_COUNTERS + ORIGIN_OUTCOME_GAUGES, 0),
+                      'ciphertext_origin_calls': 3, 'ciphertext_origin_body_calls': 2,
+                      'ciphertext_origin_ns': 13, 'ciphertext_origin_request_ns': 3, 'ciphertext_origin_body_ns': 7,
+                      'ciphertext_origin_request_successes': 2, 'ciphertext_origin_request_not_found': 1,
+                      'ciphertext_origin_body_successes': 2, ORIGIN_ERROR_COUNTS: {'dropped': 0, key: 1},
+                      ORIGIN_NOT_MODIFIED: 0}
+        require_origin_read_coverage({'encryption_reads': classified}, require_outcomes=True, require_details=True)
+        for invalid in (None, True, -1, '1', 1 << 64, 1):
+            with self.assertRaises(ValueError):
+                require_origin_read_coverage({'encryption_reads': dict(classified, **{ORIGIN_NOT_MODIFIED: invalid})})
+        failed = dict(classified, ciphertext_origin_calls=4, ciphertext_origin_request_errors=1,
+                      **{ORIGIN_ERROR_COUNTS: {'dropped': 0, key: 1, 'header/not_modified/conditional/io_unclassified': 1},
+                         ORIGIN_NOT_MODIFIED: 1})
+        with self.assertRaisesRegex(ValueError, 'failures, cancellation'):
+            require_origin_read_coverage({'encryption_reads': failed})
+        del classified[ORIGIN_ERROR_COUNTS]
+        with self.assertRaisesRegex(ValueError, 'requires request-error details'):
+            require_origin_read_coverage({'encryption_reads': classified})
+
+    def test_origin_detail_control_route_and_coverage(self):
+        label = 'leg-01-detail'
+        root, runtime, tasks = producer_leg(label)
+        self.assertEqual(root.parent, ORIGIN_DETAIL_ROOT)
+        self.assertEqual(str(runtime), '/run/vaultic-unchanged-ncl1-origin-detail800k-' + label)
+        self.assertEqual(tasks, 56)
+        with patch.dict(os.environ, {'VAULTIC_PHASE35_PRODUCER_LEG': label}):
+            self.assertEqual(paths('coalesced', 800000, 'db-scale800k'), (root, runtime))
+            self.assertEqual(binaries('db-scale800k'), (ORIGIN_DETAIL_BIN / 'vaultic', ORIGIN_DETAIL_BIN / 'vaulticdb'))
+            flags = followup_metadata_flags(profile_settings('db-scale800k'), None, 800000, root)
+            for flag in ('--metadata-batch-delay=1ms', '--read-open-in-workers', '--blob-save-concurrency=56'):
+                self.assertIn(flag, flags)
+            with patch.dict(os.environ, {'VAULTIC_PHASE35_RAM64_LEG': 'leg-01-16g'}):
+                with self.assertRaises(ValueError):
+                    producer_leg(label)
+        with self.assertRaises(ValueError):
+            producer_leg(label + '/retry')
+        metrics = {**dict.fromkeys(ORIGIN_OUTCOME_COUNTERS + ORIGIN_OUTCOME_GAUGES, 0),
+                   'ciphertext_origin_calls': 3, 'ciphertext_origin_body_calls': 2,
+                   'ciphertext_origin_ns': 13, 'ciphertext_origin_request_ns': 3, 'ciphertext_origin_body_ns': 7,
+                   'ciphertext_origin_request_successes': 2, 'ciphertext_origin_request_not_found': 1,
+                   'ciphertext_origin_body_successes': 2}
+        with self.assertRaisesRegex(ValueError, 'detail classification is required'):
+            require_origin_read_coverage({'encryption_reads': metrics}, require_outcomes=True, require_details=True)
+        metrics[ORIGIN_ERROR_COUNTS] = {'dropped': 0, 'header/not_found/plain/io_not_found': 1}
+        require_origin_read_coverage({'encryption_reads': metrics}, require_outcomes=True, require_details=True)
+
     def test_origin_error_details_accounting(self):
         key, added = 'header/not_found/plain/io_not_found', 'chunk/not_found/plain/io_unclassified'
         before, after = {'dropped': 2, key: 5}, {'dropped': 3, key: 8, added: 4}

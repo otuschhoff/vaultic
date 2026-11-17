@@ -80,6 +80,7 @@ expect_used = "warn"
 
 [dev-dependencies]
 rsa = { version = "0.9", features = ["pem"] }
+slatedb-txn-obj = { git = "https://github.com/otuschhoff/slatedb.git", rev = "43a562e3637d3d9ce12bec82a5b9e3deb47843fa" }
 
 [profile.release]
 debug = 1

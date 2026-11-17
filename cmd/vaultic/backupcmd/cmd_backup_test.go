@@ -205,6 +205,34 @@ func TestBackupEncryptionOriginErrorDetailsDelta(test *testing.T) {
 	}
 }
 
+func TestBackupEncryptionOriginNotModifiedDelta(test *testing.T) {
+	first, last := uint64(3), uint64(8)
+	baseline := &daemon.EncryptionReadMetrics{CiphertextOriginRequestNotModified: &first}
+	current := &daemon.EncryptionReadMetrics{CiphertextOriginRequestNotModified: &last}
+	actual := backupEncryptionReadDelta(current, baseline)
+	if actual == nil || actual.CiphertextOriginRequestNotModified == nil || *actual.CiphertextOriginRequestNotModified != 5 {
+		test.Fatalf("invalid conditional count delta: %+v", actual)
+	}
+	*actual.CiphertextOriginRequestNotModified = 100
+	if first != 3 || last != 8 {
+		test.Fatal("delta aliased source counters")
+	}
+	last = 1
+	if backupEncryptionReadDelta(current, baseline) != nil {
+		test.Fatal("conditional counter reset accepted")
+	}
+	for _, boundary := range []**uint64{&current.CiphertextOriginRequestNotModified, &baseline.CiphertextOriginRequestNotModified} {
+		last = 8
+		previous := *boundary
+		*boundary = nil
+		actual = backupEncryptionReadDelta(current, baseline)
+		if actual == nil || actual.CiphertextOriginRequestNotModified != nil {
+			test.Fatal("legacy boundary became a measured zero")
+		}
+		*boundary = previous
+	}
+}
+
 func TestBackupEncryptionLatencyDelta(test *testing.T) {
 	for _, name := range []string{"CiphertextOriginLatencyBuckets", "ChunkWaitLatencyBuckets", "ChunkAdmissionLatencyBuckets"} {
 		baseline, current := &daemon.EncryptionReadMetrics{}, &daemon.EncryptionReadMetrics{}

@@ -221,6 +221,50 @@ func TestEncryptionOriginErrorDetailsCompatibility(test *testing.T) {
 	}
 }
 
+func TestEncryptionOriginNotModifiedCompatibility(test *testing.T) {
+	count := uint64(3)
+	expected := EncryptionReadMetrics{
+		CiphertextOriginRequestNotModified: &count,
+		CiphertextOriginRequestErrorCounts: map[string]uint64{"dropped": 0, "header/not_modified/conditional/io_unclassified": 3},
+	}
+	encoded, err := json.Marshal(expected)
+	if err != nil {
+		test.Fatal(err)
+	}
+	status := writerStatus(&vaulticdbv1.WriterStatusResponse{Attribution: &vaulticdbv1.AttributionSnapshot{EncryptionReadMetricsJson: encoded}})
+	if !reflect.DeepEqual(status.Attribution.EncryptionReads, &expected) {
+		test.Fatalf("conditional not-modified count lost: %+v", status.Attribution.EncryptionReads)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		test.Fatal(err)
+	}
+	name := "ciphertext_origin_request_not_modified"
+	for _, invalid := range []string{"null", "-1", `"3"`, "true", "18446744073709551616"} {
+		fields[name] = json.RawMessage(invalid)
+		payload, err := json.Marshal(fields)
+		if err != nil || encryptionReadMetrics(payload) != nil {
+			test.Fatalf("invalid conditional counter accepted: %s", invalid)
+		}
+	}
+	fields[name] = json.RawMessage("0")
+	payload, _ := json.Marshal(fields)
+	if metrics := encryptionReadMetrics(payload); metrics == nil || metrics.CiphertextOriginRequestNotModified == nil || *metrics.CiphertextOriginRequestNotModified != 0 {
+		test.Fatal("measured zero became unavailable")
+	}
+	delete(fields, name)
+	payload, _ = json.Marshal(fields)
+	if metrics := encryptionReadMetrics(payload); metrics == nil || metrics.CiphertextOriginRequestNotModified != nil {
+		test.Fatal("legacy absence became an available zero")
+	}
+	fields[name] = json.RawMessage("3")
+	delete(fields, "ciphertext_origin_request_error_counts")
+	payload, _ = json.Marshal(fields)
+	if encryptionReadMetrics(payload) != nil {
+		test.Fatal("conditional count without request details accepted")
+	}
+}
+
 func TestEncryptionReadLatencyCompatibility(test *testing.T) {
 	encoded, err := json.Marshal(EncryptionReadMetrics{})
 	if err != nil {

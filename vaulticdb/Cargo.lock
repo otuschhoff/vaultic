@@ -5135,6 +5135,7 @@ dependencies = [
  "sharks",
  "slatedb",
  "slatedb-common",
+ "slatedb-txn-obj",
  "thiserror 2.0.20",
  "tikv-jemallocator",
  "time",

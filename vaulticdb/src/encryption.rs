@@ -137,6 +137,7 @@ struct EncryptionReadMetrics {
     ciphertext_origin_request_successes: AtomicU64,
     ciphertext_origin_request_not_found: AtomicU64,
     ciphertext_origin_request_errors: AtomicU64,
+    ciphertext_origin_request_not_modified: AtomicU64,
     ciphertext_origin_request_error_counts: Mutex<BTreeMap<String, u64>>,
     ciphertext_origin_request_error_counts_dropped: AtomicU64,
     ciphertext_origin_request_cancellations: AtomicU64,
@@ -459,6 +460,10 @@ impl EncryptionReadMetrics {
             (
                 "ciphertext_origin_request_errors",
                 &self.ciphertext_origin_request_errors,
+            ),
+            (
+                "ciphertext_origin_request_not_modified",
+                &self.ciphertext_origin_request_not_modified,
             ),
             (
                 "ciphertext_origin_request_cancellations",
@@ -1680,6 +1685,7 @@ impl EncryptedObjectStore {
         let metrics = &self.read_metrics;
         let conditional = options.if_match.is_some() || options.if_none_match.is_some()
             || options.if_modified_since.is_some() || options.if_unmodified_since.is_some();
+        let permits_not_modified = options.if_none_match.is_some() || options.if_modified_since.is_some();
         let mut outcome = ReadOutcome::new(
             &metrics.ciphertext_origin_request_active,
             &metrics.ciphertext_origin_request_cancellations,
@@ -1688,6 +1694,9 @@ impl EncryptedObjectStore {
         let result = self.inner.get_opts(location, options).await;
         if let Err(error) = &result {
             metrics.record_origin_request_error(site, conditional, error);
+            if permits_not_modified && matches!(error, slatedb::object_store::Error::NotModified { .. }) {
+                metrics.ciphertext_origin_request_not_modified.fetch_add(1, Ordering::Relaxed);
+            }
         }
         outcome.finish(match &result {
             Ok(_) => &metrics.ciphertext_origin_request_successes,

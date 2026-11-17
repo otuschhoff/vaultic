@@ -440,6 +440,7 @@ type EncryptionReadMetrics struct {
 	CiphertextOriginRequestSuccesses     uint64                 `json:"ciphertext_origin_request_successes"`
 	CiphertextOriginRequestNotFound      uint64                 `json:"ciphertext_origin_request_not_found"`
 	CiphertextOriginRequestErrors        uint64                 `json:"ciphertext_origin_request_errors"`
+	CiphertextOriginRequestNotModified   *uint64                `json:"ciphertext_origin_request_not_modified,omitempty"`
 	CiphertextOriginRequestErrorCounts   map[string]uint64      `json:"ciphertext_origin_request_error_counts,omitempty"`
 	CiphertextOriginRequestCancellations uint64                 `json:"ciphertext_origin_request_cancellations"`
 	CiphertextOriginRequestActive        uint64                 `json:"ciphertext_origin_request_active"`
@@ -585,6 +586,11 @@ func encryptionReadMetrics(encoded []byte) *EncryptionReadMetrics {
 			if bytes.Equal(bytes.TrimSpace(value), []byte("null")) || !validOriginRequestErrorKey(key) {
 				return nil
 			}
+		}
+	}
+	if raw, present := fields["ciphertext_origin_request_not_modified"]; present {
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || outcomeFieldsPresent != len(outcomeFields) || result.CiphertextOriginRequestErrorCounts == nil {
+			return nil
 		}
 	}
 	return &result
