@@ -421,6 +421,9 @@ type ReadCacheStatus struct {
 }
 
 type EncryptionReadMetrics struct {
+	CiphertextOriginBodyPayloads *EncryptionOriginBodyPayloads `json:"ciphertext_origin_body_payloads,omitempty"`
+	CiphertextOriginFileRead     *EncryptionOriginFileRead     `json:"ciphertext_origin_file_read,omitempty"`
+
 	CiphertextOriginLatencyBuckets       *[8]uint64             `json:"ciphertext_origin_latency_buckets,omitempty"`
 	ChunkWaitLatencyBuckets              *[8]uint64             `json:"chunk_wait_latency_buckets,omitempty"`
 	ChunkAdmissionLatencyBuckets         *[8]uint64             `json:"chunk_admission_latency_buckets,omitempty"`
@@ -480,6 +483,29 @@ type EncryptionReadWindow struct {
 	UnixSeconds             uint64 `json:"unix_seconds"`
 	RequestedPlaintextBytes uint64 `json:"requested_plaintext_bytes"`
 	CiphertextOriginBytes   uint64 `json:"ciphertext_origin_bytes"`
+}
+
+type EncryptionOriginBodyPayloads struct {
+	FileCalls   uint64 `json:"file_calls"`
+	FileNS      uint64 `json:"file_ns"`
+	StreamCalls uint64 `json:"stream_calls"`
+	StreamNS    uint64 `json:"stream_ns"`
+}
+
+type EncryptionOriginFileRead struct {
+	Calls         uint64 `json:"calls"`
+	Started       uint64 `json:"started"`
+	Finished      uint64 `json:"finished"`
+	Errors        uint64 `json:"errors"`
+	Panics        uint64 `json:"panics"`
+	Abandoned     uint64 `json:"abandoned"`
+	Active        uint64 `json:"active"`
+	QueueNS       uint64 `json:"queue_ns"`
+	ServiceNS     uint64 `json:"service_ns"`
+	Resumed       uint64 `json:"resumed"`
+	CompletionNS  uint64 `json:"completion_ns"`
+	Cancellations uint64 `json:"cancellations"`
+	DirectCalls   uint64 `json:"direct_calls"`
 }
 
 func encryptionReadMetrics(encoded []byte) *EncryptionReadMetrics {
@@ -591,6 +617,28 @@ func encryptionReadMetrics(encoded []byte) *EncryptionReadMetrics {
 	if raw, present := fields["ciphertext_origin_request_not_modified"]; present {
 		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || outcomeFieldsPresent != len(outcomeFields) || result.CiphertextOriginRequestErrorCounts == nil {
 			return nil
+		}
+	}
+	if raw, present := fields["ciphertext_origin_body_payloads"]; present {
+		var payloads map[string]json.RawMessage
+		if json.Unmarshal(raw, &payloads) != nil || len(payloads) != 4 || outcomeFieldsPresent != len(outcomeFields) {
+			return nil
+		}
+		for _, name := range []string{"file_calls", "file_ns", "stream_calls", "stream_ns"} {
+			if value, found := payloads[name]; !found || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+				return nil
+			}
+		}
+	}
+	if raw, present := fields["ciphertext_origin_file_read"]; present {
+		var counters map[string]json.RawMessage
+		if json.Unmarshal(raw, &counters) != nil || len(counters) != 13 || result.CiphertextOriginBodyPayloads == nil || outcomeFieldsPresent != len(outcomeFields) {
+			return nil
+		}
+		for _, name := range []string{"calls", "started", "finished", "errors", "panics", "abandoned", "active", "queue_ns", "service_ns", "resumed", "completion_ns", "cancellations", "direct_calls"} {
+			if value, found := counters[name]; !found || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+				return nil
+			}
 		}
 	}
 	return &result

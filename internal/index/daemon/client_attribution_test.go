@@ -221,6 +221,117 @@ func TestEncryptionOriginErrorDetailsCompatibility(test *testing.T) {
 	}
 }
 
+func TestEncryptionOriginBodyPayloadsCompatibility(test *testing.T) {
+	expected := EncryptionReadMetrics{CiphertextOriginBodyPayloads: &EncryptionOriginBodyPayloads{
+		FileCalls: 3, FileNS: 5, StreamCalls: 7, StreamNS: 11,
+	}}
+	encoded, err := json.Marshal(expected)
+	if err != nil {
+		test.Fatal(err)
+	}
+	status := writerStatus(&vaulticdbv1.WriterStatusResponse{Attribution: &vaulticdbv1.AttributionSnapshot{EncryptionReadMetricsJson: encoded}})
+	if !reflect.DeepEqual(status.Attribution.EncryptionReads, &expected) {
+		test.Fatal("body payload attribution lost through WriterStatus")
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		test.Fatal(err)
+	}
+	name := "ciphertext_origin_body_payloads"
+	for _, invalid := range []string{"null", "{}", "[]", `{"file_calls":1,"file_ns":2,"stream_calls":3}`, `{"file_calls":1,"file_ns":2,"stream_calls":3,"stream_ns":4,"extra":5}`} {
+		fields[name] = json.RawMessage(invalid)
+		payload, _ := json.Marshal(fields)
+		if encryptionReadMetrics(payload) != nil {
+			test.Fatalf("invalid body payload group accepted: %s", invalid)
+		}
+	}
+	for _, counter := range []string{"file_calls", "file_ns", "stream_calls", "stream_ns"} {
+		for _, invalid := range []string{"null", "true", `"1"`, "-1", "1.5", "18446744073709551616"} {
+			group := map[string]json.RawMessage{"file_calls": []byte("0"), "file_ns": []byte("0"), "stream_calls": []byte("0"), "stream_ns": []byte("0")}
+			group[counter] = json.RawMessage(invalid)
+			fields[name], _ = json.Marshal(group)
+			payload, _ := json.Marshal(fields)
+			if encryptionReadMetrics(payload) != nil {
+				test.Fatalf("invalid body payload counter accepted: %s=%s", counter, invalid)
+			}
+		}
+	}
+	fields[name] = json.RawMessage(`{"file_calls":0,"file_ns":0,"stream_calls":0,"stream_ns":0}`)
+	payload, _ := json.Marshal(fields)
+	if metrics := encryptionReadMetrics(payload); metrics == nil || metrics.CiphertextOriginBodyPayloads == nil {
+		test.Fatal("measured zero body payload group became unavailable")
+	}
+	delete(fields, name)
+	payload, _ = json.Marshal(fields)
+	if metrics := encryptionReadMetrics(payload); metrics == nil || metrics.CiphertextOriginBodyPayloads != nil {
+		test.Fatal("legacy absence became measured body payload attribution")
+	}
+}
+
+func TestEncryptionOriginFileReadCompatibility(test *testing.T) {
+	expected := EncryptionReadMetrics{
+		CiphertextOriginBodyPayloads: &EncryptionOriginBodyPayloads{},
+		CiphertextOriginFileRead: &EncryptionOriginFileRead{
+			Calls: 1, Started: 2, Finished: 3, Errors: 4, Panics: 5, Abandoned: 6, Active: 7,
+			QueueNS: 8, ServiceNS: 9, Resumed: 10, CompletionNS: 11, Cancellations: 12, DirectCalls: 13,
+		},
+	}
+	encoded, err := json.Marshal(expected)
+	if err != nil {
+		test.Fatal(err)
+	}
+	status := writerStatus(&vaulticdbv1.WriterStatusResponse{Attribution: &vaulticdbv1.AttributionSnapshot{EncryptionReadMetricsJson: encoded}})
+	if !reflect.DeepEqual(status.Attribution.EncryptionReads, &expected) {
+		test.Fatal("file read diagnostics lost through WriterStatus")
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		test.Fatal(err)
+	}
+	name := "ciphertext_origin_file_read"
+	var valid map[string]json.RawMessage
+	if err := json.Unmarshal(fields[name], &valid); err != nil {
+		test.Fatal(err)
+	}
+	checkInvalid := func(group json.RawMessage) {
+		test.Helper()
+		fields[name] = group
+		payload, _ := json.Marshal(fields)
+		if encryptionReadMetrics(payload) != nil {
+			test.Fatalf("invalid file read group accepted: %s", group)
+		}
+	}
+	for _, invalid := range []string{"null", "{}", "[]"} {
+		checkInvalid(json.RawMessage(invalid))
+	}
+	for counter, original := range valid {
+		delete(valid, counter)
+		group, _ := json.Marshal(valid)
+		checkInvalid(group)
+		for _, invalid := range []string{"null", "true", `"1"`, "-1", "1.5", "18446744073709551616"} {
+			valid[counter] = json.RawMessage(invalid)
+			group, _ = json.Marshal(valid)
+			checkInvalid(group)
+		}
+		valid[counter] = original
+	}
+	valid["extra"] = json.RawMessage("0")
+	group, _ := json.Marshal(valid)
+	checkInvalid(group)
+	fields[name], _ = json.Marshal(EncryptionOriginFileRead{})
+	payload, _ := json.Marshal(fields)
+	if metrics := encryptionReadMetrics(payload); metrics == nil || metrics.CiphertextOriginFileRead == nil {
+		test.Fatal("measured zero file read group became unavailable")
+	}
+	delete(fields, "ciphertext_origin_body_payloads")
+	checkInvalid(fields[name])
+	delete(fields, name)
+	payload, _ = json.Marshal(fields)
+	if metrics := encryptionReadMetrics(payload); metrics == nil || metrics.CiphertextOriginFileRead != nil {
+		test.Fatal("legacy absence became measured file read attribution")
+	}
+}
+
 func TestEncryptionOriginNotModifiedCompatibility(test *testing.T) {
 	count := uint64(3)
 	expected := EncryptionReadMetrics{

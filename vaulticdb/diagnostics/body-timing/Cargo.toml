@@ -1,0 +1,6 @@
+[package]
+name = "vaultic-body-timing"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "BSD-2-Clause"

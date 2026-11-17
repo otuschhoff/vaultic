@@ -2449,6 +2449,246 @@ time. Logical encrypted database reads are not physical NAS traffic or source
 content reads. No causal speedup, instrument-overhead, NAS-saturation,
 deployment or production-default claim follows from this single diagnostic.
 
+### Body Payload Attribution Before Queue Timing
+
+After the accepted diagnostic checkpoint, local instrumentation adds the
+optional `ciphertext_origin_body_payloads` group with `file_calls`, `file_ns`,
+`stream_calls` and `stream_ns`. Classification uses the actual returned
+`GetResultPayload`, not a guessed backend identity. It leaves the dependency's
+`bytes()` implementation, range behavior, scheduling and concurrency unchanged.
+File timers still include blocking-worker queueing, read work and completion
+scheduling; stream timers include stream waiting and materialization. The
+difference between inclusive body time and these nested timers is not a queue
+measurement. Neither timer is physical I/O service time.
+
+The pinned object-store implementation sends file payloads through its private
+`maybe_spawn_blocking` and `local::read_range` helpers. Exact queue/service
+separation therefore needs a dependency-level instrumentation hook, not a
+replacement file reader or an extra scheduling probe. At this stage no such
+dependency hook had been added; the next subsection records its isolated
+diagnostic qualification.
+
+Typed authenticated reporting preserves absent legacy groups separately from
+measured zero, rejects partial or malformed groups and subtracts independent
+interval values with reset checks. Settled coverage requires payload attempts
+to partition body attempts and nested timings to fit within the inclusive body
+timer. Native tests cover actual local-file ranges, stream content, errors and
+cancellation. The rebuilt authenticated lookup fixture observed three file
+bodies and zero stream bodies. This is a local fixture observation, not a
+retroactive classification of the representative diagnostic. Existing sealed
+captures lack the new group and remain unchanged; no new representative backup
+was launched for this follow-up.
+
+### Private File-Worker Timing Hook
+
+The opt-in native feature `diagnostic-body-timing` uses a shared, standard-library
+observer crate and a private patch of the locked `object_store` 0.14.1 archive
+(SHA-256 `d354792e39fa5f0009e47623cf8b15b099bf9a652fa55c6f817fe28ac84fea50`).
+The preparer verifies the archive against the lockfile, archives HEAD plus pinned
+workspace overlays, and emits the dependency diff, Cargo override and preparation
+manifest into a new private `/run/vaultic-body-hook-*` directory. It does not
+edit the Cargo registry or install a workspace-wide override. Production/default
+dependency selection, worker counts, crypto pools and caching policy stay unchanged.
+
+The patch only observes the existing file branch of `GetResult::bytes()`. It
+keeps the existing `maybe_spawn_blocking` and `local::read_range` implementation,
+including positional reads, retries, range limits and errors. The stream branch
+is unchanged. The optional `ciphertext_origin_file_read` group contains:
+
+- `queue_ns`: observer submission to the actual worker's entry. This includes
+   observer/task setup and dispatch overhead, not solely time in Tokio's queue.
+- `service_ns`: the unchanged `read_range` invocation inside that worker,
+   including buffer allocation and kernel/filesystem waits, not pure disk service.
+- `completion_ns`: read completion to awaiter resumption, including observer
+   accounting, file-handle cleanup, worker completion and scheduling overhead.
+- `calls`, `started`, `finished`, `resumed`, `active`, `errors`, `panics`,
+   `abandoned`, `cancellations` and `direct_calls`: independent lifecycle coverage.
+
+Cancelling the awaiter does not necessarily cancel queued or running blocking
+work. Its worker remains active until the actual read finishes or is abandoned;
+its later service time is still recorded. Live snapshots are independently loaded
+atomics, not transactional or necessarily reconciled. Accepted settled intervals
+require a drained baseline, matching calls/starts/finishes/resumptions and file
+payload counts, no errors, panics, abandonment, cancellation or direct fallback,
+and queue plus service plus completion time bounded by inclusive file-body time.
+These are overlapping worker times, not additive wall time or physical NAS traffic.
+
+The native group is absent until an actual hooked file read occurs. Default
+builds and feature-enabled builds without the private patch leave it absent,
+not measured zero. Go forwarding and deltas preserve that distinction; the
+supervisor rejects availability changes and malformed or unsettled groups.
+An explicit `require_file_read=True` additionally rejects absent or unmeasured
+coverage. Historical route policy is unchanged. The observed-baseline policy
+below qualifies availability without inferring a zero baseline or silently
+warming caches merely to make the group appear.
+
+From the workspace root, prepare a fresh isolated tree and run the actual-worker
+tests explicitly (they are ignored in ordinary feature-only runs):
+
+```sh
+root="/run/vaultic-body-hook-$(date +%Y%m%dT%H%M%S)-$$"
+env PYTHONDONTWRITEBYTECODE=1 python3.12 helpers/phase35-m6/body_timing.py --output "$root"
+env TMPDIR=/run CARGO_TARGET_DIR=/run/vaultic-cargo-target \
+   cargo --config "$root/cargo-config.toml" test --offline \
+   --manifest-path "$root/candidate/vaulticdb/Cargo.toml" \
+   --features diagnostic-body-timing --lib encryption::tests::origin_file_read_diagnostic \
+   -- --ignored --test-threads=1
+```
+
+The first private build changes only the candidate lockfile's object-store entry:
+it selects the emitted local source and adds the observer dependency edge.
+Inspect those changes, then use `--locked` on subsequent commands. Never rerun
+the create-only preparer over an existing directory.
+Retain the preparation manifest and source pins with any diagnostic artifact.
+
+Local qualification occupied the runtime's sole blocking worker and observed
+`calls=1, started=0, active=1` before releasing it. Separate tests verified that
+cancelling the queued awaiter retains the worker, and that read errors match the
+unchanged dependency behavior. Observer lifecycle tests cover abandonment, panic
+and no-runtime fallback. The full patched encryption suite and supervisor suite
+passed. The real authenticated native lookup also reconciled three hooked file
+reads and zero stream reads; `VAULTIC_BODY_TIMING_EXPECT_HOOK=1` makes that fixture
+require hook coverage. This is diagnostic plumbing qualification, not evidence
+about the earlier representative capture's queue/service split. No new
+representative backup, speedup, saturation or deployment claim follows. Any
+future representative backup must still use `/ncl1-1-vs-50/fme_cae1` directly.
+
+### Observed File-Read Baseline Policy
+
+`qualify_file_read_baseline` accepts a raw authenticated writer-status envelope
+only when it contains a positive native process start timestamp, measured hook
+coverage and fully reconciled, settled origin/file-read counters. It returns an
+`observed-settled-file-read-v1` receipt with that timestamp, the actual baseline
+file-call count and the explicit conditional-response policy. Missing hook
+coverage is rejected even when every payload counter is zero: absence alone
+does not prove that the private dependency patch is installed. No synthetic
+zero counters, warm-up read, reader replacement or cache policy change is used.
+
+`qualify_file_read_interval` checks both writer-status envelopes under the same
+policy, requires the native start timestamps to match, computes reset-checked
+deltas and qualifies the resulting interval. The receipt includes baseline and
+endpoint file-call counts and the interval's encryption metrics. A valid
+baseline is not itself a measured interval: zero additional file reads are
+rejected rather than reported as zero queue/service cost. Conditional
+`NotModified` remains rejected unless the caller explicitly opts into its
+existing fully reconciled policy; baseline qualification does not relax it.
+
+The authenticated local lookup fixture now records status immediately after
+normal repository opening and before lookup. That opening naturally supplied
+three completed hooked file reads, and the Python qualifier accepted the actual
+status, not a hand-written envelope. The empty-catalog lookup added no file
+reads, and the same qualifier correctly rejected its interval as unmeasured.
+Separate policy tests cover positive intervals, missing or zero-work baselines,
+unsettled work, timing bounds, counter resets and native process replacement.
+The full 49-test supervisor suite, Go race/authenticated fixture and four
+current observer lifecycle tests passed. The intervening observer edit was
+preserved and verified as formatting-equivalent to the private daemon's source.
+
+This establishes a local baseline policy, not a new representative result.
+The qualifier is explicit and is not retrofitted onto historical routes or
+sealed captures. A future dedicated hook capture must invoke the baseline gate
+before measurement and retain its receipt with the raw statuses, then qualify
+the measured endpoints and main interval. If normal opening does not supply a
+settled observed baseline, stop before the backup instead of adding hidden
+warm-up work or inferring missing counters. Any representative backup still
+uses `/ncl1-1-vs-50/fme_cae1` directly. No new representative backup was launched.
+
+### Dedicated File-Timing Capture Route
+
+The new route is `leg-01-file` beneath
+`/volume2/NASDA2/vaultic-test-m6/ncl1-origin-file-fme-cae1-20261117-800k`,
+with runtime `/run/vaultic-unchanged-ncl1-origin-file800k-leg-01-file` and bundle
+`bin/phase35-ncl1-origin-file800k-20261117/linux-amd64`. Both Python and the Go
+qualifier require that exact route, the 800k profile and its own bundle; child
+paths, mixed experiments and wrong profiles are rejected. Control settings,
+including 56 blob tasks, worker opening, caching, crypto and 1ms coalescing,
+are unchanged. Representative input remains `/ncl1-1-vs-50/fme_cae1` directly.
+
+After the existing identity preflight and idle-writer check, but before invoking
+the backup command, the Go runner calls `qualify_file_read_capture` through
+Python 3.12. This reuses the observed-baseline policy rather than implementing a
+second copy in Go. Missing, unmeasured or unsettled hook coverage stops the run
+before backup. No extra repository/cache-warming read is added. Each Python
+gate has a 30-second bound; the existing main runtime, sustained-duration and
+resource guards remain unchanged.
+
+Before backup, the runner saves `file-read-baseline.json` with raw writer status
+and its qualification receipt. After backup and before restore verification,
+it qualifies both the wider writer-status interval and the actual CLI main
+interval, then saves `file-read-interval.json` with both raw statuses, the main
+telemetry and the qualification receipt. Files are created exclusively, chmodded
+0600 and synced; an existing receipt cannot be overwritten. Missing main hook
+metrics or zero file-work intervals cannot pass merely because startup reads
+proved the baseline capability.
+
+Independent analysis recomputes both qualifications from the raw measurement
+and requires exact agreement with both saved receipts. It rejects missing,
+edited, symlinked, non-private or over-2MiB receipt files. The new route's report
+includes `file_read_qualification`; historical report and policy shapes remain
+unchanged. The existing follow-up seal already covers both receipt files.
+Only this route requires file-read coverage in addition to the prior explicit,
+fully reconciled conditional-response policy; historical routes and sealed
+evidence are not reinterpreted.
+
+Local validation passed all 50 supervisor tests and six Go race/authenticated
+cases. The real pre-backup bridge accepted the naturally observed three-read
+baseline and rejected the empty lookup's zero-file-work interval. Tests also
+verified private create-only receipt persistence, exact-route control settings,
+main-interval requirements and independent evidence tamper rejection.
+
+At the wiring checkpoint this route was locally qualified, not built or
+captured. The isolated release build requires the private pinned dependency patch plus
+`diagnostic-body-timing`, and pin the Go qualifier and runtime Python helper as
+well as the native daemon and CLI. The bridge imports the helper from
+`/root/proj/vaultic/helpers/phase35-m6`; retain and verify its source pin for the
+entire run. Older release bundles and already-executed create-only drivers
+must not be reused for this route. No new representative backup or performance
+claim is made by this wiring change.
+
+### File-Timing Release Qualification
+
+The November 17 isolated release build completed successfully from
+`/run/vaultic-body-hook-20261117-release/candidate`. Its new sealed bundle is
+`bin/phase35-ncl1-origin-file800k-20261117/linux-amd64`. The create-only build
+driver and preparer have each run once; do not rerun them over these artifacts.
+The daemon was explicitly recompiled from this source with
+`diagnostic-body-timing` and the private checksum-pinned `object_store` patch.
+The default workspace lockfile and registry source remain unchanged by the
+build. Only the private candidate selects the patched source and its observer
+dependency edge; no dependency versions changed.
+
+Release qualification passed 52 encryption tests, three actual worker
+queue/cancellation/read-error tests, four observer lifecycle tests, four native
+MultiGet tests and 12 native attribution tests. It also passed 32 Go race cases,
+16 cases from the copied qualifier executable, all 50 supervisor tests and seven
+host-observer tests. Both Go qualification passes used this bundle's release
+daemon and obtained a real observed-baseline receipt from the pre-backup bridge.
+No backup workload was launched by these build gates.
+
+SHA-256 pins:
+
+- CLI: `c7b9ef43a9335578d27af9408575d89ae77ce169eec8e8c60d723b1350b340e5`.
+- Native daemon: `e7ec48bef50a26695636da8f10bcf1473c1f34178b1a685be3a00d53e1e68c8d`.
+- Qualifier: `6549b1cbc5ed8dc90f8def93ad8115f5941cacd494e9c384b8d9e74d04bb64dc`.
+- Build manifest: `e2499c61dfda0ba490d629b7548ea65da575c5503219cf496cff2648d323779e`.
+- Runtime Python helper: `67eddf019919440f8b1f3f121a8b0a54a2aaa17f7d3ff454024294869cdaaebe`.
+
+Independent verification checked the bundle seal, all 38 source pins, exact
+diagnostic feature/policy, required executed case counts and private artifact
+modes. The new representative capture root remained absent. This report was
+appended after sealing: the workspace operations document is therefore newer
+than its captured source pin. Use the retained isolated source to verify the
+build's documentation bytes; do not rewrite the build seal or manifest to match
+this later report. Runtime helper and executable pins must still match before
+any capture.
+
+The bundle is qualified diagnostic tooling, not a representative queue/service,
+speedup, NAS saturation or deployment result. A fresh guarded capture and analysis
+driver is still required, using `/ncl1-1-vs-50/fme_cae1` directly, the exact new
+route, observed-baseline receipts and unchanged resource/runtime guards. Older
+capture drivers and evidence remain untouched. No representative backup was
+launched for this release qualification.
+
 ### Pipeline And RAM Investigation
 
 The November 8 screen completed all 20 legs at

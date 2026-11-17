@@ -125,6 +125,8 @@ pub(crate) struct EncryptedObjectStore {
 
 #[derive(Default)]
 struct EncryptionReadMetrics {
+    #[cfg(feature = "diagnostic-body-timing")]
+    file_read_metrics: Arc<vaultic_body_timing::FileReadMetrics>,
     reads: AtomicU64,
     requested_plaintext_bytes: AtomicU64,
     rounded_ciphertext_bytes: AtomicU64,
@@ -134,6 +136,10 @@ struct EncryptionReadMetrics {
     ciphertext_origin_request_ns: AtomicU64,
     ciphertext_origin_body_ns: AtomicU64,
     ciphertext_origin_body_calls: AtomicU64,
+    ciphertext_origin_file_body_calls: AtomicU64,
+    ciphertext_origin_file_body_ns: AtomicU64,
+    ciphertext_origin_stream_body_calls: AtomicU64,
+    ciphertext_origin_stream_body_ns: AtomicU64,
     ciphertext_origin_request_successes: AtomicU64,
     ciphertext_origin_request_not_found: AtomicU64,
     ciphertext_origin_request_errors: AtomicU64,
@@ -444,6 +450,25 @@ impl EncryptionReadMetrics {
             .into();
         snapshot["ciphertext_origin_body_ns"] =
             self.ciphertext_origin_body_ns.load(Ordering::Relaxed).into();
+        snapshot["ciphertext_origin_body_payloads"] = serde_json::json!({
+            "file_calls": self.ciphertext_origin_file_body_calls.load(Ordering::Relaxed),
+            "file_ns": self.ciphertext_origin_file_body_ns.load(Ordering::Relaxed),
+            "stream_calls": self.ciphertext_origin_stream_body_calls.load(Ordering::Relaxed),
+            "stream_ns": self.ciphertext_origin_stream_body_ns.load(Ordering::Relaxed),
+        });
+        #[cfg(feature = "diagnostic-body-timing")]
+        {
+            let file = self.file_read_metrics.snapshot();
+            if file.calls > 0 {
+                snapshot["ciphertext_origin_file_read"] = serde_json::json!({
+                    "calls": file.calls, "started": file.started, "finished": file.finished,
+                    "errors": file.errors, "panics": file.panics, "abandoned": file.abandoned,
+                    "active": file.active, "queue_ns": file.queue_ns, "service_ns": file.service_ns,
+                    "resumed": file.resumed, "completion_ns": file.completion_ns,
+                    "cancellations": file.cancellations, "direct_calls": file.direct_calls,
+                });
+            }
+        }
         snapshot["ciphertext_origin_body_calls"] = self
             .ciphertext_origin_body_calls
             .load(Ordering::Relaxed)
@@ -1717,6 +1742,24 @@ impl EncryptedObjectStore {
             &self.read_metrics.ciphertext_origin_body_cancellations,
         );
         let _body = ReadTiming::new(&self.read_metrics.ciphertext_origin_body_ns);
+        let (calls, elapsed) = match &result.payload {
+            GetResultPayload::File(..) => (
+                &self.read_metrics.ciphertext_origin_file_body_calls,
+                &self.read_metrics.ciphertext_origin_file_body_ns,
+            ),
+            GetResultPayload::Stream(..) => (
+                &self.read_metrics.ciphertext_origin_stream_body_calls,
+                &self.read_metrics.ciphertext_origin_stream_body_ns,
+            ),
+        };
+        calls.fetch_add(1, Ordering::Relaxed);
+        let _payload = ReadTiming::new(elapsed);
+        #[cfg(feature = "diagnostic-body-timing")]
+        let result = {
+            let mut observed = result;
+            observed.extensions.insert(vaultic_body_timing::FileReadObservation(self.read_metrics.file_read_metrics.clone()));
+            observed
+        };
         let result = result.bytes().await;
         outcome.finish(if result.is_ok() {
             &self.read_metrics.ciphertext_origin_body_successes

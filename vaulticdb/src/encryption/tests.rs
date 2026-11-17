@@ -69,6 +69,185 @@ mod tests {
         omit_identity: bool,
     }
 
+    #[tokio::test]
+    async fn origin_body_payloads_preserve_file_and_stream_reads() {
+        let encrypted = store(Arc::new(InMemory::new()), "origin-body-payloads");
+        assert!(encrypted.read_metrics.snapshot().get("ciphertext_origin_file_read").is_none());
+        let location = Path::from("payload");
+        let memory = InMemory::new();
+        memory.put(&location, Bytes::from_static(b"stream-body").into()).await.unwrap();
+        let streamed = memory.get(&location).await.unwrap();
+        assert!(matches!(&streamed.payload, GetResultPayload::Stream(..)));
+        assert_eq!(encrypted.origin_body(streamed).await.unwrap(), Bytes::from_static(b"stream-body"));
+        let directory = std::env::temp_dir().join(format!("vaulticdb-body-payload-{}", rand::random::<u64>()));
+        std::fs::create_dir(&directory).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let local = LocalFileSystem::new_with_prefix(&directory).unwrap();
+        local.put(&location, Bytes::from_static(b"file-body").into()).await.unwrap();
+        let file = local.get_opts(&location, GetOptions { range: Some(GetRange::Bounded(2..7)), ..Default::default() }).await.unwrap();
+        assert!(matches!(&file.payload, GetResultPayload::File(..)));
+        assert_eq!(encrypted.origin_body(file).await.unwrap(), Bytes::from_static(b"le-bo"));
+        let metrics = encrypted.read_metrics.snapshot();
+        let payloads = &metrics["ciphertext_origin_body_payloads"];
+        assert_eq!(payloads["file_calls"], 1);
+        assert_eq!(payloads["stream_calls"], 1);
+        assert_eq!(metrics["ciphertext_origin_body_calls"], 2);
+        assert_eq!(metrics["ciphertext_origin_body_successes"], 2);
+        assert_eq!(metrics["ciphertext_origin_body_active"], 0);
+        let elapsed = payloads["file_ns"].as_u64().unwrap() + payloads["stream_ns"].as_u64().unwrap();
+        assert!(elapsed > 0 && elapsed <= metrics["ciphertext_origin_body_ns"].as_u64().unwrap());
+        if let Ok(expected) = std::env::var("VAULTIC_BODY_TIMING_EXPECT_HOOK") {
+            assert!(matches!(expected.as_str(), "0" | "1"));
+            assert_eq!(metrics.get("ciphertext_origin_file_read").is_some(), expected == "1");
+        }
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn origin_body_payloads_count_errors_and_cancellation() {
+        let encrypted = store(Arc::new(InMemory::new()), "origin-body-outcomes");
+        let memory = InMemory::new();
+        let location = Path::from("payload");
+        memory.put(&location, Bytes::from_static(b"body").into()).await.unwrap();
+        let mut failed = memory.get(&location).await.unwrap();
+        failed.payload = GetResultPayload::Stream(stream::once(async {
+            Err(encryption_error(EncryptionError::Length))
+        }).boxed());
+        assert!(encrypted.origin_body(failed).await.is_err());
+        let mut cancelled = memory.get(&location).await.unwrap();
+        cancelled.payload = GetResultPayload::Stream(stream::once(std::future::pending()).boxed());
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(20), encrypted.origin_body(cancelled)).await.is_err());
+        let metrics = encrypted.read_metrics.snapshot();
+        let payloads = &metrics["ciphertext_origin_body_payloads"];
+        assert_eq!(payloads["file_calls"], 0);
+        assert_eq!(payloads["file_ns"], 0);
+        assert_eq!(payloads["stream_calls"], 2);
+        assert!(payloads["stream_ns"].as_u64().unwrap() > 0);
+        assert_eq!(metrics["ciphertext_origin_body_calls"], 2);
+        assert_eq!(metrics["ciphertext_origin_body_errors"], 1);
+        assert_eq!(metrics["ciphertext_origin_body_cancellations"], 1);
+        assert_eq!(metrics["ciphertext_origin_body_active"], 0);
+        assert!(payloads["stream_ns"].as_u64().unwrap() <= metrics["ciphertext_origin_body_ns"].as_u64().unwrap());
+    }
+
+    #[cfg(feature = "diagnostic-body-timing")]
+    async fn diagnostic_file_fixture() -> (EncryptedObjectStore, GetResult, std::path::PathBuf) {
+        let directory = std::env::temp_dir().join(format!("vaulticdb-file-hook-{}", rand::random::<u64>()));
+        std::fs::create_dir(&directory).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let local = LocalFileSystem::new_with_prefix(&directory).unwrap();
+        let location = Path::from("payload");
+        local.put(&location, Bytes::from_static(b"diagnostic-body").into()).await.unwrap();
+        let result = local.get_opts(&location, GetOptions { range: Some(GetRange::Bounded(2..7)), ..Default::default() }).await.unwrap();
+        assert!(matches!(result.payload, GetResultPayload::File(..)));
+        (store(Arc::new(InMemory::new()), "diagnostic-file"), result, directory)
+    }
+
+    #[cfg(feature = "diagnostic-body-timing")]
+    struct BlockingRelease(Option<std::sync::mpsc::Sender<()>>);
+
+    #[cfg(feature = "diagnostic-body-timing")]
+    impl Drop for BlockingRelease {
+        fn drop(&mut self) {
+            if let Some(release) = self.0.take() {
+                let _ = release.send(());
+            }
+        }
+    }
+
+    #[cfg(feature = "diagnostic-body-timing")]
+    async fn occupy_blocking_worker() -> (BlockingRelease, tokio::task::JoinHandle<()>) {
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let worker = tokio::task::spawn_blocking(move || {
+            let _ = ready.send(());
+            let _ = released.recv();
+        });
+        started.await.unwrap();
+        (BlockingRelease(Some(release)), worker)
+    }
+
+    #[cfg(feature = "diagnostic-body-timing")]
+    #[test]
+    #[ignore = "requires the private pinned object_store body-timing patch"]
+    fn origin_file_read_diagnostic_queue() {
+        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).max_blocking_threads(1).enable_all().build().unwrap();
+        runtime.block_on(async {
+            let (encrypted, result, directory) = diagnostic_file_fixture().await;
+            let (release, occupied) = occupy_blocking_worker().await;
+            let mut body = Box::pin(encrypted.origin_body(result));
+            assert!(futures_util::poll!(body.as_mut()).is_pending());
+            let queued = encrypted.read_metrics.file_read_metrics.snapshot();
+            assert_eq!((queued.calls, queued.started, queued.active), (1, 0, 1));
+            drop(release);
+            occupied.await.unwrap();
+            assert_eq!(body.await.unwrap(), Bytes::from_static(b"agnos"));
+            let file = encrypted.read_metrics.file_read_metrics.snapshot();
+            assert_eq!((file.calls, file.started, file.finished, file.resumed), (1, 1, 1, 1));
+            assert_eq!((file.errors, file.panics, file.abandoned, file.active, file.cancellations, file.direct_calls), (0, 0, 0, 0, 0, 0));
+            assert!(file.queue_ns > 0 && file.service_ns > 0);
+            let metrics = encrypted.read_metrics.snapshot();
+            let payload = metrics["ciphertext_origin_body_payloads"]["file_ns"].as_u64().unwrap();
+            assert!(file.queue_ns + file.service_ns + file.completion_ns <= payload);
+            assert_eq!(metrics["ciphertext_origin_file_read"]["calls"], 1);
+            std::fs::remove_dir_all(directory).unwrap();
+        });
+    }
+
+    #[cfg(feature = "diagnostic-body-timing")]
+    #[test]
+    #[ignore = "requires the private pinned object_store body-timing patch"]
+    fn origin_file_read_diagnostic_cancellation() {
+        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).max_blocking_threads(1).enable_all().build().unwrap();
+        let (metrics, directory) = runtime.block_on(async {
+            let (encrypted, result, directory) = diagnostic_file_fixture().await;
+            let (release, occupied) = occupy_blocking_worker().await;
+            let mut body = Box::pin(encrypted.origin_body(result));
+            assert!(futures_util::poll!(body.as_mut()).is_pending());
+            drop(body);
+            let file = encrypted.read_metrics.file_read_metrics.snapshot();
+            assert_eq!((file.calls, file.started, file.active, file.cancellations), (1, 0, 1, 1));
+            assert_eq!(encrypted.read_metrics.snapshot()["ciphertext_origin_body_cancellations"], 1);
+            drop(release);
+            occupied.await.unwrap();
+            (encrypted.read_metrics.clone(), directory)
+        });
+        drop(runtime);
+        let file = metrics.file_read_metrics.snapshot();
+        assert_eq!((file.started, file.finished, file.active, file.resumed, file.cancellations), (1, 1, 0, 0, 1));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(feature = "diagnostic-body-timing")]
+    #[test]
+    #[ignore = "requires the private pinned object_store body-timing patch"]
+    fn origin_file_read_diagnostic_error() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (encrypted, mut result, directory) = diagnostic_file_fixture().await;
+            let path = directory.join("payload");
+            let mut reference = LocalFileSystem::new_with_prefix(&directory).unwrap().get(&Path::from("payload")).await.unwrap();
+            reference.range = result.range.clone();
+            reference.payload = GetResultPayload::File(std::fs::OpenOptions::new().write(true).open(&path).unwrap(), path.clone());
+            let expected = reference.bytes().await.unwrap_err();
+            result.payload = GetResultPayload::File(std::fs::OpenOptions::new().write(true).open(&path).unwrap(), path);
+            let error = encrypted.origin_body(result).await.unwrap_err();
+            assert_eq!(error.to_string(), expected.to_string());
+            let file = encrypted.read_metrics.file_read_metrics.snapshot();
+            assert_eq!((file.calls, file.started, file.finished, file.errors, file.resumed, file.active), (1, 1, 1, 1, 1, 0));
+            assert_eq!(encrypted.read_metrics.snapshot()["ciphertext_origin_body_errors"], 1);
+            std::fs::remove_dir_all(directory).unwrap();
+        });
+    }
+
     impl Display for CountingStore {
         fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
             formatter.write_str("counting memory object store")

@@ -205,6 +205,84 @@ func TestBackupEncryptionOriginErrorDetailsDelta(test *testing.T) {
 	}
 }
 
+func TestBackupEncryptionOriginBodyPayloadsDelta(test *testing.T) {
+	baseline := &daemon.EncryptionReadMetrics{CiphertextOriginBodyPayloads: &daemon.EncryptionOriginBodyPayloads{
+		FileCalls: 2, FileNS: 3, StreamCalls: 5, StreamNS: 7,
+	}}
+	current := &daemon.EncryptionReadMetrics{CiphertextOriginBodyPayloads: &daemon.EncryptionOriginBodyPayloads{
+		FileCalls: 13, FileNS: 20, StreamCalls: 28, StreamNS: 36,
+	}}
+	delta := backupEncryptionReadDelta(current, baseline)
+	want := daemon.EncryptionOriginBodyPayloads{FileCalls: 11, FileNS: 17, StreamCalls: 23, StreamNS: 29}
+	if delta == nil || delta.CiphertextOriginBodyPayloads == nil || *delta.CiphertextOriginBodyPayloads != want {
+		test.Fatal("body payload delta differs")
+	}
+	delta.CiphertextOriginBodyPayloads.FileCalls = 99
+	if current.CiphertextOriginBodyPayloads.FileCalls != 13 || baseline.CiphertextOriginBodyPayloads.FileCalls != 2 {
+		test.Fatal("body payload delta aliases input")
+	}
+	for _, reset := range []*uint64{&current.CiphertextOriginBodyPayloads.FileCalls, &current.CiphertextOriginBodyPayloads.FileNS,
+		&current.CiphertextOriginBodyPayloads.StreamCalls, &current.CiphertextOriginBodyPayloads.StreamNS} {
+		original := *reset
+		*reset = 0
+		if backupEncryptionReadDelta(current, baseline) != nil {
+			test.Fatal("body payload counter reset accepted")
+		}
+		*reset = original
+	}
+	legacy := &daemon.EncryptionReadMetrics{}
+	for _, pair := range [][2]*daemon.EncryptionReadMetrics{{current, legacy}, {legacy, baseline}} {
+		if result := backupEncryptionReadDelta(pair[0], pair[1]); result == nil || result.CiphertextOriginBodyPayloads != nil {
+			test.Fatal("missing body payload boundary became measured zero")
+		}
+	}
+}
+
+func TestBackupEncryptionOriginFileReadDelta(test *testing.T) {
+	first, last, want := daemon.EncryptionOriginFileRead{}, daemon.EncryptionOriginFileRead{}, daemon.EncryptionOriginFileRead{}
+	for index := 0; index < reflect.TypeOf(first).NumField(); index++ {
+		if reflect.TypeOf(first).Field(index).Name == "Active" {
+			continue
+		}
+		reflect.ValueOf(&first).Elem().Field(index).SetUint(3)
+		reflect.ValueOf(&last).Elem().Field(index).SetUint(8)
+		reflect.ValueOf(&want).Elem().Field(index).SetUint(5)
+	}
+	last.Active, want.Active = 2, 2
+	baseline := &daemon.EncryptionReadMetrics{CiphertextOriginFileRead: &first}
+	current := &daemon.EncryptionReadMetrics{CiphertextOriginFileRead: &last}
+	delta := backupEncryptionReadDelta(current, baseline)
+	if delta == nil || delta.CiphertextOriginFileRead == nil || *delta.CiphertextOriginFileRead != want {
+		test.Fatal("file read delta or end active gauge differs")
+	}
+	delta.CiphertextOriginFileRead.Calls = 99
+	if first.Calls != 3 || last.Calls != 8 {
+		test.Fatal("file read delta aliases input")
+	}
+	for index := 0; index < reflect.TypeOf(last).NumField(); index++ {
+		if reflect.TypeOf(last).Field(index).Name == "Active" {
+			continue
+		}
+		field := reflect.ValueOf(&last).Elem().Field(index)
+		field.SetUint(0)
+		if backupEncryptionReadDelta(current, baseline) != nil {
+			test.Fatalf("file read counter reset accepted: %s", reflect.TypeOf(last).Field(index).Name)
+		}
+		field.SetUint(8)
+	}
+	first.Active = 1
+	if backupEncryptionReadDelta(current, baseline) != nil {
+		test.Fatal("unfinished baseline file work accepted")
+	}
+	first.Active = 0
+	legacy := &daemon.EncryptionReadMetrics{}
+	for _, pair := range [][2]*daemon.EncryptionReadMetrics{{current, legacy}, {legacy, baseline}} {
+		if actual := backupEncryptionReadDelta(pair[0], pair[1]); actual == nil || actual.CiphertextOriginFileRead != nil {
+			test.Fatal("missing file read boundary became a measured zero")
+		}
+	}
+}
+
 func TestBackupEncryptionOriginNotModifiedDelta(test *testing.T) {
 	first, last := uint64(3), uint64(8)
 	baseline := &daemon.EncryptionReadMetrics{CiphertextOriginRequestNotModified: &first}

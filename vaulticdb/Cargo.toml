@@ -11,6 +11,7 @@ description = "Vaultic SlateDB metadata service"
 default = []
 rados = ["dep:rados-client"]
 test-failpoints = []
+diagnostic-body-timing = ["dep:vaultic-body-timing"]
 
 [dependencies]
 aes-gcm = "0.10"
@@ -54,6 +55,7 @@ tonic-prost = "0.14"
 tokio-stream = { version = "0.1", features = ["net"] }
 thiserror = "2.0"
 zeroize = { version = "1.8", features = ["derive"] }
+vaultic-body-timing = { path = "diagnostics/body-timing", optional = true }
 time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 url = "2.5"
 jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"] }

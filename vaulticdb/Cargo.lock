@@ -5091,6 +5091,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "vaultic-body-timing"
+version = "0.1.0"
+
+[[package]]
 name = "vaulticdb"
 version = "0.3.0"
 dependencies = [
@@ -5146,6 +5150,7 @@ dependencies = [
  "tonic-prost",
  "tonic-prost-build",
  "url",
+ "vaultic-body-timing",
  "zeroize",
 ]
 

@@ -459,6 +459,39 @@ func backupEncryptionReadDelta(current, baseline *daemon.EncryptionReadMetrics) 
 		result.CiphertextOriginRequestErrorCounts = counts
 	}
 	result.CiphertextOriginRequestNotModified = nil
+	result.CiphertextOriginBodyPayloads = nil
+	if current.CiphertextOriginBodyPayloads != nil && baseline.CiphertextOriginBodyPayloads != nil {
+		after, before := current.CiphertextOriginBodyPayloads, baseline.CiphertextOriginBodyPayloads
+		if after.FileCalls < before.FileCalls || after.FileNS < before.FileNS || after.StreamCalls < before.StreamCalls || after.StreamNS < before.StreamNS {
+			return nil
+		}
+		result.CiphertextOriginBodyPayloads = &daemon.EncryptionOriginBodyPayloads{
+			FileCalls:   after.FileCalls - before.FileCalls,
+			FileNS:      after.FileNS - before.FileNS,
+			StreamCalls: after.StreamCalls - before.StreamCalls,
+			StreamNS:    after.StreamNS - before.StreamNS,
+		}
+	}
+	result.CiphertextOriginFileRead = nil
+	if current.CiphertextOriginFileRead != nil && baseline.CiphertextOriginFileRead != nil {
+		before := baseline.CiphertextOriginFileRead
+		if before.Active != 0 {
+			return nil
+		}
+		after := *current.CiphertextOriginFileRead
+		for _, field := range [][2]*uint64{
+			{&after.Calls, &before.Calls}, {&after.Started, &before.Started}, {&after.Finished, &before.Finished},
+			{&after.Errors, &before.Errors}, {&after.Panics, &before.Panics}, {&after.Abandoned, &before.Abandoned},
+			{&after.QueueNS, &before.QueueNS}, {&after.ServiceNS, &before.ServiceNS}, {&after.Resumed, &before.Resumed},
+			{&after.CompletionNS, &before.CompletionNS}, {&after.Cancellations, &before.Cancellations}, {&after.DirectCalls, &before.DirectCalls},
+		} {
+			if *field[0] < *field[1] {
+				return nil
+			}
+			*field[0] -= *field[1]
+		}
+		result.CiphertextOriginFileRead = &after
+	}
 	if current.CiphertextOriginRequestNotModified != nil && baseline.CiphertextOriginRequestNotModified != nil {
 		if *current.CiphertextOriginRequestNotModified < *baseline.CiphertextOriginRequestNotModified {
 			return nil

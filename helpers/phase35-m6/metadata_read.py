@@ -87,6 +87,8 @@ ORIGIN_DETAIL_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-origin-detail-fm
 ORIGIN_DETAIL_BIN = WORKSPACE / 'bin/phase35-ncl1-origin-detail800k-20261117/linux-amd64'
 ORIGIN_CONDITIONAL_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-origin-conditional-fme-cae1-20261117-800k')
 ORIGIN_CONDITIONAL_BIN = WORKSPACE / 'bin/phase35-ncl1-origin-conditional800k-20261117/linux-amd64'
+ORIGIN_FILE_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-origin-file-fme-cae1-20261117-800k')
+ORIGIN_FILE_BIN = WORKSPACE / 'bin/phase35-ncl1-origin-file800k-20261117/linux-amd64'
 ORIGIN_OUTCOME_COUNTERS = ('ciphertext_origin_request_successes', 'ciphertext_origin_request_not_found',
                            'ciphertext_origin_request_errors', 'ciphertext_origin_request_cancellations',
                            'ciphertext_origin_identity_rejections', 'ciphertext_origin_body_successes',
@@ -94,6 +96,10 @@ ORIGIN_OUTCOME_COUNTERS = ('ciphertext_origin_request_successes', 'ciphertext_or
 ORIGIN_OUTCOME_GAUGES = ('ciphertext_origin_request_active', 'ciphertext_origin_body_active')
 ORIGIN_ERROR_COUNTS = 'ciphertext_origin_request_error_counts'
 ORIGIN_NOT_MODIFIED = 'ciphertext_origin_request_not_modified'
+ORIGIN_BODY_PAYLOADS = 'ciphertext_origin_body_payloads'
+ORIGIN_FILE_READ = 'ciphertext_origin_file_read'
+ORIGIN_FILE_READ_FIELDS = ('calls', 'started', 'finished', 'errors', 'panics', 'abandoned', 'active',
+                           'queue_ns', 'service_ns', 'resumed', 'completion_ns', 'cancellations', 'direct_calls')
 ORIGIN_ERROR_KEY_PARTS = (
     ('header', 'chunk', 'range'),
     ('generic', 'not_found', 'invalid_path', 'join_error', 'not_supported', 'already_exists',
@@ -204,15 +210,20 @@ def producer_leg(label):
         return ORIGIN_DETAIL_ROOT / label, Path('/run/vaultic-unchanged-ncl1-origin-detail800k-' + label), 56
     if label == 'leg-01-conditional':
         return ORIGIN_CONDITIONAL_ROOT / label, Path('/run/vaultic-unchanged-ncl1-origin-conditional800k-' + label), 56
+    if label == 'leg-01-file':
+        return ORIGIN_FILE_ROOT / label, Path('/run/vaultic-unchanged-ncl1-origin-file800k-' + label), 56
     raise ValueError('producer comparison requires its exact scheduled private leg')
 
 
 def origin_read_policy(root):
-    if root.parent not in (ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT) or producer_leg(root.name)[0] != root:
+    if root.parent not in (ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, ORIGIN_FILE_ROOT) or producer_leg(root.name)[0] != root:
         raise ValueError('origin coverage policy requires its exact scheduled private leg')
-    return {'require_outcomes': root.parent != ORIGIN_READ_ROOT,
-            'require_details': root.parent in (ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT),
-            'allow_conditional_not_modified': root.parent == ORIGIN_CONDITIONAL_ROOT}
+    policy = {'require_outcomes': root.parent != ORIGIN_READ_ROOT,
+              'require_details': root.parent in (ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, ORIGIN_FILE_ROOT),
+              'allow_conditional_not_modified': root.parent in (ORIGIN_CONDITIONAL_ROOT, ORIGIN_FILE_ROOT)}
+    if root.parent == ORIGIN_FILE_ROOT:
+        policy['require_file_read'] = True
+    return policy
 
 
 def coalesce_settings(root, settings):
@@ -311,6 +322,8 @@ def binaries(profile):
             bundle = ORIGIN_DETAIL_BIN
         if root.parent == ORIGIN_CONDITIONAL_ROOT:
             bundle = ORIGIN_CONDITIONAL_BIN
+        if root.parent == ORIGIN_FILE_ROOT:
+            bundle = ORIGIN_FILE_BIN
         return bundle / 'vaultic', bundle / 'vaulticdb'
     if os.environ.get('VAULTIC_PHASE35_RAM64_LEG'):
         original_parent_selected()
@@ -1016,8 +1029,26 @@ def origin_request_error_counts(values):
     return values
 
 
+def origin_body_payloads(values):
+    if (type(values) is not dict or set(values) != {'file_calls', 'file_ns', 'stream_calls', 'stream_ns'}
+            or any(type(value) is not int or not 0 <= value <= (1 << 64) - 1 for value in values.values())):
+        raise ValueError('origin body payload counters invalid')
+    return values
+
+
+def origin_file_read(values):
+    if (type(values) is not dict or set(values) != set(ORIGIN_FILE_READ_FIELDS)
+            or any(type(value) is not int or not 0 <= value <= (1 << 64) - 1 for value in values.values())):
+        raise ValueError('origin file-read counters invalid')
+    return values
+
+
 def encryption_counter_deltas(first, last):
     result = {}
+    if (ORIGIN_FILE_READ in first) != (ORIGIN_FILE_READ in last):
+        raise ValueError('origin file-read availability changed')
+    if (ORIGIN_BODY_PAYLOADS in first) != (ORIGIN_BODY_PAYLOADS in last):
+        raise ValueError('origin body payload availability changed')
     for name in (ORIGIN_ERROR_COUNTS, ORIGIN_NOT_MODIFIED):
         if (name in first) != (name in last):
             raise ValueError('origin request-error classification availability changed')
@@ -1031,6 +1062,20 @@ def encryption_counter_deltas(first, last):
             if any(key not in after or after[key] < value for key, value in before.items()):
                 raise ValueError('origin request-error detail counter reset')
             result[name] = {key: value - before.get(key, 0) for key, value in after.items()}
+        elif name == ORIGIN_FILE_READ:
+            origin_file_read(before)
+            origin_file_read(after)
+            if before['active']:
+                raise ValueError('origin file-read interval begins with active work')
+            if any(after[key] < value for key, value in before.items() if key != 'active'):
+                raise ValueError('origin file-read counter reset')
+            result[name] = {key: value if key == 'active' else value - before[key] for key, value in after.items()}
+        elif name == ORIGIN_BODY_PAYLOADS:
+            origin_body_payloads(before)
+            origin_body_payloads(after)
+            if any(after[key] < value for key, value in before.items()):
+                raise ValueError('origin body payload counter reset')
+            result[name] = {key: value - before[key] for key, value in after.items()}
         elif name == ORIGIN_NOT_MODIFIED:
             if any(type(value) is not int or not 0 <= value <= (1 << 64) - 1 for value in (before, after)) or after < before:
                 raise ValueError('origin conditional not-modified counter invalid or reset')
@@ -1057,6 +1102,75 @@ def encryption_counter_deltas(first, last):
                 raise ValueError('follow-up encryption counter reset')
             result[name] = after - before
     return result
+
+
+def qualify_file_read_baseline(status, allow_conditional_not_modified=False):
+    if (type(status) is not dict or type(status.get('process_started_unix_ms')) is not int
+            or not 0 < status['process_started_unix_ms'] <= (1 << 64) - 1
+            or type(status.get('attribution')) is not dict
+            or type(status['attribution'].get('encryption_reads')) is not dict):
+        raise ValueError('origin file-read baseline lacks native process identity or metrics')
+    metrics = status['attribution']['encryption_reads']
+    if ORIGIN_FILE_READ not in metrics:
+        raise ValueError('origin file-read baseline has no observed hook coverage')
+    require_origin_read_coverage({'encryption_reads': metrics}, require_outcomes=True,
+                                 require_details=True, require_file_read=True,
+                                 allow_conditional_not_modified=allow_conditional_not_modified)
+    return {'policy': 'observed-settled-file-read-v1',
+            'process_started_unix_ms': status['process_started_unix_ms'],
+            'baseline_calls': metrics[ORIGIN_FILE_READ]['calls'],
+            'allow_conditional_not_modified': allow_conditional_not_modified}
+
+
+def qualify_file_read_interval(before, after, allow_conditional_not_modified=False):
+    receipt = qualify_file_read_baseline(before, allow_conditional_not_modified)
+    endpoint = qualify_file_read_baseline(after, allow_conditional_not_modified)
+    if receipt['process_started_unix_ms'] != endpoint['process_started_unix_ms']:
+        raise ValueError('origin file-read native process changed during measurement')
+    first, last = (status['attribution']['encryption_reads'] for status in (before, after))
+    policy = dict(require_outcomes=True, require_details=True, require_file_read=True,
+                  allow_conditional_not_modified=allow_conditional_not_modified)
+    delta = encryption_counter_deltas(first, last)
+    require_origin_read_coverage({'encryption_reads': delta}, **policy)
+    return dict(receipt, endpoint_calls=last[ORIGIN_FILE_READ]['calls'], encryption_reads=delta)
+
+
+def qualify_file_read_capture(root, before, after=None, critical=None):
+    policy = origin_read_policy(root)
+    if not policy.get('require_file_read'):
+        raise ValueError('file-read gate requires its dedicated diagnostic route')
+    conditional = policy['allow_conditional_not_modified']
+    if after is None:
+        if critical is not None:
+            raise ValueError('file-read baseline cannot include a main interval')
+        return qualify_file_read_baseline(before, conditional)
+    receipt = qualify_file_read_interval(before, after, conditional)
+    if type(critical) is not dict:
+        raise ValueError('file-read capture requires its measured main interval')
+    require_origin_read_coverage(critical, **policy)
+    return dict(receipt, main_interval_qualified=True)
+
+
+def verify_file_read_receipts(root, measured):
+    before, after, critical = (measured[name] for name in ('writer_before', 'writer_after', 'critical_path'))
+    baseline = qualify_file_read_capture(root, before)
+    interval = qualify_file_read_capture(root, before, after, critical)
+    records = {
+        'file-read-baseline.json': {'writer_before': before, 'qualification': baseline},
+        'file-read-interval.json': {'writer_before': before, 'writer_after': after,
+                                    'critical_path': critical, 'qualification': interval},
+    }
+    for name, expected in records.items():
+        path = root / 'group-64/forced' / name
+        try:
+            observed = path.lstat()
+        except OSError as error:
+            raise ValueError('file-read qualification receipt missing: ' + name) from error
+        if not stat.S_ISREG(observed.st_mode) or observed.st_mode & 0o777 != 0o600 or not 0 < observed.st_size <= 2 << 20:
+            raise ValueError('file-read qualification receipt is not private and bounded: ' + name)
+        if json.loads(path.read_text()) != expected:
+            raise ValueError('file-read qualification receipt differs from raw measurement: ' + name)
+    return interval
 
 
 def bottleneck_report(critical):
@@ -1171,7 +1285,7 @@ def followup_metadata_flags(settings, variant, inode_limit, root):
     flags += reconciliation_flags(variant)
     if inode_limit == 800000:
         flags += ['--metadata-reconciliation-batch-size=5000', '--metadata-reconciliation-read-ahead=1']
-        if root.parent in (PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT):
+        if root.parent in (PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, ORIGIN_FILE_ROOT):
             flags += ['--read-open-in-workers', f'--blob-save-concurrency={producer_leg(root.name)[2]}']
     return flags
 
@@ -1182,7 +1296,7 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
     variant = root.name.rsplit('-', 1)[-1] if inode_limit == 400000 and root.parent in (RECONCILE_ROOT, CACHE_ROOT, PIPELINE_ROOT, RAM16_ROOT) else None
     settings = cache_profile_settings(profile, variant)
     settings = coalesce_settings(root, settings)
-    if root.parent in (READERS_ROOT, RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT):
+    if root.parent in (READERS_ROOT, RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, ORIGIN_FILE_ROOT):
         if (profile, inode_limit) != ('db-scale800k', 800000):
             raise ValueError('reader receipt requires its exact 800k profile')
         if root.parent == READERS_ROOT:
@@ -1251,17 +1365,18 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
             deltas[field] = encryption_counter_deltas(first, last)
     critical = measured['critical_path']
     origin_policy = None
-    identities = validated_source_identities(root, expected_entries) if root.parent in (READERS_ROOT, RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT) else None
-    if root.parent in (RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT):
+    file_qualification = verify_file_read_receipts(root, measured) if root.parent == ORIGIN_FILE_ROOT else None
+    identities = validated_source_identities(root, expected_entries) if root.parent in (READERS_ROOT, RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, ORIGIN_FILE_ROOT) else None
+    if root.parent in (RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, ORIGIN_FILE_ROOT):
         require_dependency_coverage(critical, expected_regular)
-    if root.parent in (PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT):
+    if root.parent in (PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, ORIGIN_FILE_ROOT):
         require_producer_coverage(critical, producer_leg(root.name)[2])
         if root.parent == COALESCE_ROOT:
             require_coalesce_coverage(critical, settings['batch_delay_ns'])
-        if root.parent in (NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT):
+        if root.parent in (NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, ORIGIN_FILE_ROOT):
             require_coalesce_coverage(critical, 1000000)
             require_native_read_coverage(critical)
-        if root.parent in (ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT):
+        if root.parent in (ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, ORIGIN_FILE_ROOT):
             origin_policy = origin_read_policy(root)
             require_origin_read_coverage(critical, **origin_policy)
             if origin_policy['allow_conditional_not_modified']:
@@ -1287,7 +1402,7 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
     main = measured['main_seconds']
     if not main > 0:
         raise ValueError('follow-up main interval invalid')
-    return {'profile': profile, 'settings': settings, 'main_seconds': main,
+    report = {'profile': profile, 'settings': settings, 'main_seconds': main,
             'source_identities': identities,
             'origin_read_policy': origin_policy,
             'command_seconds': measured['command_seconds'], 'entries': expected_entries, 'entries_per_second': expected_entries / main,
@@ -1300,6 +1415,9 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
             'peak_combined_rss_bytes': outcome['peak_combined_rss_bytes'],
             'physical_nfs_traffic_measured': False, 'cache_evictions_measured': False,
             'single_pass_sustained_qualified': main >= 600, 'deployment_qualified': False}
+    if file_qualification is not None:
+        report['file_read_qualification'] = file_qualification
+    return report
 
 
 def seal_followup(root, row):
@@ -1597,7 +1715,7 @@ def require_producer_coverage(critical, blob_tasks, entries=800000):
             raise ValueError('missing producer traversal timing')
 
 
-def require_origin_read_coverage(critical, require_outcomes=False, require_details=False, allow_conditional_not_modified=False):
+def require_origin_read_coverage(critical, require_outcomes=False, require_details=False, allow_conditional_not_modified=False, require_file_read=False):
     metrics = critical.get('encryption_reads') or {}
     names = ('ciphertext_origin_calls', 'ciphertext_origin_body_calls', 'ciphertext_origin_ns',
              'ciphertext_origin_request_ns', 'ciphertext_origin_body_ns')
@@ -1606,6 +1724,23 @@ def require_origin_read_coverage(critical, require_outcomes=False, require_detai
     if metrics['ciphertext_origin_request_ns'] + metrics['ciphertext_origin_body_ns'] > metrics['ciphertext_origin_ns']:
         raise ValueError('origin request/body coverage differs from settled total')
     outcomes = ORIGIN_OUTCOME_COUNTERS + ORIGIN_OUTCOME_GAUGES
+    payloads = None
+    if ORIGIN_BODY_PAYLOADS in metrics:
+        payloads = origin_body_payloads(metrics[ORIGIN_BODY_PAYLOADS])
+        if not all(name in metrics for name in outcomes):
+            raise ValueError('origin body payload attribution requires classified outcomes')
+    file_read = origin_file_read(metrics[ORIGIN_FILE_READ]) if ORIGIN_FILE_READ in metrics else None
+    if require_file_read and (file_read is None or not file_read['calls']):
+        raise ValueError('origin file-read timing is required but unmeasured')
+    if file_read is not None:
+        if payloads is None:
+            raise ValueError('origin file-read timing requires body payload attribution')
+        if (any(file_read[name] for name in ('active', 'errors', 'panics', 'abandoned', 'cancellations', 'direct_calls'))
+                or any(file_read[name] != file_read['calls'] for name in ('started', 'finished', 'resumed'))
+                or file_read['calls'] != payloads['file_calls']
+                or sum(file_read[name] for name in ('queue_ns', 'service_ns', 'completion_ns')) > payloads['file_ns']
+                or file_read['calls'] and (not file_read['queue_ns'] or not file_read['service_ns'])):
+            raise ValueError('origin file-read worker coverage is incomplete or unsettled')
     if (require_details or allow_conditional_not_modified) and ORIGIN_ERROR_COUNTS not in metrics:
         raise ValueError('origin request-error detail classification is required')
     if allow_conditional_not_modified and ORIGIN_NOT_MODIFIED not in metrics:
@@ -1640,6 +1775,10 @@ def require_origin_read_coverage(critical, require_outcomes=False, require_detai
         not_found = sum(value for key, value in details.items() if key != 'dropped' and key.split('/')[1] == 'not_found')
         if not_found != metrics['ciphertext_origin_request_not_found']:
             raise ValueError('origin request-error detail not-found count differs')
+    if payloads is not None:
+        if (payloads['file_calls'] + payloads['stream_calls'] != metrics['ciphertext_origin_body_calls']
+                or payloads['file_ns'] + payloads['stream_ns'] > metrics['ciphertext_origin_body_ns']):
+            raise ValueError('origin body payload coverage differs')
     permitted_not_modified = 0
     if ORIGIN_NOT_MODIFIED in metrics:
         count = metrics[ORIGIN_NOT_MODIFIED]
@@ -2097,6 +2236,218 @@ def execute_chunk_series(immutable=False, reconcile=False, caches=False, pipelin
 
 
 class ChunkComparisonTests(unittest.TestCase):
+    def test_origin_file_control_route_and_policy(self):
+        label = 'leg-01-file'
+        root, runtime, tasks = producer_leg(label)
+        self.assertEqual(root, ORIGIN_FILE_ROOT / label)
+        self.assertEqual(str(runtime), '/run/vaultic-unchanged-ncl1-origin-file800k-' + label)
+        self.assertEqual(tasks, 56)
+        policy = origin_read_policy(root)
+        self.assertEqual(policy, {'require_outcomes': True, 'require_details': True,
+                                  'allow_conditional_not_modified': True, 'require_file_read': True})
+        with patch.dict(os.environ, {'VAULTIC_PHASE35_PRODUCER_LEG': label}):
+            self.assertEqual(paths('coalesced', 800000, 'db-scale800k'), (root, runtime))
+            self.assertEqual(binaries('db-scale800k'), (ORIGIN_FILE_BIN / 'vaultic', ORIGIN_FILE_BIN / 'vaulticdb'))
+            flags = followup_metadata_flags(profile_settings('db-scale800k'), None, 800000, root)
+            control_flags = followup_metadata_flags(profile_settings('db-scale800k'), None, 800000, ORIGIN_CONDITIONAL_ROOT / 'leg-01-conditional')
+            self.assertEqual(flags, control_flags)
+            with self.assertRaises(ValueError):
+                binaries('db-scale400k')
+            with patch.dict(os.environ, {'VAULTIC_PHASE35_RAM64_LEG': 'leg-01-16g'}):
+                with self.assertRaises(ValueError):
+                    origin_read_policy(root)
+        for invalid in (root / 'retry', ORIGIN_CONDITIONAL_ROOT / label, ORIGIN_FILE_ROOT / 'leg-01-conditional'):
+            with self.assertRaises(ValueError):
+                origin_read_policy(invalid)
+        for parent, leg in ((ORIGIN_READ_ROOT, 'leg-01-origin'), (ORIGIN_OUTCOME_ROOT, 'leg-01-outcome'),
+                            (ORIGIN_DETAIL_ROOT, 'leg-01-detail'), (ORIGIN_CONDITIONAL_ROOT, 'leg-01-conditional')):
+            self.assertNotIn('require_file_read', origin_read_policy(parent / leg))
+
+    def test_file_read_interval_requires_observed_baseline(self):
+        def boundary(calls):
+            file_read = dict.fromkeys(ORIGIN_FILE_READ_FIELDS, 0)
+            file_read.update(calls=calls, started=calls, finished=calls, resumed=calls,
+                             queue_ns=calls, service_ns=calls, completion_ns=calls)
+            return {
+                'process_started_unix_ms': 123,
+                'attribution': {'encryption_reads': {
+                    **dict.fromkeys(ORIGIN_OUTCOME_COUNTERS + ORIGIN_OUTCOME_GAUGES, 0),
+                    'ciphertext_origin_calls': calls, 'ciphertext_origin_body_calls': calls,
+                    'ciphertext_origin_ns': calls * 6, 'ciphertext_origin_request_ns': calls,
+                    'ciphertext_origin_body_ns': calls * 4,
+                    'ciphertext_origin_request_successes': calls, 'ciphertext_origin_body_successes': calls,
+                    ORIGIN_BODY_PAYLOADS: {'file_calls': calls, 'file_ns': calls * 4, 'stream_calls': 0, 'stream_ns': 0},
+                    ORIGIN_ERROR_COUNTS: {'dropped': 0}, ORIGIN_NOT_MODIFIED: 0, ORIGIN_FILE_READ: file_read,
+                }},
+            }
+
+        first, last = boundary(2), boundary(5)
+        original_first, original_last = json.dumps(first, sort_keys=True), json.dumps(last, sort_keys=True)
+        qualified = qualify_file_read_interval(first, last)
+        self.assertEqual(qualified['policy'], 'observed-settled-file-read-v1')
+        self.assertEqual((qualified['baseline_calls'], qualified['endpoint_calls']), (2, 5))
+        self.assertEqual(qualified['encryption_reads'][ORIGIN_FILE_READ]['calls'], 3)
+        self.assertEqual(json.dumps(first, sort_keys=True), original_first)
+        self.assertEqual(json.dumps(last, sort_keys=True), original_last)
+        self.assertEqual(qualify_file_read_baseline(first)['baseline_calls'], 2)
+        root = ORIGIN_FILE_ROOT / 'leg-01-file'
+        self.assertEqual(qualify_file_read_capture(root, first)['baseline_calls'], 2)
+        main = {'encryption_reads': qualified['encryption_reads']}
+        self.assertTrue(qualify_file_read_capture(root, first, last, main)['main_interval_qualified'])
+        with tempfile.TemporaryDirectory(prefix='vaultic-file-receipts-', dir='/run') as directory:
+            private = Path(directory)
+            with patch(__name__ + '.ORIGIN_FILE_ROOT', private):
+                capture = private / 'leg-01-file'
+                artifacts = capture / 'group-64/forced'
+                artifacts.mkdir(parents=True, mode=0o700)
+                measured = {'writer_before': first, 'writer_after': last, 'critical_path': main}
+                baseline = {'writer_before': first, 'qualification': qualify_file_read_capture(capture, first)}
+                interval = dict(measured, qualification=qualify_file_read_capture(capture, first, last, main))
+                for name, record in (('file-read-baseline.json', baseline), ('file-read-interval.json', interval)):
+                    pilot.write_json(artifacts / name, record)
+                self.assertEqual(verify_file_read_receipts(capture, measured), interval['qualification'])
+                for name in ('file-read-baseline.json', 'file-read-interval.json'):
+                    path = artifacts / name
+                    original = path.read_bytes()
+                    path.chmod(0o644)
+                    with self.assertRaises(ValueError):
+                        verify_file_read_receipts(capture, measured)
+                    path.chmod(0o600)
+                    path.write_text('{}')
+                    with self.assertRaises(ValueError):
+                        verify_file_read_receipts(capture, measured)
+                    path.unlink()
+                    with self.assertRaises(ValueError):
+                        verify_file_read_receipts(capture, measured)
+                    path.symlink_to(artifacts / ('file-read-interval.json' if name == 'file-read-baseline.json' else 'file-read-baseline.json'))
+                    with self.assertRaises(ValueError):
+                        verify_file_read_receipts(capture, measured)
+                    path.unlink()
+                    path.write_bytes(original)
+                    path.chmod(0o600)
+        for invalid in (None, {}, {'encryption_reads': {}}):
+            with self.assertRaises(ValueError):
+                qualify_file_read_capture(root, first, last, invalid)
+        with self.assertRaises(ValueError):
+            qualify_file_read_capture(root, first, critical=main)
+        with self.assertRaises(ValueError):
+            qualify_file_read_capture(ORIGIN_CONDITIONAL_ROOT / 'leg-01-conditional', first)
+        for invalid in (None, True, 0, -1, '123', 1 << 64):
+            with self.assertRaises(ValueError):
+                qualify_file_read_baseline(dict(first, process_started_unix_ms=invalid))
+        for invalid in (None, {}, {'process_started_unix_ms': 123}, dict(first, attribution=None),
+                        dict(first, attribution={'encryption_reads': None})):
+            with self.assertRaises(ValueError):
+                qualify_file_read_baseline(invalid)
+        with self.assertRaisesRegex(ValueError, 'native process changed'):
+            qualify_file_read_interval(first, dict(last, process_started_unix_ms=124))
+        for earlier, later in ((boundary(0), last), (first, first), (last, first)):
+            with self.assertRaises(ValueError):
+                qualify_file_read_interval(earlier, later)
+        for boundary_name in ('baseline', 'endpoint'):
+            for change in ('absent', 'active', 'errors', 'cancellations', 'calls', 'service_ns'):
+                earlier, later = boundary(2), boundary(5)
+                selected = (earlier if boundary_name == 'baseline' else later)['attribution']['encryption_reads']
+                if change == 'absent':
+                    del selected[ORIGIN_FILE_READ]
+                elif change == 'service_ns':
+                    selected[ORIGIN_FILE_READ][change] = selected[ORIGIN_BODY_PAYLOADS]['file_ns'] + 1
+                else:
+                    selected[ORIGIN_FILE_READ][change] += 1
+                with self.subTest(boundary=boundary_name, change=change), self.assertRaises(ValueError):
+                    qualify_file_read_interval(earlier, later)
+        empty = boundary(0)
+        del empty['attribution']['encryption_reads'][ORIGIN_FILE_READ]
+        with self.assertRaisesRegex(ValueError, 'baseline has no observed hook coverage'):
+            qualify_file_read_interval(empty, last)
+        for status in (first, last):
+            selected = status['attribution']['encryption_reads']
+            selected['ciphertext_origin_calls'] += 1
+            selected['ciphertext_origin_request_errors'] = 1
+            selected[ORIGIN_ERROR_COUNTS]['header/not_modified/conditional/io_unclassified'] = 1
+            selected[ORIGIN_NOT_MODIFIED] = 1
+        with self.assertRaises(ValueError):
+            qualify_file_read_interval(first, last)
+        self.assertTrue(qualify_file_read_interval(first, last, allow_conditional_not_modified=True)['allow_conditional_not_modified'])
+
+    def test_origin_file_read_attribution(self):
+        before = dict.fromkeys(ORIGIN_FILE_READ_FIELDS, 2)
+        before['active'] = 0
+        after = {key: value + 3 for key, value in before.items()}
+        delta = encryption_counter_deltas({ORIGIN_FILE_READ: before}, {ORIGIN_FILE_READ: after})
+        self.assertEqual(delta, {ORIGIN_FILE_READ: dict.fromkeys(before, 3)})
+        for field in before:
+            for invalid in (None, True, -1, '1', 1.5, 1 << 64):
+                with self.subTest(field=field, invalid=invalid), self.assertRaises(ValueError):
+                    origin_file_read(dict(before, **{field: invalid}))
+            if field != 'active':
+                with self.assertRaises(ValueError):
+                    encryption_counter_deltas({ORIGIN_FILE_READ: before}, {ORIGIN_FILE_READ: dict(after, **{field: 0})})
+            with self.assertRaises(ValueError):
+                origin_file_read({key: value for key, value in before.items() if key != field})
+        for invalid in (None, [], {}, dict(before, extra=0)):
+            with self.assertRaises(ValueError):
+                origin_file_read(invalid)
+        with self.assertRaisesRegex(ValueError, 'begins with active work'):
+            encryption_counter_deltas({ORIGIN_FILE_READ: dict(before, active=1)}, {ORIGIN_FILE_READ: dict(after, active=0)})
+        for first, last in (({}, {ORIGIN_FILE_READ: before}), ({ORIGIN_FILE_READ: before}, {})):
+            with self.assertRaises(ValueError):
+                encryption_counter_deltas(first, last)
+        file_read = dict.fromkeys(ORIGIN_FILE_READ_FIELDS, 0)
+        file_read.update(calls=3, started=3, finished=3, resumed=3, queue_ns=10, service_ns=20, completion_ns=5)
+        classified = {**dict.fromkeys(ORIGIN_OUTCOME_COUNTERS + ORIGIN_OUTCOME_GAUGES, 0),
+                      'ciphertext_origin_calls': 3, 'ciphertext_origin_body_calls': 3,
+                      'ciphertext_origin_ns': 100, 'ciphertext_origin_request_ns': 5, 'ciphertext_origin_body_ns': 90,
+                      'ciphertext_origin_request_successes': 3, 'ciphertext_origin_body_successes': 3,
+                      ORIGIN_BODY_PAYLOADS: {'file_calls': 3, 'file_ns': 80, 'stream_calls': 0, 'stream_ns': 0},
+                      ORIGIN_FILE_READ: file_read}
+        require_origin_read_coverage({'encryption_reads': classified}, require_file_read=True)
+        for field, invalid in [('calls', 4), ('started', 4), ('finished', 4), ('resumed', 4),
+                               ('active', 1), ('errors', 1), ('panics', 1), ('abandoned', 1),
+                               ('cancellations', 1), ('direct_calls', 1), ('queue_ns', 60),
+                               ('queue_ns', 0), ('service_ns', 0)]:
+            with self.subTest(field=field, invalid=invalid), self.assertRaises(ValueError):
+                require_origin_read_coverage({'encryption_reads': dict(classified, **{ORIGIN_FILE_READ: dict(file_read, **{field: invalid})})})
+        del classified[ORIGIN_BODY_PAYLOADS]
+        with self.assertRaises(ValueError):
+            require_origin_read_coverage({'encryption_reads': classified})
+        del classified[ORIGIN_FILE_READ]
+        require_origin_read_coverage({'encryption_reads': classified})
+        with self.assertRaises(ValueError):
+            require_origin_read_coverage({'encryption_reads': classified}, require_file_read=True)
+
+    def test_origin_body_payload_attribution(self):
+        before = {'file_calls': 1, 'file_ns': 4, 'stream_calls': 1, 'stream_ns': 5}
+        after = {key: value + 3 for key, value in before.items()}
+        self.assertEqual(encryption_counter_deltas({ORIGIN_BODY_PAYLOADS: before}, {ORIGIN_BODY_PAYLOADS: after}),
+                         {ORIGIN_BODY_PAYLOADS: dict.fromkeys(before, 3)})
+        for field in before:
+            for invalid in (None, True, -1, '1', 1.5, 1 << 64):
+                with self.subTest(field=field, invalid=invalid), self.assertRaises(ValueError):
+                    origin_body_payloads(dict(before, **{field: invalid}))
+            with self.assertRaises(ValueError):
+                encryption_counter_deltas({ORIGIN_BODY_PAYLOADS: before}, {ORIGIN_BODY_PAYLOADS: dict(after, **{field: 0})})
+        for invalid in (None, [], {}, dict(before, extra=0), {key: value for key, value in before.items() if key != 'file_ns'}):
+            with self.assertRaises(ValueError):
+                origin_body_payloads(invalid)
+        for first, last in (({}, {ORIGIN_BODY_PAYLOADS: before}), ({ORIGIN_BODY_PAYLOADS: before}, {})):
+            with self.assertRaises(ValueError):
+                encryption_counter_deltas(first, last)
+        classified = {**dict.fromkeys(ORIGIN_OUTCOME_COUNTERS + ORIGIN_OUTCOME_GAUGES, 0),
+                      'ciphertext_origin_calls': 2, 'ciphertext_origin_body_calls': 2,
+                      'ciphertext_origin_ns': 12, 'ciphertext_origin_request_ns': 1, 'ciphertext_origin_body_ns': 10,
+                      'ciphertext_origin_request_successes': 2, 'ciphertext_origin_body_successes': 2,
+                      ORIGIN_BODY_PAYLOADS: before}
+        require_origin_read_coverage({'encryption_reads': classified})
+        for invalid in (dict(before, file_calls=2), dict(before, stream_calls=0), dict(before, file_ns=6)):
+            with self.assertRaises(ValueError):
+                require_origin_read_coverage({'encryption_reads': dict(classified, **{ORIGIN_BODY_PAYLOADS: invalid})})
+        missing_outcome = {key: value for key, value in classified.items() if key != 'ciphertext_origin_body_successes'}
+        with self.assertRaises(ValueError):
+            require_origin_read_coverage({'encryption_reads': missing_outcome})
+        del classified[ORIGIN_BODY_PAYLOADS]
+        require_origin_read_coverage({'encryption_reads': classified})
+
     def test_origin_conditional_not_modified_subcounter(self):
         self.assertEqual(encryption_counter_deltas({ORIGIN_NOT_MODIFIED: 3}, {ORIGIN_NOT_MODIFIED: 8}), {ORIGIN_NOT_MODIFIED: 5})
         for invalid in (None, True, -1, '8', 1 << 64, 1):
