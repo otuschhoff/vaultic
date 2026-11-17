@@ -2348,6 +2348,107 @@ supervisor tests. All three failed captures reproduced their original strict
 rejection, with their seals and raw-file pins verified unchanged. No new
 representative backup, commit, default, cache or concurrency change was made.
 
+### Explicit Conditional Origin Coverage Policy
+
+A subsequent local follow-up adds the explicit
+`allow_conditional_not_modified=True` option to the origin coverage validator.
+Its default remains false. At that checkpoint no capture route opted in. Opt-in
+requires the new subcounter even when zero, complete bounded details,
+classified and reconciled outcomes, and drained active gauges. Only conditional
+header `NotModified` details can qualify: their total must equal both the
+eligible subcounter and all aggregate request errors. Thus a precondition
+failure, plain not-modified response, chunk/range response, unexplained error,
+partial accounting or dropped detail event cannot be exempted. Cancellation,
+identity rejection and body failures remain disqualifying.
+
+This changes only an explicitly selected origin-coverage policy, not native
+aggregate counter meanings, production behavior, resource/integrity checks or
+the sustained-runtime gate. Historical captures lack the new subcounter and
+cannot qualify under opt-in; their default rejection remains unchanged. A
+future diagnostic must record this policy choice and collect fresh telemetry
+from pinned binaries rather than synthesizing the counter from old details.
+
+### Dedicated Conditional Origin Route
+
+The next local wiring step adds `leg-01-conditional` beneath the separate
+`ncl1-origin-conditional-fme-cae1-20261117-800k` evidence root and selects only
+the `phase35-ncl1-origin-conditional800k-20261117/linux-amd64` binary bundle.
+Python supervision and the Go qualifier both require this exact leg, reject
+alternate paths and simultaneous experiments, and retain the prior control
+settings: 56 blob tasks, worker opening, 1 ms coalescing and unchanged cache,
+crypto, source and resource limits. Representative input remains directly
+`/ncl1-1-vs-50/fme_cae1`, never a copied source.
+
+Only this new route selects the conditional-header policy. It requires fresh
+subcounter, detail and outcome coverage in both the exact-main interval and
+the wider writer-status interval. A successful follow-up receipt records the
+exact selected validation flags in `origin_read_policy`; these are the same
+flags passed to validation, not a policy inferred from response counts.
+Historical origin routes retain their strict flags and cannot inherit the
+exception from an environment override or a sibling path.
+
+This is local route preparation, not a release build, new capture or accepted
+performance result. A future run still needs a freshly pinned bundle and
+create-only launch evidence. No earlier failed capture, sealed receipt,
+production behavior or sustained-runtime requirement was changed.
+
+### Original-Source Conditional Capture: Accepted Diagnostic
+
+The subsequent fresh release and `leg-01-conditional` capture completed
+directly from `/ncl1-1-vs-50/fme_cae1`, using the qualified 800000-path parent
+and unchanged control settings. Both the exact-main and wider native intervals
+passed the explicitly recorded conditional-header policy. Backup, restore,
+encrypted reopen, unchanged-source identity, zero-publication and resource
+checks passed. This is accepted diagnostic evidence under that policy, not
+acceptance of an older capture or a sustained-performance qualification.
+
+| Conditional Capture Measurement | Observed |
+| --- | ---: |
+| Main backup seconds | 285.185 |
+| Backup command seconds | 292.644 |
+| Peak combined RSS bytes | 67855626240 |
+| Origin request attempts | 152831 |
+| Successful requests / body attempts / successful bodies | 151909 / 151909 / 151909 |
+| Header not-found, plain request, I/O not-found | 461 |
+| Header conditional not-modified details / eligible subcounter | 461 / 461 |
+| Aggregate request errors / unexplained request errors | 461 / 0 |
+| Dropped request-error detail events | 0 |
+| Requests without body collection | 922 |
+| Inclusive origin worker-seconds | 1493.264 |
+| Origin request worker-seconds | 175.531 |
+| Origin body worker-seconds | 1317.368 |
+| Body share of inclusive origin time, percent | 88.221 |
+| Body mean milliseconds per collection attempt | 8.672 |
+| Logical origin bytes per requested plaintext byte | 16.510 |
+| MultiGet RPC calls / failures | 110035 / 0 |
+
+The aggregate error counter still includes the 461 conditional responses;
+its semantics did not change. Their eligible subcounter equals their complete
+header detail count. The wider interval independently reconciled 476 not-found
+and 476 conditional not-modified responses, with 152307 successful bodies.
+Both intervals had zero request/body cancellations, identity rejections,
+body errors, dropped details and active work at the accepted boundaries.
+
+Independent analysis verified 35 build-source and 50 launch pins, actual and
+isolated-source provenance, selected source identity, integrity/resource
+checks, and all three previous failures' raw pins, seals and strict rejection.
+All owned executables exited and the private runtime was removed. Evidence
+is beneath
+`/volume2/NASDA2/vaultic-test-m6/ncl1-origin-conditional-fme-cae1-20261117-800k`,
+with a separately sealed `-analysis` sibling. Native SHA-256 is
+`9a5f32e5f7d7a8ae1b66da0d447f3ab24a46c0fb4d9d699678118e3ca9416c4d`.
+Release qualification passed 50 encryption tests with two existing cases
+ignored, four MultiGet and twelve timing tests, 29 top-level Go race checks,
+16 compiled qualifier checks, 46 supervisor tests and seven observer tests.
+The isolated source and capture seals remain unchanged by this later report.
+
+The main interval is below the unchanged 600-second sustained gate. Body
+collection dominates inclusive origin worker time, but includes file/network
+I/O and blocking-worker scheduling; overlapping scopes are not exclusive wall
+time. Logical encrypted database reads are not physical NAS traffic or source
+content reads. No causal speedup, instrument-overhead, NAS-saturation,
+deployment or production-default claim follows from this single diagnostic.
+
 ### Pipeline And RAM Investigation
 
 The November 8 screen completed all 20 legs at

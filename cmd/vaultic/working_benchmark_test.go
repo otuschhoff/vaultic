@@ -939,6 +939,8 @@ const publicationOriginOutcome800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-o
 const publicationOriginOutcome800kBin = "/root/proj/vaultic/bin/phase35-ncl1-origin-outcome800k-20261116/linux-amd64"
 const publicationOriginDetail800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-origin-detail-fme-cae1-20261117-800k"
 const publicationOriginDetail800kBin = "/root/proj/vaultic/bin/phase35-ncl1-origin-detail800k-20261117/linux-amd64"
+const publicationOriginConditional800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-origin-conditional-fme-cae1-20261117-800k"
+const publicationOriginConditional800kBin = "/root/proj/vaultic/bin/phase35-ncl1-origin-conditional800k-20261117/linux-amd64"
 
 func publicationCoalesceDelay(root, label string) (int, error) {
 	for index, delay := range []int{1, 5, 5, 1, 5, 1, 1, 5} {
@@ -981,7 +983,38 @@ func publicationProducerLeg(root, label string) (int, error) {
 	if label == "leg-01-detail" && root == filepath.Join(publicationOriginDetail800kRoot, label) {
 		return 56, nil
 	}
+	if label == "leg-01-conditional" && root == filepath.Join(publicationOriginConditional800kRoot, label) {
+		return 56, nil
+	}
 	return 0, fmt.Errorf("producer comparison requires its exact scheduled private leg")
+}
+
+func TestPublicationOriginConditionalPolicy(t *testing.T) {
+	for _, key := range []string{"VAULTIC_PHASE35_READERS_LEG", "VAULTIC_PHASE35_RAM32_LEG", "VAULTIC_PHASE35_RAM64_LEG", "VAULTIC_PHASE35_ORIGINAL_PARENT", "VAULTIC_PHASE35_PRODUCER_LEG"} {
+		t.Setenv(key, "")
+	}
+	baseline, err := publicationDBProfile("db-scale800k")
+	rtest.OK(t, err)
+	root, label := filepath.Join(publicationOriginConditional800kRoot, "leg-01-conditional"), "leg-01-conditional"
+	t.Setenv("VAULTIC_PHASE35_PRODUCER_LEG", label)
+	t.Setenv("VAULTIC_PHASE35_THROUGHPUT_ROOT", root)
+	tasks, err := publicationProducerLeg(root, label)
+	rtest.OK(t, err)
+	tuning, err := publicationDBProfile("db-scale800k")
+	rtest.OK(t, err)
+	want := append(slices.Clone(baseline.Flags), "--read-open-in-workers", "--blob-save-concurrency=56")
+	if tasks != 56 || !slices.Equal(tuning.Flags, want) || tuning.MetaCacheBytes != baseline.MetaCacheBytes || tuning.BlockCacheBytes != baseline.BlockCacheBytes || tuning.CryptoThreads != baseline.CryptoThreads {
+		t.Fatal("origin-conditional diagnostic changed control settings")
+	}
+	for _, invalid := range []string{root + "/retry", filepath.Join(publicationOriginDetail800kRoot, label)} {
+		if _, err := publicationProducerLeg(invalid, label); err == nil {
+			t.Fatal("origin-conditional diagnostic accepted an alternate path")
+		}
+	}
+	t.Setenv("VAULTIC_PHASE35_RAM64_LEG", "leg-01-16g")
+	if _, err := publicationDBProfile("db-scale800k"); err == nil {
+		t.Fatal("origin-conditional diagnostic accepted simultaneous cache tuning")
+	}
 }
 
 func TestPublicationOriginDetailPolicy(t *testing.T) {
@@ -3093,6 +3126,9 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 			}
 			if root == filepath.Join(publicationOriginDetail800kRoot, "leg-01-detail") {
 				candidate, binary = filepath.Join(publicationOriginDetail800kBin, "vaultic"), filepath.Join(publicationOriginDetail800kBin, "vaulticdb")
+			}
+			if root == filepath.Join(publicationOriginConditional800kRoot, "leg-01-conditional") {
+				candidate, binary = filepath.Join(publicationOriginConditional800kBin, "vaultic"), filepath.Join(publicationOriginConditional800kBin, "vaulticdb")
 			}
 		}
 		if os.Getenv("VAULTIC_PHASE35_RAM32_LEG") != "" {
