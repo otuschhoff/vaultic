@@ -89,6 +89,11 @@ ORIGIN_CONDITIONAL_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-origin-cond
 ORIGIN_CONDITIONAL_BIN = WORKSPACE / 'bin/phase35-ncl1-origin-conditional800k-20261117/linux-amd64'
 ORIGIN_FILE_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-origin-file-fme-cae1-20261117-800k')
 ORIGIN_FILE_BIN = WORKSPACE / 'bin/phase35-ncl1-origin-file800k-20261117/linux-amd64'
+ORIGIN_FILE_LIVE_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-origin-file-live-fme-cae1-20261117-800k')
+ORIGIN_FILE_LIVE_BIN = WORKSPACE / 'bin/phase35-ncl1-origin-file-live800k-20261117/linux-amd64'
+ORIGIN_FILE_RUNTIME_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-origin-file-runtime-fme-cae1-20261117-800k')
+ORIGIN_FILE_RUNTIME_BIN = WORKSPACE / 'bin/phase35-ncl1-origin-file-runtime800k-20261117/linux-amd64'
+ORIGIN_FILE_ROOTS = (ORIGIN_FILE_ROOT, ORIGIN_FILE_LIVE_ROOT, ORIGIN_FILE_RUNTIME_ROOT)
 ORIGIN_OUTCOME_COUNTERS = ('ciphertext_origin_request_successes', 'ciphertext_origin_request_not_found',
                            'ciphertext_origin_request_errors', 'ciphertext_origin_request_cancellations',
                            'ciphertext_origin_identity_rejections', 'ciphertext_origin_body_successes',
@@ -212,16 +217,20 @@ def producer_leg(label):
         return ORIGIN_CONDITIONAL_ROOT / label, Path('/run/vaultic-unchanged-ncl1-origin-conditional800k-' + label), 56
     if label == 'leg-01-file':
         return ORIGIN_FILE_ROOT / label, Path('/run/vaultic-unchanged-ncl1-origin-file800k-' + label), 56
+    if label == 'leg-01-file-live':
+        return ORIGIN_FILE_LIVE_ROOT / label, Path('/run/vaultic-unchanged-ncl1-file-live800k-' + label), 56
+    if label == 'leg-01-file-runtime':
+        return ORIGIN_FILE_RUNTIME_ROOT / label, Path('/run/vaultic-unchanged-ncl1-file-rt800k-' + label), 56
     raise ValueError('producer comparison requires its exact scheduled private leg')
 
 
 def origin_read_policy(root):
-    if root.parent not in (ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, ORIGIN_FILE_ROOT) or producer_leg(root.name)[0] != root:
+    if root.parent not in (ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, *ORIGIN_FILE_ROOTS) or producer_leg(root.name)[0] != root:
         raise ValueError('origin coverage policy requires its exact scheduled private leg')
     policy = {'require_outcomes': root.parent != ORIGIN_READ_ROOT,
-              'require_details': root.parent in (ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, ORIGIN_FILE_ROOT),
-              'allow_conditional_not_modified': root.parent in (ORIGIN_CONDITIONAL_ROOT, ORIGIN_FILE_ROOT)}
-    if root.parent == ORIGIN_FILE_ROOT:
+              'require_details': root.parent in (ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, *ORIGIN_FILE_ROOTS),
+              'allow_conditional_not_modified': root.parent in (ORIGIN_CONDITIONAL_ROOT, *ORIGIN_FILE_ROOTS)}
+    if root.parent in ORIGIN_FILE_ROOTS:
         policy['require_file_read'] = True
     return policy
 
@@ -324,6 +333,10 @@ def binaries(profile):
             bundle = ORIGIN_CONDITIONAL_BIN
         if root.parent == ORIGIN_FILE_ROOT:
             bundle = ORIGIN_FILE_BIN
+        if root.parent == ORIGIN_FILE_LIVE_ROOT:
+            bundle = ORIGIN_FILE_LIVE_BIN
+        if root.parent == ORIGIN_FILE_RUNTIME_ROOT:
+            bundle = ORIGIN_FILE_RUNTIME_BIN
         return bundle / 'vaultic', bundle / 'vaulticdb'
     if os.environ.get('VAULTIC_PHASE35_RAM64_LEG'):
         original_parent_selected()
@@ -1043,7 +1056,7 @@ def origin_file_read(values):
     return values
 
 
-def encryption_counter_deltas(first, last):
+def encryption_counter_deltas(first, last, *, require_settled_file_read=True):
     result = {}
     if (ORIGIN_FILE_READ in first) != (ORIGIN_FILE_READ in last):
         raise ValueError('origin file-read availability changed')
@@ -1065,7 +1078,7 @@ def encryption_counter_deltas(first, last):
         elif name == ORIGIN_FILE_READ:
             origin_file_read(before)
             origin_file_read(after)
-            if before['active']:
+            if require_settled_file_read and before['active']:
                 raise ValueError('origin file-read interval begins with active work')
             if any(after[key] < value for key, value in before.items() if key != 'active'):
                 raise ValueError('origin file-read counter reset')
@@ -1228,7 +1241,7 @@ def bottleneck_windows(path):
                     if not math.isfinite(elapsed) or elapsed <= 0:
                         raise ValueError('critical-path observation time reset')
                     first, last = previous.get('encryption_reads'), current.get('encryption_reads')
-                    encryption = encryption_counter_deltas(first, last) if first is not None and last is not None else {}
+                    encryption = encryption_counter_deltas(first, last, require_settled_file_read=False) if first is not None and last is not None else {}
                     first, last = previous.get('source_reads'), current.get('source_reads')
                     source = encryption_counter_deltas(first, last) if first is not None and last is not None else None
                     first, last = previous.get('reconciliation', {}), current.get('reconciliation', {})
@@ -1285,7 +1298,7 @@ def followup_metadata_flags(settings, variant, inode_limit, root):
     flags += reconciliation_flags(variant)
     if inode_limit == 800000:
         flags += ['--metadata-reconciliation-batch-size=5000', '--metadata-reconciliation-read-ahead=1']
-        if root.parent in (PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, ORIGIN_FILE_ROOT):
+        if root.parent in (PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, *ORIGIN_FILE_ROOTS):
             flags += ['--read-open-in-workers', f'--blob-save-concurrency={producer_leg(root.name)[2]}']
     return flags
 
@@ -1296,7 +1309,7 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
     variant = root.name.rsplit('-', 1)[-1] if inode_limit == 400000 and root.parent in (RECONCILE_ROOT, CACHE_ROOT, PIPELINE_ROOT, RAM16_ROOT) else None
     settings = cache_profile_settings(profile, variant)
     settings = coalesce_settings(root, settings)
-    if root.parent in (READERS_ROOT, RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, ORIGIN_FILE_ROOT):
+    if root.parent in (READERS_ROOT, RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, *ORIGIN_FILE_ROOTS):
         if (profile, inode_limit) != ('db-scale800k', 800000):
             raise ValueError('reader receipt requires its exact 800k profile')
         if root.parent == READERS_ROOT:
@@ -1365,18 +1378,18 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
             deltas[field] = encryption_counter_deltas(first, last)
     critical = measured['critical_path']
     origin_policy = None
-    file_qualification = verify_file_read_receipts(root, measured) if root.parent == ORIGIN_FILE_ROOT else None
-    identities = validated_source_identities(root, expected_entries) if root.parent in (READERS_ROOT, RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, ORIGIN_FILE_ROOT) else None
-    if root.parent in (RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, ORIGIN_FILE_ROOT):
+    file_qualification = verify_file_read_receipts(root, measured) if root.parent in ORIGIN_FILE_ROOTS else None
+    identities = validated_source_identities(root, expected_entries) if root.parent in (READERS_ROOT, RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, *ORIGIN_FILE_ROOTS) else None
+    if root.parent in (RAM64_ROOT, PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, *ORIGIN_FILE_ROOTS):
         require_dependency_coverage(critical, expected_regular)
-    if root.parent in (PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, ORIGIN_FILE_ROOT):
+    if root.parent in (PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, *ORIGIN_FILE_ROOTS):
         require_producer_coverage(critical, producer_leg(root.name)[2])
         if root.parent == COALESCE_ROOT:
             require_coalesce_coverage(critical, settings['batch_delay_ns'])
-        if root.parent in (NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, ORIGIN_FILE_ROOT):
+        if root.parent in (NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, *ORIGIN_FILE_ROOTS):
             require_coalesce_coverage(critical, 1000000)
             require_native_read_coverage(critical)
-        if root.parent in (ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, ORIGIN_FILE_ROOT):
+        if root.parent in (ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, *ORIGIN_FILE_ROOTS):
             origin_policy = origin_read_policy(root)
             require_origin_read_coverage(critical, **origin_policy)
             if origin_policy['allow_conditional_not_modified']:
@@ -2259,6 +2272,45 @@ class ChunkComparisonTests(unittest.TestCase):
         for invalid in (root / 'retry', ORIGIN_CONDITIONAL_ROOT / label, ORIGIN_FILE_ROOT / 'leg-01-conditional'):
             with self.assertRaises(ValueError):
                 origin_read_policy(invalid)
+        live_label = 'leg-01-file-live'
+        live_root, live_runtime, live_tasks = producer_leg(live_label)
+        self.assertEqual(live_root, ORIGIN_FILE_LIVE_ROOT / live_label)
+        self.assertEqual(str(live_runtime), '/run/vaultic-unchanged-ncl1-file-live800k-' + live_label)
+        self.assertEqual(live_tasks, tasks)
+        self.assertEqual(origin_read_policy(live_root), policy)
+        for invalid in (ORIGIN_FILE_ROOT / live_label, ORIGIN_FILE_LIVE_ROOT / label, live_root / 'retry'):
+            with self.assertRaises(ValueError):
+                origin_read_policy(invalid)
+        with patch.dict(os.environ, {'VAULTIC_PHASE35_PRODUCER_LEG': live_label}):
+            self.assertEqual(paths('coalesced', 800000, 'db-scale800k'), (live_root, live_runtime))
+            self.assertEqual(binaries('db-scale800k'), (ORIGIN_FILE_LIVE_BIN / 'vaultic', ORIGIN_FILE_LIVE_BIN / 'vaulticdb'))
+            self.assertEqual(followup_metadata_flags(profile_settings('db-scale800k'), None, 800000, live_root), control_flags)
+            with self.assertRaises(ValueError):
+                binaries('db-scale400k')
+            with patch.dict(os.environ, {'VAULTIC_PHASE35_RAM64_LEG': 'leg-01-16g'}):
+                with self.assertRaises(ValueError):
+                    origin_read_policy(live_root)
+        runtime_label = 'leg-01-file-runtime'
+        runtime_root, private_runtime, runtime_tasks = producer_leg(runtime_label)
+        self.assertEqual(runtime_root, ORIGIN_FILE_RUNTIME_ROOT / runtime_label)
+        self.assertEqual(str(private_runtime), '/run/vaultic-unchanged-ncl1-file-rt800k-' + runtime_label)
+        self.assertEqual(runtime_tasks, tasks)
+        self.assertEqual(origin_read_policy(runtime_root), policy)
+        self.assertLess(len(os.fsencode(private_runtime / 'fc-1234567890' / 'db.sock')), 108)
+        for invalid in (ORIGIN_FILE_ROOT / runtime_label, ORIGIN_FILE_LIVE_ROOT / runtime_label,
+                        ORIGIN_FILE_RUNTIME_ROOT / label, ORIGIN_FILE_RUNTIME_ROOT / live_label,
+                        runtime_root / 'retry'):
+            with self.assertRaises(ValueError):
+                origin_read_policy(invalid)
+        with patch.dict(os.environ, {'VAULTIC_PHASE35_PRODUCER_LEG': runtime_label}):
+            self.assertEqual(paths('coalesced', 800000, 'db-scale800k'), (runtime_root, private_runtime))
+            self.assertEqual(binaries('db-scale800k'), (ORIGIN_FILE_RUNTIME_BIN / 'vaultic', ORIGIN_FILE_RUNTIME_BIN / 'vaulticdb'))
+            self.assertEqual(followup_metadata_flags(profile_settings('db-scale800k'), None, 800000, runtime_root), control_flags)
+            with self.assertRaises(ValueError):
+                binaries('db-scale400k')
+            with patch.dict(os.environ, {'VAULTIC_PHASE35_RAM64_LEG': 'leg-01-16g'}):
+                with self.assertRaises(ValueError):
+                    origin_read_policy(runtime_root)
         for parent, leg in ((ORIGIN_READ_ROOT, 'leg-01-origin'), (ORIGIN_OUTCOME_ROOT, 'leg-01-outcome'),
                             (ORIGIN_DETAIL_ROOT, 'leg-01-detail'), (ORIGIN_CONDITIONAL_ROOT, 'leg-01-conditional')):
             self.assertNotIn('require_file_read', origin_read_policy(parent / leg))
@@ -2296,7 +2348,7 @@ class ChunkComparisonTests(unittest.TestCase):
         self.assertTrue(qualify_file_read_capture(root, first, last, main)['main_interval_qualified'])
         with tempfile.TemporaryDirectory(prefix='vaultic-file-receipts-', dir='/run') as directory:
             private = Path(directory)
-            with patch(__name__ + '.ORIGIN_FILE_ROOT', private):
+            with patch(__name__ + '.ORIGIN_FILE_ROOT', private), patch(__name__ + '.ORIGIN_FILE_ROOTS', (private, ORIGIN_FILE_LIVE_ROOT)):
                 capture = private / 'leg-01-file'
                 artifacts = capture / 'group-64/forced'
                 artifacts.mkdir(parents=True, mode=0o700)
@@ -3125,8 +3177,22 @@ class ChunkComparisonTests(unittest.TestCase):
                                              'latency_buckets': [0, seconds, 0, 0, 0, 0, 0, 0]},
                             'encryption_reads': {'ciphertext_origin_ns': seconds * 1000000,
                                                   'ciphertext_origin_latency_buckets': [0, seconds, 0, 0, 0, 0, 0, 0]}}
+                snapshot['encryption_reads'][ORIGIN_FILE_READ] = dict.fromkeys(ORIGIN_FILE_READ_FIELDS, 0)
+                snapshot['encryption_reads'][ORIGIN_FILE_READ].update(
+                    calls=seconds, started=seconds, finished=seconds - 1, resumed=seconds - 1,
+                    active=1, queue_ns=seconds * 100, service_ns=seconds * 100, completion_ns=seconds * 100)
                 records.append({'new_operation_telemetry': [{'source': 'group-64/forced/backup.stdout.log', 'snapshot': snapshot}],
                                 'host_shared': {'nfs_mount_intervals': [{'operations': {'READ': {'calls': 10, 'rtt_ms': 50, 'received_bytes': 1000}}}]}})
+            first, last = (record['new_operation_telemetry'][0]['snapshot']['encryption_reads'] for record in records[:2])
+            with self.assertRaisesRegex(ValueError, 'begins with active work'):
+                encryption_counter_deltas(first, last)
+            delta = encryption_counter_deltas(first, last, require_settled_file_read=False)
+            self.assertEqual(delta[ORIGIN_FILE_READ]['active'], 1)
+            self.assertEqual(delta[ORIGIN_FILE_READ]['calls'], 5)
+            self.assertEqual(first[ORIGIN_FILE_READ]['active'], 1)
+            reset = dict(last, **{ORIGIN_FILE_READ: dict(last[ORIGIN_FILE_READ], queue_ns=0)})
+            with self.assertRaisesRegex(ValueError, 'counter reset'):
+                encryption_counter_deltas(first, reset, require_settled_file_read=False)
             path.write_text(''.join(json.dumps(record) + '\n' for record in records))
             report = bottleneck_windows(path)
             self.assertEqual(len(report['windows']), 3)

@@ -2689,6 +2689,203 @@ route, observed-baseline receipts and unchanged resource/runtime guards. Older
 capture drivers and evidence remain untouched. No representative backup was
 launched for this release qualification.
 
+### File-Timing Capture Postmortem
+
+After commit `b8f2f3ddf`, fresh guarded drivers launched the exact `leg-01-file`
+route directly against `/ncl1-1-vs-50/fme_cae1`. The backup and integrity runner
+completed, but the enclosing diagnostic failed during post-backup live-window
+analysis: `origin file-read interval begins with active work`. The original
+failure record and seal remain unchanged; this capture is not accepted.
+
+The failure applied a settled-baseline requirement to a periodic live sample.
+`encryption_counter_deltas` now retains its strict default and accepts an explicit
+`require_settled_file_read=False` only at the live bottleneck-window call site.
+Unsigned shape, availability and monotonic counter checks remain enforced; active
+is still an end gauge. Live windows do not qualify settled worker timing. The
+existing regression test now covers an active live baseline, strict-default
+rejection, gauge preservation and reset rejection. All 50 supervisor tests pass.
+
+Separate immutable postmortem evidence is retained at
+`/volume2/NASDA2/vaultic-test-m6/ncl1-origin-file-fme-cae1-20261117-800k-failure-review`.
+It reproduces the failure with the captured helper, verifies both original strict
+file-read receipts, replays all nine live windows using the fixed helper and pins
+the raw evidence without writing acceptance files into the failed capture.
+
+The retained main interval contains 151914 reconciled file reads, with no worker
+errors, panics, abandonment, cancellation, direct fallback or active work:
+
+| Measured Scope | Worker Seconds | Mean Milliseconds | Inclusive File-Body Share |
+| --- | ---: | ---: | ---: |
+| Submission to worker entry | 3.053 | 0.02010 | 0.224% |
+| Unchanged range reader | 1354.612 | 8.91697 | 99.351% |
+| Read completion to awaiter resumption | 5.104 | 0.03360 | 0.374% |
+
+This rejected capture's retained timing is service-dominated, not queue-dominated.
+Service includes allocation and kernel/filesystem waits, not pure disk service;
+submission includes observation/dispatch overhead, and completion includes cleanup
+and scheduling. These overlapping worker scopes are not exclusive wall time or
+proof of physical NAS traffic, saturation, speedup or instrumentation overhead.
+
+The main interval was 289.180729973 seconds, the command 297.292960270 seconds,
+and peak combined RSS 68925988864 bytes. All 800000 selected entries, 677957
+regular files and 54715539376 bytes matched the source receipts. Restore,
+encrypted reopen, unchanged-source and zero-new-data-blob checks passed. No owned
+processes survived; only an empty private owned runtime directory required
+removal after failed finalization. The main remains below the unchanged
+600-second sustained gate. This postmortem does not reclassify the capture or
+replace a fresh fully accepted diagnostic. The fixed helper and this later report
+are intentionally newer than the sealed build and launch pins; preserve those
+original artifacts and use fresh qualified provenance for a future capture.
+
+### Fresh File-Timing Route With Live-Window Analysis
+
+The follow-up to the rejected file-timing capture uses a new exact namespace:
+
+- Root: `/volume2/NASDA2/vaultic-test-m6/ncl1-origin-file-live-fme-cae1-20261117-800k`.
+- Label: `leg-01-file-live`.
+- Captured runtime (rejected below): `/run/vaultic-ncl1-file-live800k-leg-01-file-live`.
+- Bundle: `bin/phase35-ncl1-origin-file-live800k-20261117/linux-amd64`.
+
+The original file-timing route remains selectable under its original exact label
+and strict policy; its rejected capture and postmortem seals are not rewritten.
+Both file routes require classified outcomes/details, explicit eligible
+conditional-response accounting, observed settled file-read baselines and
+qualified main plus wider intervals. Only periodic live-window subtraction opts
+out of the active-baseline restriction. Cache, crypto, concurrency, source
+identity, resource ceilings and runtime guards remain unchanged. Mixed labels,
+roots, alternate profiles and simultaneous cache experiments are rejected.
+
+At wiring qualification, Python checks and both Go policy subtests passed but
+did not compare the Python runtime path with the Go ownership-prefix contract.
+The subsequent guarded attempt and correction are recorded below. Any
+representative run must read `/ncl1-1-vs-50/fme_cae1` directly. This route-wiring
+entry does not claim that a fresh capture completed or passed the sustained gate.
+
+### File-Live Runtime Guard Postmortem
+
+The fresh file-live attempt was rejected before the measured backup started:
+`retry requires a private canonical runtime`. The captured Python runtime path
+omitted `unchanged`, while the existing Go qualifier requires a canonical private
+runtime under `/run/vaultic-unchanged-*`. The ownership guard worked as intended;
+it was not relaxed. No observed file-read baseline, main interval or performance
+result was produced by this attempt. Qualifier exit status was 1 after
+540.1126794330776 seconds of setup, with peak combined RSS 715882496 bytes.
+
+The Python route now returns
+`/run/vaultic-unchanged-ncl1-file-live800k-leg-01-file-live`. Both existing Go
+file-policy subtests now invoke the actual Python route selector and reject a
+runtime path outside the qualifier's ownership prefix. These Go race subtests
+and all 50 supervisor tests pass. The original route-only fixtures were
+self-consistent but missed this cross-language contract.
+
+Separate immutable rejection evidence is retained at
+`/volume2/NASDA2/vaultic-test-m6/ncl1-origin-file-live-fme-cae1-20261117-800k-failure-review`.
+It binds the captured helper and qualifier source to their launch pins,
+reproduces the prefix mismatch, verifies that the guard is unchanged and records
+the absent baseline/main files. The original failed capture and seal remain
+unchanged. No owned executable survivors were found; only its empty private owned
+runtime directory was removed. The corrected runtime path remains absent.
+
+The runtime correction and regression test postdate the sealed file-live bundle
+and launch source. Do not replace their artifacts, reuse the failed namespace or
+reclassify this attempt. A future backup requires a new qualified bundle and
+fresh namespace carrying this correction; the review itself launches no backup.
+
+### Runtime-Preflight File-Timing Route
+
+The next isolated attempt has its own exact namespace:
+
+- Root: `/volume2/NASDA2/vaultic-test-m6/ncl1-origin-file-runtime-fme-cae1-20261117-800k`.
+- Label: `leg-01-file-runtime`.
+- Runtime: `/run/vaultic-unchanged-ncl1-file-rt800k-leg-01-file-runtime`.
+- Bundle: `bin/phase35-ncl1-origin-file-runtime800k-20261117/linux-amd64`.
+
+The prior file and file-live routes remain distinct, with their original failed
+evidence preserved. All three file routes retain the same strict observed
+baseline, main/wider receipt, outcome, conditional-response and unchanged-source
+requirements. Cache, crypto, concurrency, resource and timing controls are
+unchanged. Python route coverage includes exact-label isolation, tuning parity
+and the native socket-path length bound; all three Go policy subtests check the
+actual Python runtime output against the qualifier ownership prefix.
+
+Before invoking the qualifier and its parent clone, the fresh launcher must
+validate the prepared runtime's canonical path, unchanged ownership prefix,
+private 0700 directory mode, current owner and socket-path bound, and retain a
+private preflight receipt. The original qualifier guard remains authoritative
+and unchanged. Fresh source, executable, helper, parent and driver pins are
+required; this route entry alone makes no capture or performance claim. The
+representative source remains `/ncl1-1-vs-50/fme_cae1` directly.
+
+### Accepted Runtime-Preflight File-Timing Capture
+
+The fresh `leg-01-file-runtime` capture completed and independent analysis
+accepted it at
+`/volume2/NASDA2/vaultic-test-m6/ncl1-origin-file-runtime-fme-cae1-20261117-800k-analysis`.
+It read `/ncl1-1-vs-50/fme_cae1` directly, selecting 800000 entries, 677957 regular
+files and 54715539376 bytes. Original source identity `1048655:3014197312` and
+parent snapshot
+`bf1a0adba4175cda729572a6873ddae4695d944e21795f11587a2d44fc13a0a9`
+matched their qualified receipts. No copied source or translated identity was
+used.
+
+The main interval was 289.324338768 seconds, the command 297.457788171 seconds,
+and peak combined RSS 68493049856 bytes. Restore, encrypted reopen and unchanged
+source checks passed. There were zero new data blobs/bytes, revision-allocation
+calls, reserved revisions or assigned inode revisions. Production was not
+modified. The early runtime receipt records private 0700 ownership and an
+81-byte socket-path bound before qualifier setup. All owned runtimes and
+executables were absent after completion.
+
+An observed, settled baseline contained 190 file reads; the endpoint contained
+152494, yielding 152304 wider-interval reads. The independently qualified main
+interval contained 151906 file reads and no stream payloads. In both intervals,
+calls, starts, finishes and resumptions reconciled exactly; errors, panics,
+abandonment, cancellation, active work and direct fallback were zero.
+
+| Main File Scope | Worker Seconds | Mean Milliseconds | Inclusive File-Body Share |
+| --- | ---: | ---: | ---: |
+| Submission to worker entry | 3.265390182 | 0.02150 | 0.2271% |
+| Unchanged range reader | 1428.296041621 | 9.40250 | 99.3348% |
+| Read completion to awaiter resumption | 5.506126572 | 0.03625 | 0.3829% |
+
+The measured file-body scope is service-dominated, not dispatch/queue-dominated.
+Submission includes observation and dispatch setup; service includes unchanged
+`read_range` allocation and kernel/filesystem waits; completion includes
+accounting, handle cleanup and scheduling. These are nested worker durations,
+not an additive wall-time breakdown, pure disk service or proof of NAS
+saturation. This is not a paired speedup or instrumentation-overhead estimate.
+
+Main requests reconcile as 152836 attempts: 151906 successes, 465 NotFound and
+465 fully classified eligible conditional NotModified responses. The latter
+retain their aggregate request-error semantics. Body successes equal 151906,
+with no unexplained errors, cancellation, identity rejection or dropped details.
+The wider interval independently reconciles 152304 successes and 481 of each
+classified pre-body response. Logical origin bytes per requested plaintext byte
+were 16.51127324830901, not a physical NAS traffic measurement.
+
+Independent analysis verified build, parent, diagnostic, follow-up and analysis
+seals, all 38 build-source pins, 53 launch pins, both raw file-read qualification
+receipts, early runtime preflight and all correctness/resource gates. All five
+earlier failed captures retain their raw evidence and original rejection. The
+earlier conditional capture remains accepted under its own policy without
+inferred file-worker coverage.
+
+The isolated release from `b8f2f3ddf` plus pinned overlays passed 52 encryption,
+3 actual worker-hook, 4 observer lifecycle, 4 native MultiGet, 12 native
+attribution, 32 top-level Go race, 16 compiled qualifier, 50 supervisor and 7
+host-observer cases. Its build manifest SHA-256 is
+`714c2c837c6b5b7f62380a2b105759ba38ca5697224ddb895be67039af074a80`.
+Diagnostic and follow-up manifest hashes are
+`4dcc5e663e0d943ccb94b060d1acc58449dea5b68ea8e55a6924ffdfa2538403`
+and `75baf6c6b431623ab88a85dee5b5091cd4cdd215d453cd334c96d762c0dcaeb6`.
+This report postdates sealing; use the retained isolated source for the captured
+documentation pin rather than rewriting the original manifests.
+
+The 289-second main interval remains below the unchanged 600-second sustained
+gate. Accepted diagnostic evidence is not sustained-performance or deployment
+qualification; no defaults, resource ceilings, cache policy, concurrency or
+production configuration changed.
+
 ### Pipeline And RAM Investigation
 
 The November 8 screen completed all 20 legs at
