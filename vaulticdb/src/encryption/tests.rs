@@ -292,6 +292,73 @@ mod tests {
         assert!(metrics["ciphertext_origin_ns"].as_u64().unwrap() >= request_ns);
     }
 
+    #[test]
+    fn origin_request_error_details_are_bounded() {
+        use slatedb::object_store::Error;
+        use std::io::ErrorKind;
+        let metrics = EncryptionReadMetrics::default();
+        for _repeat in 0..2 {
+            for site in [OriginReadSite::Header, OriginReadSite::Chunk, OriginReadSite::Range] {
+                for variant in ["generic", "not_found", "precondition"] {
+                    for conditional in [false, true] {
+                        for cause in [
+                            None, Some(ErrorKind::NotFound), Some(ErrorKind::PermissionDenied),
+                            Some(ErrorKind::InvalidInput), Some(ErrorKind::UnexpectedEof),
+                            Some(ErrorKind::TimedOut), Some(ErrorKind::Interrupted),
+                            Some(ErrorKind::WouldBlock), Some(ErrorKind::Other),
+                        ] {
+                            let source: Box<dyn std::error::Error + Send + Sync> = match cause {
+                                Some(kind) => Box::new(std::io::Error::new(kind, "private-error-text")),
+                                None => Box::new(EncryptionError::Length),
+                            };
+                            let error = match variant {
+                                "generic" => Error::Generic { store: "fixture", source },
+                                "not_found" => Error::NotFound { path: "private-path".to_owned(), source },
+                                _ => Error::Precondition { path: "private-path".to_owned(), source },
+                            };
+                            metrics.record_origin_request_error(site, conditional, &error);
+                        }
+                    }
+                }
+            }
+        }
+        let snapshot = metrics.snapshot();
+        let counts = snapshot["ciphertext_origin_request_error_counts"].as_object().unwrap();
+        assert_eq!(counts.len(), ORIGIN_ERROR_DETAIL_LIMIT + 1);
+        assert_eq!(counts["dropped"], 68);
+        assert_eq!(counts.iter().filter(|(key, _)| key.as_str() != "dropped")
+            .map(|(_, value)| value.as_u64().unwrap()).sum::<u64>(), 256);
+        assert!(!snapshot["ciphertext_origin_request_error_counts"].to_string().contains("private-"));
+    }
+
+    #[tokio::test]
+    async fn origin_conditional_request_error_details() {
+        let inner = Arc::new(InMemory::new());
+        let encrypted = store(inner.clone(), "conditional-origin");
+        let location = Path::from("private-object-name");
+        encrypted.put(&location, Bytes::from_static(b"payload").into()).await.unwrap();
+        let tag = inner.head(&location).await.unwrap().e_tag.unwrap();
+        for (options, expected) in [
+            (GetOptions { head: true, if_none_match: Some(tag), ..Default::default() }, "not_modified"),
+            (GetOptions { head: true, if_match: Some("wrong".to_owned()), ..Default::default() }, "precondition"),
+        ] {
+            let error = encrypted.get_opts(&location, options).await.unwrap_err();
+            let expected_key = format!("header/{expected}/conditional/io_unclassified");
+            assert_eq!(origin_request_error_key(OriginReadSite::Header, true, &error), expected_key);
+            assert_eq!(encrypted.read_metrics.snapshot()["ciphertext_origin_request_error_counts"][expected_key], 1);
+        }
+        let metrics = encrypted.read_metrics.snapshot();
+        assert_eq!(metrics["ciphertext_origin_request_errors"], 2);
+        assert_eq!(metrics["ciphertext_origin_body_calls"], 0);
+        assert_eq!(metrics["ciphertext_origin_request_error_counts"]["dropped"], 0);
+        assert!(!metrics["ciphertext_origin_request_error_counts"].to_string().contains("private-object-name"));
+        let error = slatedb::object_store::Error::Generic {
+            store: "fixture",
+            source: Box::new(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "private-error-text")),
+        };
+        assert_eq!(origin_request_error_key(OriginReadSite::Range, false, &error), "range/generic/plain/io_permission_denied");
+    }
+
     #[tokio::test]
     async fn origin_failures_and_cancellations_are_classified() {
         for stage in [
@@ -330,6 +397,12 @@ mod tests {
             }
             let metrics = encrypted.read_metrics.snapshot();
             let body_started = stage.starts_with("body");
+            let details = metrics["ciphertext_origin_request_error_counts"].as_object().unwrap();
+            assert_eq!(details["dropped"], 0, "{stage}");
+            assert_eq!(details.len(), if stage == "request_error" { 2 } else { 1 }, "{stage}");
+            if stage == "request_error" {
+                assert_eq!(details["header/generic/plain/io_unclassified"], 1);
+            }
             assert_eq!(metrics["ciphertext_origin_calls"], 1);
             assert_eq!(
                 metrics["ciphertext_origin_request_successes"],

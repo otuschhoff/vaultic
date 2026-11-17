@@ -2132,8 +2132,119 @@ dropping a future in either phase, and pre-body identity rejection. The
 encrypted authenticated lookup checks nonzero, reconciled, drained outcomes
 and ownership-safe reopen against a freshly rebuilt daemon. Supervisor tests
 reject missing, malformed, active, inconsistent and failed outcomes while
-allowing a precisely classified not-found gap. No new representative capture
-has run with these outcome counters, and no production defaults changed.
+allowing a precisely classified not-found gap. At this implementation
+checkpoint no representative capture had yet run with these counters; the
+subsequent attempt is recorded below. No production defaults changed.
+
+### Original-Source Outcome Capture: Request Errors
+
+A fresh isolated release from `e43ecbc03` plus two exact routing overlays
+ran the same 800000-path testcase directly from `/ncl1-1-vs-50/fme_cae1`.
+The new root, runtime, bundle and `leg-01-outcome` selector did not reuse the
+previous failed attempt. Its route requires outcome classification; phase-only
+telemetry is insufficient. All original-source, parent-identity, unchanged
+settings, read-only mount and resource guards remained in force.
+
+The underlying supervisor accepted the completed backup and integrity checks,
+but final diagnostic acceptance failed on non-not-found request errors.
+These are provisional measurements from a rejected diagnostic:
+
+| Outcome Capture Measurement | Observed |
+| --- | ---: |
+| Main backup seconds | 297.331 |
+| Backup command seconds | 306.370 |
+| Peak combined RSS bytes | 68743921664 |
+| Origin request attempts | 152850 |
+| Successful requests / body attempts / successful bodies | 151904 / 151904 / 151904 |
+| Not-found request results | 473 |
+| Other request errors | 473 |
+| Requests without body collection | 946 |
+| Inclusive origin worker-seconds | 1497.382 |
+| Origin request worker-seconds | 181.524 |
+| Origin body worker-seconds | 1315.522 |
+| Body share of inclusive origin time, percent | 87.855 |
+| Body mean milliseconds per collection attempt | 8.660 |
+| Logical origin bytes per requested plaintext byte | 16.509 |
+| MultiGet RPC calls / failures | 112043 / 0 |
+
+All three outcome identities reconcile. Request/body cancellation, pre-body
+identity rejection, body errors and active gauges were zero. Settled outer
+native snapshots also reconcile, with 489 not-found and 489 other request
+errors; their wider interval is not interchangeable with the main interval.
+The 473 other main-interval errors were handled below the successful native
+MultiGet/RPC boundary, but that does not make them acceptable diagnostic
+outcomes. The recorded counters do not identify their error subtype or source.
+An expected conditional response is only a hypothesis, not an explanation
+established by these measurements. The gate remains strict; no accepted
+follow-up or diagnostic receipt was written, and no retry has been launched.
+
+Restore, encrypted reopen, unchanged source, manifest and selected identities
+passed for 677957 regular files and 54715539376 bytes. All 799076 metadata
+records were reused, with zero changed/failed records, new data blobs,
+publication or revision allocation. Independent review verified source and
+isolated-build pins, build/parent/diagnostic seals, native and RPC outcomes,
+remaining integrity/resource gates and the previous failed evidence. No owned
+executable survived. Both failed runtimes remain preserved as evidence, not
+reported as removed.
+
+Evidence is sealed beneath
+`/volume2/NASDA2/vaultic-test-m6/ncl1-origin-outcome-fme-cae1-20261116-800k`
+and its separate `-failure-review` sibling. The fresh native SHA-256 is
+`ce63321862489a9a396e87f8ba233ca88dd8951a58785000c64b57788095b342`.
+Release qualification passed 46 encryption tests with two existing offline
+cases ignored, four MultiGet and twelve timing tests, 23 focused Go race
+checks, 14 compiled qualifier checks, 41 supervisor tests and seven observer
+tests. Cargo was required to compile the actual isolated source tree.
+
+The next bounded diagnostic is native request-error subtype/source attribution
+and a local reproduction before another representative capture. Provisional
+body dominance still points toward body collection, backend reads and
+blocking-worker scheduling, but does not justify cache or concurrency changes.
+These overlapping daemon worker times are not exclusive wall time or physical
+NAS traffic. The failed run is not accepted performance evidence, a causal
+speedup comparison, or sustained/deployment qualification; its main interval
+remains below the unchanged 600-second sustained gate. Production, defaults,
+the previous failed measurements and their unclassified 1380-request gap
+remain unchanged.
+
+### Bounded Origin Request-Error Details
+
+The November 17 local follow-up adds the optional
+`ciphertext_origin_request_error_counts` map without changing the existing
+outcome counters or error handling. Each failed underlying request, including
+not-found, records a fixed-vocabulary key:
+`site/object_store_variant/condition/io_category`. Sites are `header`, `chunk`
+and `range`; condition is `conditional` when any ETag or timestamp condition
+is present, otherwise `plain`. Concrete object-store variants remain distinct,
+including `precondition`, `not_modified`, `not_found` and `generic`.
+
+I/O classification examines at most eight entries of the error source chain.
+Recognized I/O kinds have bounded labels; other I/O kinds use `io_other`.
+`io_unclassified` means no I/O error was exposed within that bound, not that
+the operation performed no I/O. No object paths, backend names, credentials
+or raw error messages enter the keys or payload. At most 128 distinct keys
+are retained without eviction. Further events for unseen keys increment the
+reserved `dropped` counter; retained keys continue counting.
+
+Typed authenticated WriterStatus and main-interval reporting preserve the
+map. Absent legacy details remain unavailable, not measured zeros. Decoding
+rejects unknown keys, missing `dropped`, oversized maps, null or invalid
+counters, and details without the outcome fields. Interval subtraction handles
+new categories and rejects disappearing or decreasing counters without
+mutating either snapshot. The supervisor additionally requires zero dropped
+events and exact agreement with both the not-found and other-error totals
+when details are present. A precisely classified conditional response still
+fails the unchanged non-not-found request-error gate.
+
+Local validation passed 48 encryption tests with two existing cases ignored,
+10 focused Go race/integration cases against a freshly rebuilt native daemon,
+and all 42 supervisor tests. Fixtures reproduce real in-memory-store ETag
+precondition and not-modified responses, generic errors with an I/O cause,
+bounded storage overflow, cancellation accounting and authenticated detail
+forwarding. These fixtures establish discrimination, not the cause of the
+473 historical errors. Neither failed capture was reclassified or rerun.
+No representative backup, production modification, default or guard change
+was part of this local follow-up.
 
 ### Pipeline And RAM Investigation
 

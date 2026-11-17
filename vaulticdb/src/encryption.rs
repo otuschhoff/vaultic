@@ -1,7 +1,7 @@
 //! Chunked authenticated encryption for metadata object stores.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     env,
     fmt::{Debug, Display, Formatter},
     hash::{DefaultHasher, Hash, Hasher},
@@ -49,6 +49,7 @@ const MAX_CHUNK_FLIGHTS: usize = 256;
 const MAX_CHUNK_FLIGHT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CACHED_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CACHED_RANGE_CHUNKS: usize = 16;
+const ORIGIN_ERROR_DETAIL_LIMIT: usize = 128;
 static NEXT_CHUNK_NAMESPACE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -136,6 +137,8 @@ struct EncryptionReadMetrics {
     ciphertext_origin_request_successes: AtomicU64,
     ciphertext_origin_request_not_found: AtomicU64,
     ciphertext_origin_request_errors: AtomicU64,
+    ciphertext_origin_request_error_counts: Mutex<BTreeMap<String, u64>>,
+    ciphertext_origin_request_error_counts_dropped: AtomicU64,
     ciphertext_origin_request_cancellations: AtomicU64,
     ciphertext_origin_request_active: AtomicU64,
     ciphertext_origin_identity_rejections: AtomicU64,
@@ -211,6 +214,64 @@ impl ReadLatencyBuckets {
     }
 }
 
+#[derive(Clone, Copy)]
+enum OriginReadSite {
+    Header,
+    Chunk,
+    Range,
+}
+
+fn origin_request_error_key(
+    site: OriginReadSite,
+    conditional: bool,
+    error: &slatedb::object_store::Error,
+) -> String {
+    use slatedb::object_store::Error;
+    let site = match site {
+        OriginReadSite::Header => "header",
+        OriginReadSite::Chunk => "chunk",
+        OriginReadSite::Range => "range",
+    };
+    let kind = match error {
+        Error::Generic { .. } => "generic",
+        Error::NotFound { .. } => "not_found",
+        Error::InvalidPath { .. } => "invalid_path",
+        Error::JoinError { .. } => "join_error",
+        Error::NotSupported { .. } => "not_supported",
+        Error::AlreadyExists { .. } => "already_exists",
+        Error::Precondition { .. } => "precondition",
+        Error::NotModified { .. } => "not_modified",
+        Error::NotImplemented { .. } => "not_implemented",
+        Error::PermissionDenied { .. } => "permission_denied",
+        Error::Unauthenticated { .. } => "unauthenticated",
+        Error::UnknownConfigurationKey { .. } => "unknown_configuration_key",
+        _ => "other",
+    };
+    let mut source: &(dyn std::error::Error + 'static) = error;
+    let mut io_kind = "io_unclassified";
+    for _depth in 0..8 {
+        if let Some(error) = source.downcast_ref::<std::io::Error>() {
+            io_kind = match error.kind() {
+                std::io::ErrorKind::NotFound => "io_not_found",
+                std::io::ErrorKind::PermissionDenied => "io_permission_denied",
+                std::io::ErrorKind::InvalidInput => "io_invalid_input",
+                std::io::ErrorKind::UnexpectedEof => "io_unexpected_eof",
+                std::io::ErrorKind::TimedOut => "io_timed_out",
+                std::io::ErrorKind::Interrupted => "io_interrupted",
+                std::io::ErrorKind::WouldBlock => "io_would_block",
+                _ => "io_other",
+            };
+            break;
+        }
+        match source.source() {
+            Some(next) => source = next,
+            None => break,
+        }
+    }
+    let condition = if conditional { "conditional" } else { "plain" };
+    format!("{site}/{kind}/{condition}/{io_kind}")
+}
+
 struct ReadOutcome<'counter> {
     active: &'counter AtomicU64,
     cancellations: &'counter AtomicU64,
@@ -279,6 +340,26 @@ impl Drop for ReadTiming<'_> {
 }
 
 impl EncryptionReadMetrics {
+    fn record_origin_request_error(
+        &self,
+        site: OriginReadSite,
+        conditional: bool,
+        error: &slatedb::object_store::Error,
+    ) {
+        let key = origin_request_error_key(site, conditional, error);
+        let mut errors = self
+            .ciphertext_origin_request_error_counts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if errors.contains_key(&key) || errors.len() < ORIGIN_ERROR_DETAIL_LIMIT {
+            let count = errors.entry(key).or_default();
+            *count = count.wrapping_add(1);
+        } else {
+            self.ciphertext_origin_request_error_counts_dropped
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     fn record_window(&self, requested: u64, origin: u64) {
         let seconds = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -410,6 +491,16 @@ impl EncryptionReadMetrics {
         ] {
             snapshot[name] = counter.load(Ordering::Relaxed).into();
         }
+        let mut errors = self
+            .ciphertext_origin_request_error_counts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        errors.insert(
+            "dropped".to_owned(),
+            self.ciphertext_origin_request_error_counts_dropped.load(Ordering::Relaxed),
+        );
+        snapshot["ciphertext_origin_request_error_counts"] = serde_json::json!(errors);
         snapshot
     }
 }
@@ -1585,14 +1676,19 @@ impl EncryptedObjectStore {
         })
     }
 
-    async fn origin_request(&self, location: &Path, options: GetOptions) -> Result<GetResult> {
+    async fn origin_request(&self, location: &Path, options: GetOptions, site: OriginReadSite) -> Result<GetResult> {
         let metrics = &self.read_metrics;
+        let conditional = options.if_match.is_some() || options.if_none_match.is_some()
+            || options.if_modified_since.is_some() || options.if_unmodified_since.is_some();
         let mut outcome = ReadOutcome::new(
             &metrics.ciphertext_origin_request_active,
             &metrics.ciphertext_origin_request_cancellations,
         );
         let _request = ReadTiming::new(&self.read_metrics.ciphertext_origin_request_ns);
         let result = self.inner.get_opts(location, options).await;
+        if let Err(error) = &result {
+            metrics.record_origin_request_error(site, conditional, error);
+        }
         outcome.finish(match &result {
             Ok(_) => &metrics.ciphertext_origin_request_successes,
             Err(slatedb::object_store::Error::NotFound { .. }) => {
@@ -1643,7 +1739,7 @@ impl EncryptedObjectStore {
             .fetch_add(1, Ordering::Relaxed);
         let timing = ReadTiming::new(&self.read_metrics.ciphertext_origin_ns)
             .with_histogram(&self.read_metrics.ciphertext_origin_latency);
-        let encrypted = self.origin_request(location, options).await?;
+        let encrypted = self.origin_request(location, options, OriginReadSite::Chunk).await?;
         if encrypted.meta != expected {
             self.read_metrics
                 .ciphertext_origin_identity_rejections
@@ -1805,7 +1901,7 @@ impl EncryptedObjectStore {
             .fetch_add(1, Ordering::Relaxed);
         let fetch = ReadTiming::new(&self.read_metrics.ciphertext_origin_ns)
             .with_histogram(&self.read_metrics.ciphertext_origin_latency);
-        let result = self.origin_request(location, options).await?;
+        let result = self.origin_request(location, options, OriginReadSite::Header).await?;
         let meta = result.meta.clone();
         let attributes = result.attributes.clone();
         let extensions = result.extensions.clone();
@@ -2018,7 +2114,7 @@ impl ObjectStore for EncryptedObjectStore {
                 .fetch_add(1, Ordering::Relaxed);
             let fetch = ReadTiming::new(&self.read_metrics.ciphertext_origin_ns)
                 .with_histogram(&self.read_metrics.ciphertext_origin_latency);
-            let encrypted = self.origin_request(location, options).await?;
+            let encrypted = self.origin_request(location, options, OriginReadSite::Range).await?;
             if cached_meta
                 .as_ref()
                 .is_some_and(|cached| cached != &encrypted.meta)

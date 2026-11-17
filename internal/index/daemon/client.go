@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -439,6 +440,7 @@ type EncryptionReadMetrics struct {
 	CiphertextOriginRequestSuccesses     uint64                 `json:"ciphertext_origin_request_successes"`
 	CiphertextOriginRequestNotFound      uint64                 `json:"ciphertext_origin_request_not_found"`
 	CiphertextOriginRequestErrors        uint64                 `json:"ciphertext_origin_request_errors"`
+	CiphertextOriginRequestErrorCounts   map[string]uint64      `json:"ciphertext_origin_request_error_counts,omitempty"`
 	CiphertextOriginRequestCancellations uint64                 `json:"ciphertext_origin_request_cancellations"`
 	CiphertextOriginRequestActive        uint64                 `json:"ciphertext_origin_request_active"`
 	CiphertextOriginIdentityRejections   uint64                 `json:"ciphertext_origin_identity_rejections"`
@@ -571,7 +573,42 @@ func encryptionReadMetrics(encoded []byte) *EncryptionReadMetrics {
 	if outcomeFieldsPresent != 0 && (outcomeFieldsPresent != len(outcomeFields) || originFieldsPresent != len(originFields)) {
 		return nil
 	}
+	if raw, present := fields["ciphertext_origin_request_error_counts"]; present {
+		var counts map[string]json.RawMessage
+		if json.Unmarshal(raw, &counts) != nil || len(counts) == 0 || len(counts) > 129 || outcomeFieldsPresent != len(outcomeFields) {
+			return nil
+		}
+		if _, present := counts["dropped"]; !present {
+			return nil
+		}
+		for key, value := range counts {
+			if bytes.Equal(bytes.TrimSpace(value), []byte("null")) || !validOriginRequestErrorKey(key) {
+				return nil
+			}
+		}
+	}
 	return &result
+}
+
+func validOriginRequestErrorKey(key string) bool {
+	if key == "dropped" {
+		return true
+	}
+	parts := strings.Split(key, "/")
+	if len(parts) != 4 {
+		return false
+	}
+	for index, allowed := range []string{
+		"header chunk range",
+		"generic not_found invalid_path join_error not_supported already_exists precondition not_modified not_implemented permission_denied unauthenticated unknown_configuration_key other",
+		"conditional plain",
+		"io_unclassified io_not_found io_permission_denied io_invalid_input io_unexpected_eof io_timed_out io_interrupted io_would_block io_other",
+	} {
+		if !slices.Contains(strings.Fields(allowed), parts[index]) {
+			return false
+		}
+	}
+	return true
 }
 
 type CacheLookupMetrics struct {

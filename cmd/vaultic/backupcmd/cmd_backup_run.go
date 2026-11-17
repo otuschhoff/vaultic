@@ -445,6 +445,19 @@ func backupEncryptionReadDelta(current, baseline *daemon.EncryptionReadMetrics) 
 		}
 		*field[0] -= *field[1]
 	}
+	result.CiphertextOriginRequestErrorCounts = nil
+	if current.CiphertextOriginRequestErrorCounts != nil && baseline.CiphertextOriginRequestErrorCounts != nil {
+		counts := make(map[string]uint64, len(current.CiphertextOriginRequestErrorCounts))
+		for key, before := range baseline.CiphertextOriginRequestErrorCounts {
+			if after, present := current.CiphertextOriginRequestErrorCounts[key]; !present || after < before {
+				return nil
+			}
+		}
+		for key, after := range current.CiphertextOriginRequestErrorCounts {
+			counts[key] = after - baseline.CiphertextOriginRequestErrorCounts[key]
+		}
+		result.CiphertextOriginRequestErrorCounts = counts
+	}
 	for _, histogram := range []struct {
 		current, baseline *[8]uint64
 		output            **[8]uint64

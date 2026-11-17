@@ -163,6 +163,64 @@ func TestEncryptionOriginOutcomesCompatibility(test *testing.T) {
 	}
 }
 
+func TestEncryptionOriginErrorDetailsCompatibility(test *testing.T) {
+	expected := EncryptionReadMetrics{CiphertextOriginRequestErrorCounts: map[string]uint64{
+		"dropped": 0, "header/precondition/conditional/io_unclassified": 7,
+		"range/generic/plain/io_permission_denied": 3,
+	}}
+	encoded, err := json.Marshal(expected)
+	if err != nil {
+		test.Fatal(err)
+	}
+	status := writerStatus(&vaulticdbv1.WriterStatusResponse{Attribution: &vaulticdbv1.AttributionSnapshot{EncryptionReadMetricsJson: encoded}})
+	if !reflect.DeepEqual(status.Attribution.EncryptionReads, &expected) {
+		test.Fatalf("origin error details lost in status: %+v", status.Attribution.EncryptionReads)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		test.Fatal(err)
+	}
+	for _, invalid := range []string{
+		"null", "{}", "[]", `{"header/precondition/conditional/io_unclassified":1}`,
+		`{"dropped":null}`, `{"dropped":-1}`, `{"dropped":true}`, `{"dropped":18446744073709551616}`,
+		`{"dropped":0,"private/path":1}`, `{"dropped":0,"header/unknown/plain/io_other":1}`,
+		`{"dropped":0,"header/generic/plain/io_other":null}`, `{"dropped":0,"header/generic/plain/io_other":"1"}`,
+	} {
+		fields["ciphertext_origin_request_error_counts"] = json.RawMessage(invalid)
+		payload, err := json.Marshal(fields)
+		if err != nil || encryptionReadMetrics(payload) != nil {
+			test.Fatalf("malformed origin error details accepted: %s", invalid)
+		}
+	}
+	oversized := map[string]uint64{"dropped": 0}
+	for _, site := range []string{"header", "chunk", "range"} {
+		for _, kind := range []string{"generic", "not_found", "precondition"} {
+			for _, condition := range []string{"plain", "conditional"} {
+				for _, cause := range []string{"io_unclassified", "io_not_found", "io_permission_denied", "io_invalid_input", "io_unexpected_eof", "io_timed_out", "io_interrupted", "io_would_block", "io_other"} {
+					oversized[strings.Join([]string{site, kind, condition, cause}, "/")] = 1
+				}
+			}
+		}
+	}
+	fields["ciphertext_origin_request_error_counts"], _ = json.Marshal(oversized)
+	payload, _ := json.Marshal(fields)
+	if encryptionReadMetrics(payload) != nil {
+		test.Fatal("unbounded origin error details accepted")
+	}
+	fields["ciphertext_origin_request_error_counts"] = json.RawMessage(`{"dropped":0}`)
+	delete(fields, "ciphertext_origin_request_errors")
+	payload, _ = json.Marshal(fields)
+	if encryptionReadMetrics(payload) != nil {
+		test.Fatal("error details without outcome counters accepted")
+	}
+	delete(fields, "ciphertext_origin_request_error_counts")
+	fields["ciphertext_origin_request_errors"] = json.RawMessage("0")
+	payload, _ = json.Marshal(fields)
+	if metrics := encryptionReadMetrics(payload); metrics == nil || metrics.CiphertextOriginRequestErrorCounts != nil {
+		test.Fatal("legacy missing details became available or broke decoding")
+	}
+}
+
 func TestEncryptionReadLatencyCompatibility(test *testing.T) {
 	encoded, err := json.Marshal(EncryptionReadMetrics{})
 	if err != nil {

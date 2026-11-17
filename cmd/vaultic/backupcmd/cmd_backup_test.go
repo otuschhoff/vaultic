@@ -171,6 +171,40 @@ func TestBackupEncryptionReadDelta(test *testing.T) {
 	}
 }
 
+func TestBackupEncryptionOriginErrorDetailsDelta(test *testing.T) {
+	key, added := "header/not_found/plain/io_not_found", "chunk/precondition/conditional/io_unclassified"
+	baseline := &daemon.EncryptionReadMetrics{CiphertextOriginRequestErrorCounts: map[string]uint64{"dropped": 2, key: 5}}
+	current := &daemon.EncryptionReadMetrics{CiphertextOriginRequestErrorCounts: map[string]uint64{"dropped": 3, key: 8, added: 4}}
+	actual := backupEncryptionReadDelta(current, baseline)
+	if actual == nil || !reflect.DeepEqual(actual.CiphertextOriginRequestErrorCounts, map[string]uint64{"dropped": 1, key: 3, added: 4}) {
+		test.Fatalf("invalid error detail delta: %+v", actual)
+	}
+	actual.CiphertextOriginRequestErrorCounts[key] = 100
+	if current.CiphertextOriginRequestErrorCounts[key] != 8 || baseline.CiphertextOriginRequestErrorCounts[key] != 5 {
+		test.Fatal("delta aliased source maps")
+	}
+	for _, value := range []uint64{1, 0} {
+		current.CiphertextOriginRequestErrorCounts[key] = value
+		if backupEncryptionReadDelta(current, baseline) != nil {
+			test.Fatal("detail counter reset accepted")
+		}
+	}
+	delete(current.CiphertextOriginRequestErrorCounts, key)
+	if backupEncryptionReadDelta(current, baseline) != nil {
+		test.Fatal("disappeared detail category accepted")
+	}
+	baseline.CiphertextOriginRequestErrorCounts = nil
+	actual = backupEncryptionReadDelta(current, baseline)
+	if actual == nil || actual.CiphertextOriginRequestErrorCounts != nil {
+		test.Fatal("missing baseline details became measured zeros")
+	}
+	baseline.CiphertextOriginRequestErrorCounts, current.CiphertextOriginRequestErrorCounts = current.CiphertextOriginRequestErrorCounts, nil
+	actual = backupEncryptionReadDelta(current, baseline)
+	if actual == nil || actual.CiphertextOriginRequestErrorCounts != nil {
+		test.Fatal("missing current details became measured zeros")
+	}
+}
+
 func TestBackupEncryptionLatencyDelta(test *testing.T) {
 	for _, name := range []string{"CiphertextOriginLatencyBuckets", "ChunkWaitLatencyBuckets", "ChunkAdmissionLatencyBuckets"} {
 		baseline, current := &daemon.EncryptionReadMetrics{}, &daemon.EncryptionReadMetrics{}
