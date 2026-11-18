@@ -421,8 +421,9 @@ type ReadCacheStatus struct {
 }
 
 type EncryptionReadMetrics struct {
-	CiphertextOriginBodyPayloads *EncryptionOriginBodyPayloads `json:"ciphertext_origin_body_payloads,omitempty"`
-	CiphertextOriginFileRead     *EncryptionOriginFileRead     `json:"ciphertext_origin_file_read,omitempty"`
+	CiphertextOriginBodyPayloads  *EncryptionOriginBodyPayloads  `json:"ciphertext_origin_body_payloads,omitempty"`
+	CiphertextOriginFileRead      *EncryptionOriginFileRead      `json:"ciphertext_origin_file_read,omitempty"`
+	CiphertextOriginFileRangeRead *EncryptionOriginFileRangeRead `json:"ciphertext_origin_file_range_read,omitempty"`
 
 	CiphertextOriginLatencyBuckets       *[8]uint64             `json:"ciphertext_origin_latency_buckets,omitempty"`
 	ChunkWaitLatencyBuckets              *[8]uint64             `json:"chunk_wait_latency_buckets,omitempty"`
@@ -506,6 +507,30 @@ type EncryptionOriginFileRead struct {
 	CompletionNS  uint64 `json:"completion_ns"`
 	Cancellations uint64 `json:"cancellations"`
 	DirectCalls   uint64 `json:"direct_calls"`
+}
+
+type EncryptionOriginFileRangeRead struct {
+	Calls            uint64 `json:"calls"`
+	Finished         uint64 `json:"finished"`
+	Errors           uint64 `json:"errors"`
+	Panics           uint64 `json:"panics"`
+	Active           uint64 `json:"active"`
+	RequestedBytes   uint64 `json:"requested_bytes"`
+	EmptyCalls       uint64 `json:"empty_calls"`
+	ReadBytes        uint64 `json:"read_bytes"`
+	ReadErrors       uint64 `json:"read_errors"`
+	ReadInterrupted  uint64 `json:"read_interrupted"`
+	ReadEOF          uint64 `json:"read_eof"`
+	UnsupportedCalls uint64 `json:"unsupported_calls"`
+	TotalNS          uint64 `json:"total_ns"`
+	AllocationCalls  uint64 `json:"allocation_calls"`
+	AllocationNS     uint64 `json:"allocation_ns"`
+	ZeroFillCalls    uint64 `json:"zero_fill_calls"`
+	ZeroFillNS       uint64 `json:"zero_fill_ns"`
+	ReadCalls        uint64 `json:"read_calls"`
+	ReadNS           uint64 `json:"read_ns"`
+	ConversionCalls  uint64 `json:"conversion_calls"`
+	ConversionNS     uint64 `json:"conversion_ns"`
 }
 
 func encryptionReadMetrics(encoded []byte) *EncryptionReadMetrics {
@@ -636,6 +661,19 @@ func encryptionReadMetrics(encoded []byte) *EncryptionReadMetrics {
 			return nil
 		}
 		for _, name := range []string{"calls", "started", "finished", "errors", "panics", "abandoned", "active", "queue_ns", "service_ns", "resumed", "completion_ns", "cancellations", "direct_calls"} {
+			if value, found := counters[name]; !found || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+				return nil
+			}
+		}
+	}
+	if raw, present := fields["ciphertext_origin_file_range_read"]; present {
+		var counters map[string]json.RawMessage
+		if json.Unmarshal(raw, &counters) != nil || len(counters) != 21 || result.CiphertextOriginFileRead == nil {
+			return nil
+		}
+		for _, name := range []string{"calls", "finished", "errors", "panics", "active", "requested_bytes", "empty_calls",
+			"read_bytes", "read_errors", "read_interrupted", "read_eof", "unsupported_calls", "total_ns",
+			"allocation_calls", "allocation_ns", "zero_fill_calls", "zero_fill_ns", "read_calls", "read_ns", "conversion_calls", "conversion_ns"} {
 			if value, found := counters[name]; !found || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 				return nil
 			}

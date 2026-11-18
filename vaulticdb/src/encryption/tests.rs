@@ -73,6 +73,7 @@ mod tests {
     async fn origin_body_payloads_preserve_file_and_stream_reads() {
         let encrypted = store(Arc::new(InMemory::new()), "origin-body-payloads");
         assert!(encrypted.read_metrics.snapshot().get("ciphertext_origin_file_read").is_none());
+        assert!(encrypted.read_metrics.snapshot().get("ciphertext_origin_file_range_read").is_none());
         let location = Path::from("payload");
         let memory = InMemory::new();
         memory.put(&location, Bytes::from_static(b"stream-body").into()).await.unwrap();
@@ -103,6 +104,7 @@ mod tests {
         if let Ok(expected) = std::env::var("VAULTIC_BODY_TIMING_EXPECT_HOOK") {
             assert!(matches!(expected.as_str(), "0" | "1"));
             assert_eq!(metrics.get("ciphertext_origin_file_read").is_some(), expected == "1");
+            assert_eq!(metrics.get("ciphertext_origin_file_range_read").is_some(), expected == "1");
         }
         std::fs::remove_dir_all(&directory).unwrap();
     }
@@ -198,6 +200,21 @@ mod tests {
             let payload = metrics["ciphertext_origin_body_payloads"]["file_ns"].as_u64().unwrap();
             assert!(file.queue_ns + file.service_ns + file.completion_ns <= payload);
             assert_eq!(metrics["ciphertext_origin_file_read"]["calls"], 1);
+            let range = &metrics["ciphertext_origin_file_range_read"];
+            assert_eq!(range["calls"], 1);
+            assert_eq!(range["finished"], 1);
+            assert_eq!(range["allocation_calls"], 1);
+            assert_eq!(range["zero_fill_calls"], 1);
+            assert_eq!(range["conversion_calls"], 1);
+            assert_eq!(range["read_calls"], 1);
+            assert_eq!(range["requested_bytes"], 5);
+            assert_eq!(range["read_bytes"], 5);
+            for name in ["active", "errors", "panics", "read_errors", "read_interrupted", "read_eof", "empty_calls", "unsupported_calls"] {
+                assert_eq!(range[name], 0, "{name}");
+            }
+            let stages: u64 = ["allocation_ns", "zero_fill_ns", "read_ns", "conversion_ns"].iter().map(|name| range[name].as_u64().unwrap()).sum();
+            assert!(stages <= range["total_ns"].as_u64().unwrap());
+            assert!(range["total_ns"].as_u64().unwrap() <= file.service_ns);
             std::fs::remove_dir_all(directory).unwrap();
         });
     }
@@ -223,6 +240,7 @@ mod tests {
         drop(runtime);
         let file = metrics.file_read_metrics.snapshot();
         assert_eq!((file.started, file.finished, file.active, file.resumed, file.cancellations), (1, 1, 0, 0, 1));
+        assert_eq!((file.range.calls, file.range.finished, file.range.active, file.range.read_bytes), (1, 1, 0, 5));
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -244,6 +262,45 @@ mod tests {
             let file = encrypted.read_metrics.file_read_metrics.snapshot();
             assert_eq!((file.calls, file.started, file.finished, file.errors, file.resumed, file.active), (1, 1, 1, 1, 1, 0));
             assert_eq!(encrypted.read_metrics.snapshot()["ciphertext_origin_body_errors"], 1);
+            let range = encrypted.read_metrics.file_read_metrics.snapshot().range;
+            assert_eq!((range.calls, range.finished, range.active, range.errors, range.read_errors), (1, 1, 0, 1, 1));
+            assert_eq!((range.read.calls, range.read_bytes, range.conversion.calls), (1, 0, 0));
+            std::fs::remove_dir_all(directory).unwrap();
+        });
+    }
+
+    #[cfg(feature = "diagnostic-body-timing")]
+    #[test]
+    #[ignore = "requires the private pinned object_store range-timing patch"]
+    fn origin_file_read_diagnostic_empty() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let (encrypted, mut result, directory) = diagnostic_file_fixture().await;
+            result.range = 2..2;
+            assert_eq!(encrypted.origin_body(result).await.unwrap(), Bytes::new());
+            let range = encrypted.read_metrics.file_read_metrics.snapshot().range;
+            assert_eq!((range.calls, range.finished, range.active, range.errors, range.empty_calls), (1, 1, 0, 0, 1));
+            assert_eq!((range.allocation.calls, range.zero_fill.calls, range.conversion.calls), (1, 1, 1));
+            assert_eq!((range.read.calls, range.requested_bytes, range.read_bytes), (0, 0, 0));
+            std::fs::remove_dir_all(directory).unwrap();
+        });
+    }
+
+    #[cfg(feature = "diagnostic-body-timing")]
+    #[test]
+    #[ignore = "requires the private pinned object_store range-timing patch"]
+    fn origin_file_read_diagnostic_eof() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let (encrypted, mut result, directory) = diagnostic_file_fixture().await;
+            result.range = 9..20;
+            let mut reference = LocalFileSystem::new_with_prefix(&directory).unwrap().get(&Path::from("payload")).await.unwrap();
+            reference.range = result.range.clone();
+            let expected = reference.bytes().await.unwrap_err();
+            let actual = encrypted.origin_body(result).await.unwrap_err();
+            assert_eq!(actual.to_string(), expected.to_string());
+            let range = encrypted.read_metrics.file_read_metrics.snapshot().range;
+            assert_eq!((range.calls, range.finished, range.active, range.errors), (1, 1, 0, 1));
+            assert_eq!((range.requested_bytes, range.read_bytes, range.read.calls, range.read_eof), (11, 6, 2, 1));
+            assert_eq!((range.read_errors, range.conversion.calls, range.panics), (0, 0, 0));
             std::fs::remove_dir_all(directory).unwrap();
         });
     }

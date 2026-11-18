@@ -332,6 +332,71 @@ func TestEncryptionOriginFileReadCompatibility(test *testing.T) {
 	}
 }
 
+func TestEncryptionOriginFileRangeReadCompatibility(test *testing.T) {
+	expected := EncryptionReadMetrics{
+		CiphertextOriginBodyPayloads:  &EncryptionOriginBodyPayloads{},
+		CiphertextOriginFileRead:      &EncryptionOriginFileRead{},
+		CiphertextOriginFileRangeRead: &EncryptionOriginFileRangeRead{},
+	}
+	for index := 0; index < reflect.TypeOf(*expected.CiphertextOriginFileRangeRead).NumField(); index++ {
+		reflect.ValueOf(expected.CiphertextOriginFileRangeRead).Elem().Field(index).SetUint(uint64(index + 1))
+	}
+	encoded, err := json.Marshal(expected)
+	if err != nil {
+		test.Fatal(err)
+	}
+	status := writerStatus(&vaulticdbv1.WriterStatusResponse{Attribution: &vaulticdbv1.AttributionSnapshot{EncryptionReadMetricsJson: encoded}})
+	if !reflect.DeepEqual(status.Attribution.EncryptionReads, &expected) {
+		test.Fatal("range stages lost through authenticated status decoding")
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		test.Fatal(err)
+	}
+	name := "ciphertext_origin_file_range_read"
+	var valid map[string]json.RawMessage
+	if err := json.Unmarshal(fields[name], &valid); err != nil {
+		test.Fatal(err)
+	}
+	checkInvalid := func(group json.RawMessage) {
+		test.Helper()
+		fields[name] = group
+		payload, _ := json.Marshal(fields)
+		if encryptionReadMetrics(payload) != nil {
+			test.Fatalf("invalid range group accepted: %s", group)
+		}
+	}
+	for _, invalid := range []string{"null", "{}", "[]"} {
+		checkInvalid(json.RawMessage(invalid))
+	}
+	for counter, original := range valid {
+		delete(valid, counter)
+		group, _ := json.Marshal(valid)
+		checkInvalid(group)
+		for _, invalid := range []string{"null", "true", `"1"`, "-1", "1.5", "18446744073709551616"} {
+			valid[counter] = json.RawMessage(invalid)
+			group, _ = json.Marshal(valid)
+			checkInvalid(group)
+		}
+		valid[counter] = original
+	}
+	valid["extra"] = json.RawMessage("0")
+	group, _ := json.Marshal(valid)
+	checkInvalid(group)
+	fields[name], _ = json.Marshal(EncryptionOriginFileRangeRead{})
+	payload, _ := json.Marshal(fields)
+	if metrics := encryptionReadMetrics(payload); metrics == nil || metrics.CiphertextOriginFileRangeRead == nil {
+		test.Fatal("measured zero range stages lost")
+	}
+	delete(fields, "ciphertext_origin_file_read")
+	checkInvalid(fields[name])
+	delete(fields, name)
+	payload, _ = json.Marshal(fields)
+	if metrics := encryptionReadMetrics(payload); metrics == nil || metrics.CiphertextOriginFileRangeRead != nil {
+		test.Fatal("legacy range absence became measured zero")
+	}
+}
+
 func TestEncryptionOriginNotModifiedCompatibility(test *testing.T) {
 	count := uint64(3)
 	expected := EncryptionReadMetrics{

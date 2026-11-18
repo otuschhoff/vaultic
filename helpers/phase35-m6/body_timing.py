@@ -21,10 +21,11 @@ AFTER = '''                let observer = self.extensions.get::<vaultic_body_tim
                 let worker = observer.map(|observer| observer.submit(tokio::runtime::Handle::try_current().is_ok()));
                 let waiter = worker.as_ref().map(|worker| worker.waiter());
                 let result = maybe_spawn_blocking(move || {
-                    use crate::local::read_range;
+                    use crate::local::read_range_observed;
 
                     let worker = worker.map(|worker| worker.start());
-                    let buffer = read_range(&mut file, &path, self.range);
+                    let range = worker.as_ref().map(|worker| worker.range_read(self.range.end - self.range.start));
+                    let buffer = read_range_observed(&mut file, &path, self.range, range);
                     if let Some(worker) = worker {
                         worker.finish(buffer.is_ok());
                     }
@@ -35,6 +36,63 @@ AFTER = '''                let observer = self.extensions.get::<vaultic_body_tim
                     waiter.resume();
                 }
                 result'''
+
+
+def patch_reader(original):
+    signature = '''pub(crate) fn read_range(
+    file: &mut File,
+    path: &std::path::Path,
+    range: Range<u64>,
+) -> Result<Bytes> {'''
+    if original.count(signature) != 1:
+        raise ValueError('pinned range-reader signature differs')
+    start = original.index(signature)
+    end = original.index('\n}\n', start) + len('\n}\n')
+    reader = original[start:end]
+    replacements = (
+        (signature, signature + '''
+    read_range_observed(file, path, range, None)
+}
+
+pub(crate) fn read_range_observed(
+    file: &mut File,
+    path: &std::path::Path,
+    range: Range<u64>,
+    observation: Option<vaultic_body_timing::RangeReadObservation>,
+) -> Result<Bytes> {
+    use vaultic_body_timing::RangeReadPhase;'''),
+        ('    let mut buf = Vec::with_capacity(requested as usize);', '''    let allocation = observation.as_ref().map(|observation| observation.phase(RangeReadPhase::Allocation));
+    let mut buf = Vec::with_capacity(requested as usize);
+    drop(allocation);'''),
+        ('        buf.resize(requested as usize, 0_u8);', '''        let zero_fill = observation.as_ref().map(|observation| observation.phase(RangeReadPhase::ZeroFill));
+        buf.resize(requested as usize, 0_u8);
+        drop(zero_fill);'''),
+        ('            #[cfg(target_family = "unix")]\n            let read_result', '''            let read = observation.as_ref().map(|observation| observation.phase(RangeReadPhase::Read));
+            #[cfg(target_family = "unix")]
+            let read_result'''),
+        ('            match read_result {', '''            drop(read);
+            if let Some(observation) = observation.as_ref() {
+                observation.read_result(&read_result);
+            }
+            match read_result {'''),
+        ('    #[cfg(all(not(windows), not(unix)))]\n    {', '''    #[cfg(all(not(windows), not(unix)))]
+    {
+        if let Some(observation) = observation.as_ref() {
+            observation.unsupported();
+        }'''),
+        ('    Ok(buf.into())', '''    let conversion = observation.as_ref().map(|observation| observation.phase(RangeReadPhase::Conversion));
+    let buffer = buf.into();
+    drop(conversion);
+    if let Some(observation) = observation {
+        observation.finish();
+    }
+    Ok(buffer)'''),
+    )
+    for before, after in replacements:
+        if reader.count(before) != 1:
+            raise ValueError('pinned range-reader stage differs: ' + before)
+        reader = reader.replace(before, after, 1)
+    return original[:start] + reader + original[end:]
 
 
 def digest(path):
@@ -92,6 +150,11 @@ def prepare(workspace, output):
     patched = original.replace(BEFORE, AFTER, 1)
     library.write_text(patched)
     library.chmod(0o600)
+    local = dependency / 'src/local.rs'
+    original_local = local.read_text()
+    patched_local = patch_reader(original_local)
+    local.write_text(patched_local)
+    local.chmod(0o600)
     manifest = dependency / 'Cargo.toml'
     original_manifest = manifest.read_text()
     if 'vaultic-body-timing' in original_manifest:
@@ -100,6 +163,7 @@ def prepare(workspace, output):
     manifest.write_text(patched_manifest)
     manifest.chmod(0o600)
     (output / 'dependency.patch').write_text(''.join(difflib.unified_diff(original.splitlines(True), patched.splitlines(True), 'a/src/lib.rs', 'b/src/lib.rs')) +
+                                           ''.join(difflib.unified_diff(original_local.splitlines(True), patched_local.splitlines(True), 'a/src/local.rs', 'b/src/local.rs')) +
                                            ''.join(difflib.unified_diff(original_manifest.splitlines(True), patched_manifest.splitlines(True), 'a/Cargo.toml', 'b/Cargo.toml')))
     (output / 'cargo-config.toml').write_text('[patch.crates-io]\nobject_store = { path = ' + json.dumps(str(dependency)) + ' }\n')
     captured = {
@@ -108,7 +172,7 @@ def prepare(workspace, output):
         'overlay_pins': pins, 'candidate': str(candidate), 'dependency': str(dependency),
         'feature': 'diagnostic-body-timing',
         'artifacts': {str(path.relative_to(output)): digest(path) for path in
-                      (library, manifest, output / 'dependency.patch', output / 'cargo-config.toml', output / 'workspace.patch')},
+                      (library, local, manifest, output / 'dependency.patch', output / 'cargo-config.toml', output / 'workspace.patch')},
     }
     (output / 'preparation.json').write_text(json.dumps(captured, indent=2) + '\n')
     for path in output.iterdir():

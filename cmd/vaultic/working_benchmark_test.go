@@ -274,6 +274,13 @@ func TestPublicationQualificationNativeLookup(t *testing.T) {
 		}
 		t.Logf("authenticated file-read timing: calls=%d queue_ns=%d service_ns=%d completion_ns=%d", fileRead.Calls, fileRead.QueueNS, fileRead.ServiceNS, fileRead.CompletionNS)
 		root := filepath.Join(publicationOriginFileRuntime800kRoot, "leg-01-file-runtime")
+		if os.Getenv("VAULTIC_BODY_TIMING_EXPECT_RANGE") == "1" {
+			root = filepath.Join(publicationOriginFileRange800kRoot, "leg-01-file-range")
+			if encryption.CiphertextOriginFileRangeRead == nil {
+				t.Fatal("authenticated lookup requires observed actual range-reader stages")
+			}
+			t.Logf("authenticated range-read timing: %+v", encryption.CiphertextOriginFileRangeRead)
+		}
 		receipt, err := publicationFileReadGate(t.Context(), root, baseline, nil, nil)
 		rtest.OK(t, err)
 		t.Logf("authenticated pre-backup gate receipt: %s", receipt)
@@ -994,6 +1001,8 @@ const publicationOriginFileLive800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-
 const publicationOriginFileLive800kBin = "/root/proj/vaultic/bin/phase35-ncl1-origin-file-live800k-20261117/linux-amd64"
 const publicationOriginFileRuntime800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-origin-file-runtime-fme-cae1-20261117-800k"
 const publicationOriginFileRuntime800kBin = "/root/proj/vaultic/bin/phase35-ncl1-origin-file-runtime800k-20261117/linux-amd64"
+const publicationOriginFileRange800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-origin-file-range-fme-cae1-20261117-800k"
+const publicationOriginFileRange800kBin = "/root/proj/vaultic/bin/phase35-ncl1-origin-file-range800k-20261117/linux-amd64"
 
 func publicationFileReadGate(ctx context.Context, root string, before daemon.WriterStatus, after *daemon.WriterStatus, critical json.RawMessage) (json.RawMessage, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -1084,6 +1093,9 @@ func publicationProducerLeg(root, label string) (int, error) {
 	if label == "leg-01-file-runtime" && root == filepath.Join(publicationOriginFileRuntime800kRoot, label) {
 		return 56, nil
 	}
+	if label == "leg-01-file-range" && root == filepath.Join(publicationOriginFileRange800kRoot, label) {
+		return 56, nil
+	}
 	return 0, fmt.Errorf("producer comparison requires its exact scheduled private leg")
 }
 
@@ -1092,6 +1104,7 @@ func TestPublicationOriginFilePolicy(t *testing.T) {
 		{publicationOriginFile800kRoot, "leg-01-file"},
 		{publicationOriginFileLive800kRoot, "leg-01-file-live"},
 		{publicationOriginFileRuntime800kRoot, "leg-01-file-runtime"},
+		{publicationOriginFileRange800kRoot, "leg-01-file-range"},
 	} {
 		t.Run(route.label, func(t *testing.T) {
 			for _, key := range []string{"VAULTIC_PHASE35_READERS_LEG", "VAULTIC_PHASE35_RAM32_LEG", "VAULTIC_PHASE35_RAM64_LEG", "VAULTIC_PHASE35_ORIGINAL_PARENT", "VAULTIC_PHASE35_PRODUCER_LEG"} {
@@ -1106,6 +1119,9 @@ func TestPublicationOriginFilePolicy(t *testing.T) {
 			rtest.OK(t, err)
 			if !strings.HasPrefix(strings.TrimSpace(string(runtimeOutput)), "/run/vaultic-unchanged-") {
 				t.Fatal("Python file-read route violates the qualifier runtime ownership prefix")
+			}
+			if len(filepath.Join(strings.TrimSpace(string(runtimeOutput)), "fc-1234567890", "db.sock")) >= 108 {
+				t.Fatal("Python file-read route exceeds the native socket path bound")
 			}
 			tasks, err := publicationProducerLeg(root, label)
 			rtest.OK(t, err)
@@ -3298,6 +3314,9 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 			if root == filepath.Join(publicationOriginFileRuntime800kRoot, "leg-01-file-runtime") {
 				candidate, binary = filepath.Join(publicationOriginFileRuntime800kBin, "vaultic"), filepath.Join(publicationOriginFileRuntime800kBin, "vaulticdb")
 			}
+			if root == filepath.Join(publicationOriginFileRange800kRoot, "leg-01-file-range") {
+				candidate, binary = filepath.Join(publicationOriginFileRange800kBin, "vaultic"), filepath.Join(publicationOriginFileRange800kBin, "vaulticdb")
+			}
 		}
 		if os.Getenv("VAULTIC_PHASE35_RAM32_LEG") != "" {
 			candidate, binary = filepath.Join(publicationRAM32800kBin, "vaultic"), filepath.Join(publicationRAM32800kBin, "vaulticdb")
@@ -4047,7 +4066,7 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 		if before.ActiveTransactions != 0 || before.ActiveWriteIntents != 0 {
 			t.Fatal("comparison writer is not idle")
 		}
-		fileTiming := rawRoot == filepath.Join(publicationOriginFile800kRoot, "leg-01-file") || rawRoot == filepath.Join(publicationOriginFileLive800kRoot, "leg-01-file-live") || rawRoot == filepath.Join(publicationOriginFileRuntime800kRoot, "leg-01-file-runtime")
+		fileTiming := rawRoot == filepath.Join(publicationOriginFile800kRoot, "leg-01-file") || rawRoot == filepath.Join(publicationOriginFileLive800kRoot, "leg-01-file-live") || rawRoot == filepath.Join(publicationOriginFileRuntime800kRoot, "leg-01-file-runtime") || rawRoot == filepath.Join(publicationOriginFileRange800kRoot, "leg-01-file-range")
 		if fileTiming {
 			receipt, err := publicationFileReadGate(t.Context(), rawRoot, before, nil, nil)
 			rtest.OK(t, err)

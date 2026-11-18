@@ -283,6 +283,51 @@ func TestBackupEncryptionOriginFileReadDelta(test *testing.T) {
 	}
 }
 
+func TestBackupEncryptionOriginFileRangeReadDelta(test *testing.T) {
+	first, last, want := daemon.EncryptionOriginFileRangeRead{}, daemon.EncryptionOriginFileRangeRead{}, daemon.EncryptionOriginFileRangeRead{}
+	for index := 0; index < reflect.TypeOf(first).NumField(); index++ {
+		if reflect.TypeOf(first).Field(index).Name == "Active" {
+			continue
+		}
+		reflect.ValueOf(&first).Elem().Field(index).SetUint(3)
+		reflect.ValueOf(&last).Elem().Field(index).SetUint(8)
+		reflect.ValueOf(&want).Elem().Field(index).SetUint(5)
+	}
+	last.Active, want.Active = 2, 2
+	baseline := &daemon.EncryptionReadMetrics{CiphertextOriginFileRangeRead: &first}
+	current := &daemon.EncryptionReadMetrics{CiphertextOriginFileRangeRead: &last}
+	delta := backupEncryptionReadDelta(current, baseline)
+	if delta == nil || delta.CiphertextOriginFileRangeRead == nil || *delta.CiphertextOriginFileRangeRead != want {
+		test.Fatal("range delta or end active gauge differs")
+	}
+	delta.CiphertextOriginFileRangeRead.Calls = 99
+	if first.Calls != 3 || last.Calls != 8 {
+		test.Fatal("range delta aliases inputs")
+	}
+	for index := 0; index < reflect.TypeOf(last).NumField(); index++ {
+		if reflect.TypeOf(last).Field(index).Name == "Active" {
+			continue
+		}
+		field := reflect.ValueOf(&last).Elem().Field(index)
+		field.SetUint(0)
+		if backupEncryptionReadDelta(current, baseline) != nil {
+			test.Fatalf("range reset accepted: %s", reflect.TypeOf(last).Field(index).Name)
+		}
+		field.SetUint(8)
+	}
+	first.Active = 1
+	if backupEncryptionReadDelta(current, baseline) != nil {
+		test.Fatal("unfinished range baseline accepted")
+	}
+	first.Active = 0
+	legacy := &daemon.EncryptionReadMetrics{}
+	for _, pair := range [][2]*daemon.EncryptionReadMetrics{{current, legacy}, {legacy, baseline}} {
+		if result := backupEncryptionReadDelta(pair[0], pair[1]); result == nil || result.CiphertextOriginFileRangeRead != nil {
+			test.Fatal("missing range boundary became measured zero")
+		}
+	}
+}
+
 func TestBackupEncryptionOriginNotModifiedDelta(test *testing.T) {
 	first, last := uint64(3), uint64(8)
 	baseline := &daemon.EncryptionReadMetrics{CiphertextOriginRequestNotModified: &first}

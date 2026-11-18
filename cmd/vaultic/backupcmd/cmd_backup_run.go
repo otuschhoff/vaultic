@@ -492,6 +492,32 @@ func backupEncryptionReadDelta(current, baseline *daemon.EncryptionReadMetrics) 
 		}
 		result.CiphertextOriginFileRead = &after
 	}
+	result.CiphertextOriginFileRangeRead = nil
+	if current.CiphertextOriginFileRangeRead != nil && baseline.CiphertextOriginFileRangeRead != nil {
+		before := baseline.CiphertextOriginFileRangeRead
+		if before.Active != 0 {
+			return nil
+		}
+		after := *current.CiphertextOriginFileRangeRead
+		for _, field := range [][2]*uint64{
+			{&after.Calls, &before.Calls}, {&after.Finished, &before.Finished},
+			{&after.Errors, &before.Errors}, {&after.Panics, &before.Panics},
+			{&after.RequestedBytes, &before.RequestedBytes}, {&after.EmptyCalls, &before.EmptyCalls},
+			{&after.ReadBytes, &before.ReadBytes}, {&after.ReadErrors, &before.ReadErrors},
+			{&after.ReadInterrupted, &before.ReadInterrupted}, {&after.ReadEOF, &before.ReadEOF},
+			{&after.UnsupportedCalls, &before.UnsupportedCalls}, {&after.TotalNS, &before.TotalNS},
+			{&after.AllocationCalls, &before.AllocationCalls}, {&after.AllocationNS, &before.AllocationNS},
+			{&after.ZeroFillCalls, &before.ZeroFillCalls}, {&after.ZeroFillNS, &before.ZeroFillNS},
+			{&after.ReadCalls, &before.ReadCalls}, {&after.ReadNS, &before.ReadNS},
+			{&after.ConversionCalls, &before.ConversionCalls}, {&after.ConversionNS, &before.ConversionNS},
+		} {
+			if *field[0] < *field[1] {
+				return nil
+			}
+			*field[0] -= *field[1]
+		}
+		result.CiphertextOriginFileRangeRead = &after
+	}
 	if current.CiphertextOriginRequestNotModified != nil && baseline.CiphertextOriginRequestNotModified != nil {
 		if *current.CiphertextOriginRequestNotModified < *baseline.CiphertextOriginRequestNotModified {
 			return nil

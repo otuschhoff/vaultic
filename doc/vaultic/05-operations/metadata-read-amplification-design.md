@@ -2886,6 +2886,129 @@ gate. Accepted diagnostic evidence is not sustained-performance or deployment
 qualification; no defaults, resource ceilings, cache policy, concurrency or
 production configuration changed.
 
+### Range-Reader Stage Diagnostic
+
+The next isolated diagnostic uses exact route `leg-01-file-range` beneath
+`/volume2/NASDA2/vaultic-test-m6/ncl1-origin-file-range-fme-cae1-20261117-800k`,
+bundle `bin/phase35-ncl1-origin-file-range800k-20261117/linux-amd64`, and private
+runtime `/run/vaultic-unchanged-ncl1-file-rg800k-leg-01-file-range`.
+It retains direct `/ncl1-1-vs-50/fme_cae1` input and all existing cache,
+concurrency, encryption, resource, correctness and sustained-duration gates.
+The prior accepted capture and five rejected attempts remain immutable.
+
+The create-only dependency preparer now also patches the locked private
+`object_store` reader in place. The normal registry implementation and default
+dependency selection remain untouched. Existing readers call the same body
+with no observer; only the actual observed File-body worker supplies one.
+Allocation observes unchanged `Vec::with_capacity`, zero-fill observes unchanged
+`resize`, each positional-read phase surrounds the existing `read_at` or
+`seek_read`, and conversion observes unchanged `Vec` to `Bytes` conversion.
+Range arithmetic, buffers, read loop, retry/error/EOF handling and returned bytes
+are preserved; there is no replacement reader, extra blocking task or probe I/O.
+
+The optional `ciphertext_origin_file_range_read` group is emitted only after
+actual observed range-reader entry. Its 21 counters distinguish lifecycle,
+requested/returned bytes, empty/unsupported paths, read errors/interrupts/EOF,
+and calls/durations for the four stages. Absence is unavailable, not zero.
+Standalone lifecycle tests and real hooked-reader success, cancellation, error,
+empty and EOF fixtures check exact bytes, error identity and nested durations.
+Transport parsing rejects malformed groups, while live counter subtraction
+remains separate from settled qualification.
+
+Only this fresh route requires `observed-settled-file-range-read-v1`: a positive
+observed baseline, unchanged native process identity, drained lifecycle and
+matching worker/range/payload calls at baseline, main and wider boundaries.
+Requested and returned range bytes must match; failed, panicked, empty,
+unsupported, interrupted or EOF work cannot qualify. Stage counts must
+reconcile, stage durations must fit within range duration, and range duration
+must fit within existing worker service. Exact raw receipts remain mandatory.
+
+The positional-read scope includes syscall overhead, copying into the user
+buffer, faults, scheduler/kernel/filesystem waits and any remote I/O. It cannot
+separate NAS service from kernel copying, prove physical traffic or infer NAS
+saturation. The residual range duration contains control flow, bookkeeping and
+instrumentation, not a pure overhead measurement. All durations are nested
+worker time, not an additive wall-time decomposition or a paired speedup claim.
+No representative stage breakdown is claimed before capture and independent
+analysis complete.
+
+### Accepted Range-Reader Stage Capture
+
+The fresh `leg-01-file-range` capture and independent analysis completed
+successfully. Sealed analysis resides at
+`/volume2/NASDA2/vaultic-test-m6/ncl1-origin-file-range-fme-cae1-20261117-800k-analysis`.
+Input remained direct `/ncl1-1-vs-50/fme_cae1`: 800000 selected entries, 677957
+regular files, 54715539376 bytes and original identity `1048655:3014197312`.
+The qualified original parent snapshot remained
+`bf1a0adba4175cda729572a6873ddae4695d944e21795f11587a2d44fc13a0a9`.
+The main interval was 517.422774588 seconds, command 524.655678705 seconds,
+and peak combined RSS 68992991232 bytes. Restore, encrypted reopen and unchanged
+source checks passed, with zero new data blobs/bytes, revision-allocation calls,
+reserved revisions and assigned inode revisions. Production was not modified;
+all owned runtimes and executables were absent after completion.
+
+An observed settled baseline contained 191 file/range reads and the endpoint
+152500, yielding 152309 wider-interval reads. Main calls, starts, finishes and
+resumptions reconciled at 151911, with no stream payloads. Each main range read
+had one allocation, zero-fill, positional syscall and conversion; requested and
+returned range bytes both equalled 40574419244. All active, failed, panicked,
+abandoned, cancelled, empty, unsupported, interrupted and EOF counters were zero.
+Wider range calls and bytes independently reconciled at 152309 and 40755027460.
+
+| Main Range Scope | Worker Seconds | Mean Milliseconds | Range-Time Share |
+| --- | ---: | ---: | ---: |
+| Vector allocation | 2.084753698 | 0.01372 | 0.1480% |
+| Zero fill | 6.851454305 | 0.04510 | 0.4863% |
+| Positional `read_at` | 1399.502101963 | 9.21264 | 99.3417% |
+| Vector to `Bytes` conversion | 0.053904008 | 0.00035 | 0.0038% |
+
+Total range duration was 1408.776605048 worker seconds, with 0.284391074 seconds
+(0.0202%) outside the four measured stages. Existing worker queue, service and
+completion were 3.203844448, 1408.909937271 and 5.335391759 seconds respectively.
+The observed range scope is positional-read dominated; allocation, zero-fill
+and conversion together account for about 0.638% of that scope. These nested
+worker durations are not an additive wall-time breakdown. In particular,
+`read_at` still includes kernel copying, faults, scheduling and filesystem or
+remote-I/O waits, not pure NAS service; neither physical traffic nor NAS
+saturation is established. The residual is not calibrated instrumentation
+overhead. Do not infer instrumentation overhead or a causal speedup/slowdown
+from this unpaired run or its different main duration.
+
+Main requests independently reconciled at 153563: 151911 successes, 826
+NotFound and 826 fully classified eligible conditional NotModified responses.
+The latter retain aggregate request-error semantics. Wider requests reconciled
+at 153989: 152309 successes and 840 of each classified pre-body response.
+There were no unexplained failures, body errors, identity rejections,
+cancellations or dropped details. Logical origin bytes per requested plaintext
+byte were 16.510347891360187, not a physical NAS traffic measurement.
+
+Independent analysis verified bundle, parent, diagnostic, follow-up and analysis
+seals, all 38 build-source and 53 launch pins, exact raw baseline/main/wider
+receipts, early private-runtime preflight and all correctness/resource gates.
+All five rejected captures remain rejected; both earlier accepted conditional
+and file-runtime captures retain their own policies without inferred worker or
+range-stage counters. The isolated release from `efbea0b32` plus pinned overlays
+passed 52 encryption, 5 real hook, 7 observer lifecycle, 4 native MultiGet,
+12 native attribution, 34 top-level Go race, 16 compiled qualifier,
+51 supervisor and 7 host-observer cases. Default and feature-only/unpatched
+File/Stream compatibility also passed separately without fabricated coverage.
+
+Build manifest SHA-256 is
+`febc19ada059d59a5e1550de9528c76534eb30f6daab90ca600d1c35ac80d1a4`;
+diagnostic and follow-up manifest hashes are
+`8d56fdecc4cc9df617d9d7e7e7ec4833df60eef94d1b8dde2aecad72b374f613`
+and `2d81484252cdf25c325b2170db9ccc36b39d1aad4247c57cefd77ed44d5cbecb`.
+This report postdates sealing; retained isolated documentation remains the
+original build/capture pin. No existing manifests or receipts were rewritten.
+
+The 517-second main interval remains below the unchanged 600-second sustained
+gate; this is accepted diagnostic evidence, not sustained-performance or
+deployment qualification. No production defaults or resource policy changed.
+These measurements do not support allocation or buffer conversion as the first
+optimization target. The next diagnostic should attribute positional-read
+latency across kernel/filesystem/scheduling scopes and separately explain main
+wall time before selecting an optimization or claiming a paired improvement.
+
 ### Pipeline And RAM Investigation
 
 The November 8 screen completed all 20 legs at

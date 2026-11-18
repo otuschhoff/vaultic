@@ -468,6 +468,21 @@ impl EncryptionReadMetrics {
                     "cancellations": file.cancellations, "direct_calls": file.direct_calls,
                 });
             }
+            let range = file.range;
+            if range.calls > 0 {
+                snapshot["ciphertext_origin_file_range_read"] = serde_json::json!({
+                    "calls": range.calls, "finished": range.finished,
+                    "errors": range.errors, "panics": range.panics, "active": range.active,
+                    "requested_bytes": range.requested_bytes, "empty_calls": range.empty_calls,
+                    "read_bytes": range.read_bytes, "read_errors": range.read_errors,
+                    "read_interrupted": range.read_interrupted, "read_eof": range.read_eof,
+                    "unsupported_calls": range.unsupported_calls, "total_ns": range.total_ns,
+                    "allocation_calls": range.allocation.calls, "allocation_ns": range.allocation.ns,
+                    "zero_fill_calls": range.zero_fill.calls, "zero_fill_ns": range.zero_fill.ns,
+                    "read_calls": range.read.calls, "read_ns": range.read.ns,
+                    "conversion_calls": range.conversion.calls, "conversion_ns": range.conversion.ns,
+                });
+            }
         }
         snapshot["ciphertext_origin_body_calls"] = self
             .ciphertext_origin_body_calls
