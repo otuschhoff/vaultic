@@ -4,6 +4,36 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
+mod scheduler_tag {
+    use std::{cell::OnceCell, sync::OnceLock};
+
+    pub(super) const ENV: &str = "VAULTIC_DIAGNOSTIC_SCHED_COMM";
+    pub(super) const COMM: &str = "/proc/thread-self/comm";
+    static TAG: OnceLock<Option<String>> = OnceLock::new();
+    thread_local! { static ATTEMPTED: OnceCell<()> = const { OnceCell::new() }; }
+
+    fn valid(tag: &str) -> bool {
+        tag.strip_prefix("vlt").is_some_and(|suffix| {
+            suffix.len() == 12
+                && suffix
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        })
+    }
+
+    pub(super) fn mark() {
+        let Some(tag) = TAG.get_or_init(|| std::env::var(ENV).ok().filter(|tag| valid(tag))) else {
+            return;
+        };
+        ATTEMPTED.with(|attempted| {
+            attempted.get_or_init(|| {
+                let _ = std::fs::write(COMM, tag);
+            });
+        });
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct FileReadMetrics {
     calls: AtomicU64,
@@ -215,6 +245,8 @@ impl FileReadWorker {
                 &self.metrics.queue_ns,
                 started.duration_since(self.submitted),
             );
+            #[cfg(target_os = "linux")]
+            scheduler_tag::mark();
         }
         self.metrics.started.fetch_add(1, Ordering::Relaxed);
         self.started = Some(Instant::now());
@@ -381,6 +413,57 @@ impl Drop for ReadPhaseGuard<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scheduler_tag_marks_only_configured_blocking_workers_once() {
+        const CHILD: &str = "VAULTIC_BODY_TIMING_SCHED_TEST_CHILD";
+        const VALID: &str = "vlt0123456789ab";
+        if std::env::var_os(CHILD).is_none() {
+            for tag in [None, Some("vlt0123456789AB"), Some(VALID)] {
+                let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+                child
+                    .args([
+                        "--exact",
+                        "tests::scheduler_tag_marks_only_configured_blocking_workers_once",
+                    ])
+                    .env(CHILD, "1");
+                if let Some(tag) = tag {
+                    child.env(scheduler_tag::ENV, tag);
+                } else {
+                    child.env_remove(scheduler_tag::ENV);
+                }
+                let result = child.output().unwrap();
+                assert!(
+                    result.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&result.stdout)
+                );
+                assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+            }
+            return;
+        }
+
+        let current = || {
+            std::fs::read_to_string(scheduler_tag::COMM)
+                .unwrap()
+                .trim_end()
+                .to_owned()
+        };
+        let initial = current();
+        let observer = FileReadObservation(Arc::new(FileReadMetrics::default()));
+        observer.submit(false).start().finish(true);
+        assert_eq!(current(), initial);
+        observer.submit(true).start().finish(true);
+        if std::env::var(scheduler_tag::ENV).as_deref() == Ok(VALID) {
+            assert_eq!(current(), VALID);
+            std::fs::write(scheduler_tag::COMM, "vltfedcba987654").unwrap();
+            observer.submit(true).start().finish(true);
+            assert_eq!(current(), "vltfedcba987654");
+        } else {
+            assert_eq!(current(), initial);
+        }
+    }
 
     #[test]
     fn completed_worker_and_waiter_reconcile() {

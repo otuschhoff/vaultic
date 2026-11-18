@@ -932,8 +932,17 @@ func TestEnsureStartsDaemonRecoversStaleSocketAndCleansUp(t *testing.T) {
 	if !capabilities.GetUnixSocket() || capabilities.GetTcpEnabled() || capabilities.GetMaxConcurrentRequests() != 128 {
 		t.Fatalf("unexpected Unix transport capabilities: %#v", capabilities)
 	}
+	if pid := client.OwnedProcessID(); pid <= 0 || !daemonOwnsProcess(socket, pid) {
+		t.Fatalf("unexpected owned daemon PID: %d", pid)
+	}
+	if pid := (&Client{}).OwnedProcessID(); pid != 0 {
+		t.Fatalf("unowned client reported PID %d", pid)
+	}
 	if err := client.Close(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	if pid := client.OwnedProcessID(); pid != 0 {
+		t.Fatalf("closed client reported PID %d", pid)
 	}
 	if _, err := os.Lstat(socket); !os.IsNotExist(err) {
 		t.Fatalf("socket remains after shutdown: %v", err)

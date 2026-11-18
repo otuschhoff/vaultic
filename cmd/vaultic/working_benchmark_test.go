@@ -210,6 +210,7 @@ func TestPublicationQualificationNativeLookup(t *testing.T) {
 			rtest.OK(t, client.Close(context.Background()))
 		}
 	}()
+	var trace *publicationPerfTrace
 	lookup, err := publicationQualificationLookup(t.Context(), options, filepath.Join(t.TempDir(), "lookup"))
 	rtest.OK(t, err)
 	defer lookup.Close()
@@ -227,8 +228,16 @@ func TestPublicationQualificationNativeLookup(t *testing.T) {
 		}
 		t.Logf("observed file-read baseline before lookup: calls=%d", file.Calls)
 	}
+	if os.Getenv("VAULTIC_TEST_PUBLICATION_PERF") == "1" {
+		trace, err = startPublicationPerfTrace(t.Context(), filepath.Join(t.TempDir(), "perf"), client.OwnedProcessID(), 12*time.Second)
+		rtest.OK(t, err)
+		defer trace.close()
+	}
 	_, found, err := lookup.LookupSizeContext(t.Context(), vaultic.NewRandomBlobHandle())
 	rtest.OK(t, err)
+	if trace != nil {
+		rtest.OK(t, trace.finish(t))
+	}
 	if found {
 		t.Fatal("empty private catalog unexpectedly contains a blob")
 	}
@@ -239,6 +248,12 @@ func TestPublicationQualificationNativeLookup(t *testing.T) {
 	rtest.OK(t, lookup.Close())
 	state, err := client.WriterStatus(t.Context())
 	rtest.OK(t, err)
+	if trace != nil {
+		if baseline.ProcessStartedUnixMS <= 0 || state.ProcessStartedUnixMS != baseline.ProcessStartedUnixMS || client.OwnedProcessID() != trace.pid {
+			t.Fatal("authenticated daemon identity changed during perf attachment")
+		}
+		t.Log("perf attached and detached without replacing the authenticated native daemon")
+	}
 	reads := state.Attribution.MultiGetDatabaseRead
 	transactionReads := state.Attribution.MultiGetTransactionRead
 	if reads.Completed+transactionReads.Completed == 0 || reads.Active+transactionReads.Active != 0 {
@@ -1003,6 +1018,8 @@ const publicationOriginFileRuntime800kRoot = "/volume2/NASDA2/vaultic-test-m6/nc
 const publicationOriginFileRuntime800kBin = "/root/proj/vaultic/bin/phase35-ncl1-origin-file-runtime800k-20261117/linux-amd64"
 const publicationOriginFileRange800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-origin-file-range-fme-cae1-20261117-800k"
 const publicationOriginFileRange800kBin = "/root/proj/vaultic/bin/phase35-ncl1-origin-file-range800k-20261117/linux-amd64"
+const publicationOriginFilePerf800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-origin-file-perf-fme-cae1-20261118-800k-retry3"
+const publicationOriginFilePerfLeg = "leg-03-file-perf"
 
 func publicationFileReadGate(ctx context.Context, root string, before daemon.WriterStatus, after *daemon.WriterStatus, critical json.RawMessage) (json.RawMessage, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -1096,6 +1113,9 @@ func publicationProducerLeg(root, label string) (int, error) {
 	if label == "leg-01-file-range" && root == filepath.Join(publicationOriginFileRange800kRoot, label) {
 		return 56, nil
 	}
+	if label == publicationOriginFilePerfLeg && root == filepath.Join(publicationOriginFilePerf800kRoot, label) {
+		return 56, nil
+	}
 	return 0, fmt.Errorf("producer comparison requires its exact scheduled private leg")
 }
 
@@ -1105,6 +1125,7 @@ func TestPublicationOriginFilePolicy(t *testing.T) {
 		{publicationOriginFileLive800kRoot, "leg-01-file-live"},
 		{publicationOriginFileRuntime800kRoot, "leg-01-file-runtime"},
 		{publicationOriginFileRange800kRoot, "leg-01-file-range"},
+		{publicationOriginFilePerf800kRoot, publicationOriginFilePerfLeg},
 	} {
 		t.Run(route.label, func(t *testing.T) {
 			for _, key := range []string{"VAULTIC_PHASE35_READERS_LEG", "VAULTIC_PHASE35_RAM32_LEG", "VAULTIC_PHASE35_RAM64_LEG", "VAULTIC_PHASE35_ORIGINAL_PARENT", "VAULTIC_PHASE35_PRODUCER_LEG"} {
@@ -3314,7 +3335,8 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 			if root == filepath.Join(publicationOriginFileRuntime800kRoot, "leg-01-file-runtime") {
 				candidate, binary = filepath.Join(publicationOriginFileRuntime800kBin, "vaultic"), filepath.Join(publicationOriginFileRuntime800kBin, "vaulticdb")
 			}
-			if root == filepath.Join(publicationOriginFileRange800kRoot, "leg-01-file-range") {
+			if root == filepath.Join(publicationOriginFileRange800kRoot, "leg-01-file-range") ||
+				root == filepath.Join(publicationOriginFilePerf800kRoot, publicationOriginFilePerfLeg) {
 				candidate, binary = filepath.Join(publicationOriginFileRange800kBin, "vaultic"), filepath.Join(publicationOriginFileRange800kBin, "vaulticdb")
 			}
 		}
@@ -3980,6 +4002,10 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 		}
 		modes = []bool{true}
 	}
+	perfTiming := rawRoot == filepath.Join(publicationOriginFilePerf800kRoot, publicationOriginFilePerfLeg)
+	if perfTiming && (!original || len(paths) != 800_000 || len(modes) != 1 || !modes[0]) {
+		t.Fatal("perf trace requires the exact guarded forced 800k comparison")
+	}
 	for _, forced := range modes {
 		name := "unforced"
 		if forced {
@@ -4066,7 +4092,7 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 		if before.ActiveTransactions != 0 || before.ActiveWriteIntents != 0 {
 			t.Fatal("comparison writer is not idle")
 		}
-		fileTiming := rawRoot == filepath.Join(publicationOriginFile800kRoot, "leg-01-file") || rawRoot == filepath.Join(publicationOriginFileLive800kRoot, "leg-01-file-live") || rawRoot == filepath.Join(publicationOriginFileRuntime800kRoot, "leg-01-file-runtime") || rawRoot == filepath.Join(publicationOriginFileRange800kRoot, "leg-01-file-range")
+		fileTiming := perfTiming || rawRoot == filepath.Join(publicationOriginFile800kRoot, "leg-01-file") || rawRoot == filepath.Join(publicationOriginFileLive800kRoot, "leg-01-file-live") || rawRoot == filepath.Join(publicationOriginFileRuntime800kRoot, "leg-01-file-runtime") || rawRoot == filepath.Join(publicationOriginFileRange800kRoot, "leg-01-file-range")
 		if fileTiming {
 			receipt, err := publicationFileReadGate(t.Context(), rawRoot, before, nil, nil)
 			rtest.OK(t, err)
@@ -4108,7 +4134,30 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 			rtest.OK(t, os.Chmod(filepath.Join(profileRoot, "cpu.pprof"), 0600))
 			args = append(args, "--cpu-profile="+profileRoot)
 		}
+		var trace *publicationPerfTrace
+		if perfTiming {
+			trace, err = startPublicationPerfTrace(t.Context(), filepath.Join(control, "perf"), (*owner).OwnedProcessID(), 20*time.Minute)
+			rtest.OK(t, err)
+			t.Cleanup(trace.close)
+		}
 		wall, cpu := publicationQualificationCommand(t, leg, "backup", candidate, args...)
+		if trace != nil {
+			traceAfter, err := (*owner).WriterStatus(t.Context())
+			rtest.OK(t, err)
+			if traceAfter.ProcessStartedUnixMS != before.ProcessStartedUnixMS || (*owner).OwnedProcessID() != trace.pid {
+				t.Fatal("authenticated daemon identity changed during the trace window")
+			}
+			rtest.OK(t, publicationFileReadReceipt(filepath.Join(leg, "trace-window.json"), map[string]any{
+				"writer_before": before, "writer_after": traceAfter,
+			}))
+			if err := trace.finish(t); err != nil {
+				trace.preserveFailure(t, leg, err)
+				t.Fatal(err)
+			}
+			for _, name := range []string{"perf.data", "perf.log", "capture.json"} {
+				publicationQualificationCopy(t, filepath.Join(leg, name), filepath.Join(control, "perf", name))
+			}
+		}
 		output, err := os.ReadFile(filepath.Join(leg, "backup.stdout.log"))
 		rtest.OK(t, err)
 		var summary m5BackupSummary

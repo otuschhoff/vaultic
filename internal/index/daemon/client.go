@@ -174,6 +174,15 @@ type Client struct {
 	rpcWait    rpcWaitCounters
 }
 
+// OwnedProcessID returns zero for attached clients and after Close.
+// It must not be called concurrently with Close.
+func (c *Client) OwnedProcessID() int {
+	if c.process == nil {
+		return 0
+	}
+	return c.process.Process.Pid
+}
+
 type CommitRPCStats struct {
 	Attempts      uint64 `json:"attempts"`
 	Successes     uint64 `json:"successes"`

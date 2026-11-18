@@ -3009,6 +3009,246 @@ optimization target. The next diagnostic should attribute positional-read
 latency across kernel/filesystem/scheduling scopes and separately explain main
 wall time before selecting an optimization or claiming a paired improvement.
 
+### Kernel Trace Preflight
+
+The two accepted, unpaired captures give different leads for main wall time
+and metadata reader time. Main time rose from 289.324 to 517.423 seconds, while
+accumulated metadata reader service fell from 1428.296 to 1408.910 worker
+seconds. Writer wait for prepared work rose from 124.836 to 373.009 seconds.
+At equal operation counts, source content-open duration rose from 342.020 to
+739.402 worker seconds and directory duration from 128.006 to 367.690 worker
+seconds. These scopes overlap and do not establish the cause of the wall-time
+change. Keep direct NCL1 source traversal separate from metadata fixture reads
+on the NASDA2 NFS mount when attributing latency.
+
+A read-only host preflight recorded syscall entry/exit and `nfs_file_read`
+events for four controlled 1024-byte positional reads on an existing NASDA2
+evidence file. All four NFS events matched the opened device and inode, expected
+offsets and byte counts between the corresponding syscall boundaries on the
+same thread. This identifies NFS client reads, not cache misses or RPCs. The
+fixture is not a representative backup or an NCL1 latency measurement.
+
+Task-scoped `sched_switch` alone exposed switch-outs but not paired switch-ins.
+Task-scoped `perf record --switch-events` captured both edges around an owned
+process's controlled 20 ms blocking interval. A concurrent pipe fixture
+matched one switch pair inside each of two overlapping read syscalls, including
+one thread that resumed on a different CPU. Join by thread, not CPU.
+
+A separate read-only NASDA2 probe used `O_DIRECT` on the same evidence file
+to exercise actual off-CPU time inside positional reads without dropping host
+caches. Two threads each returned 4096 bytes at distinct offsets; both reads
+overlapped and each had one matching NFS client read event and one switch pair
+inside its syscall. Their off-CPU intervals were 23.278 and 48.150 ms. This
+qualifies the join in a small fixture, not the production buffered read path
+or a stable latency estimate. Off-CPU time includes both blocked time and
+runnable delay; these records alone cannot split them or identify an NFS RPC.
+
+A separate PID-attachment fixture began recording disabled and waited for
+perf's enable acknowledgment before allowing reads. It retained one exact
+16-byte positional read from an existing worker and one from a worker created
+after attachment. The fixture waited for perf's disable acknowledgment before
+stopping the tracer. Verify that same coverage against the owned daemon and
+the backup interval before interpreting production-path results.
+
+Bound trace size and runtime, run the decoder noninteractively, reject lost or
+unmatched records, and leave asynchronous NFS/RPC work unattributed until
+independently correlated. Any representative backup must still use
+`/ncl1-1-vs-50/fme_cae1` directly under the existing guards. No cache dropping
+or host tracing configuration changes were needed for these preflights.
+
+The separate `leg-01-file-perf` qualifier route attaches only to the daemon
+owned by the test process and verifies Linux process start ticks before and
+after recording. Enable and disable acknowledgments bracket the backup
+command. Trace output stays in the private local runtime during measurement,
+with a 20-minute deadline and a 256 MiB cap; it is copied to the fresh
+evidence leg only after the recorder stops. A bounded decode rejects reported
+loss or unequal positional syscall totals. The supervisor also requires the
+private staged artifacts and a syscall count at least as large as the
+authenticated main range-reader count. This aggregate floor is not per-read
+coverage: the tracer also sees other positional reads in the command window.
+
+The compiled recorder smoke test observed a known positional read. The
+authenticated native smoke test verified attach and detach on the same daemon
+without replacing it; that warm fixture generated no new range-reader reads.
+The independent decoder then reproduced the retained direct-I/O probe's two
+reads and 8192 bytes and reconciled a new buffered probe's two reads and 2048
+bytes. It rejected a trace recorded without task switch events. For the traced
+route it joins by process and thread, checks offset and byte count against the
+NFS event, and accepts only regular object files under the disposable metadata
+and WAL stores. Its read and byte totals must exactly match a separate settled
+counter receipt taken at the backup command boundary, before snapshot
+inspection. This is a command-window comparison, not a reconstruction of the
+internal main interval. A missing object, incomplete trace, or count mismatch
+leaves the diagnostic unqualified.
+
+The first representative traced attempt ran directly from
+`/ncl1-1-vs-50/fme_cae1`. The backup command finished in 303.926350017 seconds
+and reported 677957 files and no new data. The qualifier rejected the run at
+`perf disable: write |1: broken pipe` before restore or encrypted reopen, so
+the backup command result is not an accepted integrity or off-CPU result.
+Independent review verified all 25 launch pins, the failure seal, and no
+surviving owned processes. The previous cleanup discarded the local recorder
+files, so the recorder exit cause is unknown. A separate small-limit perf
+probe demonstrated early exit and buffered overshoot, but does not establish
+that the representative failure hit that cap. The recorder now preserves a
+bounded rejected trace, its log and process status separately from accepted
+artifacts; both normal shutdown and early-exit smoke tests passed.
+
+Separate calibration used 56 synthetic reader threads and 152000 positional
+reads on a retained NASDA2 evidence file, not a backup source. At 128 MiB,
+one scheduler yield per read produced an accepted 88190022-byte trace; four
+yields exhausted the cap and closed the control pipe. This reproduces the
+symptom but does not establish why the representative attempt failed. At
+256 MiB, four yields produced a 163503662-byte trace that reconciled all
+152000 reads and 155648000 returned bytes. Eight yields produced a
+265816094-byte trace within the cap, but decoding found 152002 syscall exits
+for 152000 entries. The two extra exits repeated the preceding matched exit's
+thread, timestamp and return value. That capture remains rejected: a size
+check and recorder acknowledgments do not establish completeness.
+
+For this perf version, PID attachment records the switch capability on
+`dummy:u` and can report CPU `-01` for switch records. Launch mode records
+the capability on the syscall event. The decoder accepts both layouts and
+joins switch edges by thread, not CPU. Neither calibration measures NCL1
+backup latency or physical NFS traffic.
+
+The 256 MiB NCL1 retry (`leg-02-file-perf`) completed the backup command in
+300.119859405 seconds, but the qualifier rejected recorder shutdown before
+restore or encrypted reopen. The retained log shows disable was acknowledged;
+the recorder was killed below the cap with 243423456 bytes on disk and no
+capture-deadline expiry. Perf rejected the file header because its data size
+was still zero. The qualifier separately allowed only five seconds for perf
+to finalize after disable. Independent review verified all 27 launch pins and
+no surviving owned processes. The partial raw recording is not analyzable
+evidence of syscall or scheduler timing.
+
+Finalization now has a separate 60-second bound and a distinct timeout error.
+Build-ID collection is disabled because the tracepoint decoder does not use
+it. A fresh seven-yield calibration finalized a 242198974-byte recording in
+1.27 seconds after SIGINT and matched all 152000 reads and 155648000 returned
+bytes. This qualifies the recorder change at similar output volume, not the
+representative backup or the exact cause of the earlier shutdown delay.
+
+The next representative attempt (`leg-03-file-perf`, series
+`ncl1-origin-file-perf-fme-cae1-20261118-800k-retry3`) passed from
+`/ncl1-1-vs-50/fme_cae1` directly. It covered 800000 selected entries and
+677957 regular files, with no new data blobs or revision allocation calls.
+Restore, encrypted reopen, unchanged source, and runtime cleanup passed.
+Independent replay verified all 28 launch pins and the sealed raw trace.
+Main time was 294.240 seconds, command time 301.505 seconds, and peak
+combined RSS 68030803968 bytes. It did not meet the 600-second sustained gate.
+
+The 246084278-byte trace had 152358 balanced positional syscall pairs,
+including 152317 reads on approved metadata and WAL objects. Those reads and
+their 40757124740 returned bytes matched the authenticated command-window
+counters exactly. They spent 1275.285 aggregate thread-seconds inside the
+syscall, including 1237.946 seconds off-CPU (97.07%, or 8.127 ms out of
+8.373 ms per matched read on average). That locates most of the measured
+positional-read time off-CPU. It does not distinguish blocked waits from
+runnable delay, identify NFS RPCs or cache misses, or measure time exclusive
+to the backup critical path. This was a single traced run, not a paired
+speedup comparison.
+
+An opt-in `--split-preempt` replay reproduced all of those sealed totals.
+Only 80457718 ns of the off-CPU time (0.0065%) followed switch-out records
+explicitly marked `preempt`; the other 1237865950621 ns remain unclassified.
+The marked share is a lower bound on runnable delay, not an upper bound or
+an estimate of blocked time. An unmarked departure can still leave a thread
+runnable, and a sleeping thread can become runnable before it switches in.
+
+A controlled pipe fixture tested scheduler wakeups without changing host
+tracing settings (kernel scheduler statistics were disabled). The original
+filters used process-visible TIDs and returned no tracepoint samples. An
+unfiltered recording attached only to the fixture's reader and waker exposed
+the mismatch: the reader's switch-out sample identified process `4139858`, but
+the scheduler event payload named TID `156139`. Joining by the mapped target
+reproduced the known blocked interval, and a fresh task-scoped probe repeated
+the result. Task attachment alone cannot see wakeups from arbitrary wakers.
+
+A small CPU-wide probe instead filtered only for a unique owned reader name
+on the two fixture CPUs. It independently replayed a 622071-byte recording
+with the reader on CPU 1 and the waker on CPU 0. `sched_waking` ran on CPU 0;
+`sched_wakeup` ran on CPU 1 and marked the runnable transition 11887 ns later.
+From sleeping switch-out to runnable transition was 35166018 ns; from there
+to switch-in was 4259 ns. Deleting the wakeup in a replay failed the join.
+These are fixture results, not a split of the NCL1 trace. A representative
+capture still needs unique scope for the actual daemon workers, coverage
+through worker creation and migration, and loss-free same-window read and
+byte reconciliation under a qualified trace budget.
+
+A shared unique name-prefix filter captured two owned threads in the same
+process, one created before enable and the other afterward. Both moved CPUs
+while blocked. Raw replay joined `1 -> 2` and `2 -> 1` by scheduler TID, with
+35236446 and 35193947 ns blocked, and 7036 and 7548 ns runnable, respectively.
+Removing the late worker's wakeup failed the replay.
+
+At 56 fixture threads (28 early, 28 late), the same strict split was rejected:
+55 complete chains on three CPUs and 53 on all online CPUs. Each incomplete
+chain had a sleeping switch-out, wake initiation and switch-in, but no
+`sched_wakeup` in the reference window. All-CPU capture did not eliminate the
+gap, and there were no reported lost-record markers. A stationary control
+also rejected on one inspected chain with two distinct wake initiations and
+no runnable-transition event. These probes are not evidence of tracepoint
+loss mechanism or backup scheduler timing. Keep the exact gate: when only a
+single ordered wake initiation and switch-in are known, the interval between
+them can bound the unknown runnable portion, but must not be reported as its
+duration or silently counted as blocked time.
+
+A separate diagnostic replay tested this bound against the two known-complete
+worker intervals. On masking both `sched_wakeup` records, the measured
+runnable times (7036 and 7548 ns) fell inside their respective bounds
+`[0, 22894]` and `[0, 26809]` ns. The exact gate still rejected. On the two
+incomplete 56-worker traces, summing the independently reconciled intervals
+yielded runnable-share bounds of 0.214--0.238% (three CPUs) and 0.034--0.046%
+(all online CPUs). The extra uncertainty was 464170 and 238482 ns, respectively.
+The stationary trace was rejected even by bounded replay: a duplicate wake
+initiation did not identify a unique transition. Missing initiation and a
+reported record loss were also rejected. These numbers characterize controlled
+pipe waits only. Applying the approach to NCL1 would first need an independent
+join to the actual reader syscalls and exact same-window coverage; the earlier
+accepted NCL1 trace contains neither wakeup anchor.
+
+The Linux-only diagnostic observer now accepts a per-capture scheduler name
+through `VAULTIC_DIAGNOSTIC_SCHED_COMM` (`vlt` plus 12 lowercase hex digits).
+Only the existing observed blocking file-body worker attempts to set the
+name, at most once per thread. An unset or malformed value and a direct read
+do not rename threads. This does not create workers or add reads. A worker
+that could not be tagged must fail a future scheduler coverage check rather
+than be assumed to have no waits.
+
+The isolated pinned `object_store` build verified the name on the sole Tokio
+blocking worker after an encrypted file-body test; the caller stayed untagged.
+Paired fixture perf recordings independently found the five-byte `pread64` at
+offset two with the diagnostic name enabled and the original Tokio name when
+unset. This qualifies worker identification at the syscall, not a joined
+scheduler capture. Next, capture the tagged scheduler events and positional
+reads on one monotonic clock and check complete identity, window, and byte
+reconciliation on a fixture before launching another NCL1 backup.
+
+The dual-recorder preflight then joined four actual five-byte reads from that
+encrypted file-body fixture on disposable NASDA2 storage. Both recorders used
+`CLOCK_MONOTONIC`; the task-scoped one captured `pread64` and NFS events, and
+the CPU-wide one filtered scheduler events for the unique tag only. For each
+read, replay checked the offset, count, return value, NFS device, and common
+window. The observed sleeping switch-out tied the tagged scheduler payload
+TID to the reader sample's PID/TID. The two recording hooks have distinct
+timestamps, so the join checks ordering instead of expecting equality.
+
+| Fixture | Syscall, ns | Blocked, ns | Runnable, ns |
+| --- | ---: | ---: | ---: |
+| First | 514267 | 422225 | 4832 |
+| Repeat 1 | 7443 | 0 | 0 |
+| Repeat 2 | 404603 | 332378 | 5418 |
+| Repeat 3 | 12363 | 0 | 0 |
+
+Independent replay verified all four raw trace pairs. Both blocking reads
+switched out in `D` state; neither recording showed an in-read switch for the
+other two. Removing the runnable transition from the first trace failed the
+join. These results validate an actual-reader scheduler join but do not
+estimate the NCL1 split or identify an NFS RPC wait. The representative gate
+still requires a multi-interval join at worker-count and event-volume scale,
+bounded capture on both streams, and exact same-window read and byte counts.
+
 ### Pipeline And RAM Investigation
 
 The November 8 screen completed all 20 legs at

@@ -1,10 +1,12 @@
 from pathlib import Path
+from datetime import datetime, timezone
 import argparse
 import ctypes
 import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import signal
 import stat
@@ -18,6 +20,7 @@ import unittest
 from unittest.mock import patch
 
 import pilot
+from perf_read_trace import PERF_TRACE_MAX_BYTES, analyze_recording
 
 
 WORKSPACE = Path('/root/proj/vaultic')
@@ -95,7 +98,11 @@ ORIGIN_FILE_RUNTIME_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-origin-fil
 ORIGIN_FILE_RUNTIME_BIN = WORKSPACE / 'bin/phase35-ncl1-origin-file-runtime800k-20261117/linux-amd64'
 ORIGIN_FILE_RANGE_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-origin-file-range-fme-cae1-20261117-800k')
 ORIGIN_FILE_RANGE_BIN = WORKSPACE / 'bin/phase35-ncl1-origin-file-range800k-20261117/linux-amd64'
-ORIGIN_FILE_ROOTS = (ORIGIN_FILE_ROOT, ORIGIN_FILE_LIVE_ROOT, ORIGIN_FILE_RUNTIME_ROOT, ORIGIN_FILE_RANGE_ROOT)
+ORIGIN_FILE_PERF_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-origin-file-perf-fme-cae1-20261118-800k')
+ORIGIN_FILE_PERF_RETRY_ROOT = ORIGIN_FILE_PERF_ROOT.with_name(ORIGIN_FILE_PERF_ROOT.name + '-retry2')
+ORIGIN_FILE_PERF_DRAIN_ROOT = ORIGIN_FILE_PERF_ROOT.with_name(ORIGIN_FILE_PERF_ROOT.name + '-retry3')
+ORIGIN_FILE_PERF_ROOTS = (ORIGIN_FILE_PERF_ROOT, ORIGIN_FILE_PERF_RETRY_ROOT, ORIGIN_FILE_PERF_DRAIN_ROOT)
+ORIGIN_FILE_ROOTS = (ORIGIN_FILE_ROOT, ORIGIN_FILE_LIVE_ROOT, ORIGIN_FILE_RUNTIME_ROOT, ORIGIN_FILE_RANGE_ROOT, *ORIGIN_FILE_PERF_ROOTS)
 ORIGIN_OUTCOME_COUNTERS = ('ciphertext_origin_request_successes', 'ciphertext_origin_request_not_found',
                            'ciphertext_origin_request_errors', 'ciphertext_origin_request_cancellations',
                            'ciphertext_origin_identity_rejections', 'ciphertext_origin_body_successes',
@@ -230,6 +237,12 @@ def producer_leg(label):
         return ORIGIN_FILE_RUNTIME_ROOT / label, Path('/run/vaultic-unchanged-ncl1-file-rt800k-' + label), 56
     if label == 'leg-01-file-range':
         return ORIGIN_FILE_RANGE_ROOT / label, Path('/run/vaultic-unchanged-ncl1-file-rg800k-' + label), 56
+    if label == 'leg-01-file-perf':
+        return ORIGIN_FILE_PERF_ROOT / label, Path('/run/vaultic-unchanged-ncl1-file-perf-' + label), 56
+    if label == 'leg-02-file-perf':
+        return ORIGIN_FILE_PERF_RETRY_ROOT / label, Path('/run/vaultic-unchanged-ncl1-perf2'), 56
+    if label == 'leg-03-file-perf':
+        return ORIGIN_FILE_PERF_DRAIN_ROOT / label, Path('/run/vaultic-unchanged-ncl1-perf3'), 56
     raise ValueError('producer comparison requires its exact scheduled private leg')
 
 
@@ -241,7 +254,7 @@ def origin_read_policy(root):
               'allow_conditional_not_modified': root.parent in (ORIGIN_CONDITIONAL_ROOT, *ORIGIN_FILE_ROOTS)}
     if root.parent in ORIGIN_FILE_ROOTS:
         policy['require_file_read'] = True
-    if root.parent == ORIGIN_FILE_RANGE_ROOT:
+    if root.parent in (ORIGIN_FILE_RANGE_ROOT, *ORIGIN_FILE_PERF_ROOTS):
         policy['require_file_range_read'] = True
     return policy
 
@@ -348,7 +361,7 @@ def binaries(profile):
             bundle = ORIGIN_FILE_LIVE_BIN
         if root.parent == ORIGIN_FILE_RUNTIME_ROOT:
             bundle = ORIGIN_FILE_RUNTIME_BIN
-        if root.parent == ORIGIN_FILE_RANGE_ROOT:
+        if root.parent in (ORIGIN_FILE_RANGE_ROOT, *ORIGIN_FILE_PERF_ROOTS):
             bundle = ORIGIN_FILE_RANGE_BIN
         return bundle / 'vaultic', bundle / 'vaulticdb'
     if os.environ.get('VAULTIC_PHASE35_RAM64_LEG'):
@@ -1212,6 +1225,86 @@ def verify_file_read_receipts(root, measured):
     return interval
 
 
+def verify_perf_capture_receipt(root, critical):
+    leg = root / 'group-64/forced'
+    limits = {'capture.json': 4096, 'perf.data': PERF_TRACE_MAX_BYTES - 1, 'perf.log': 1 << 20}
+    for name, limit in limits.items():
+        info = (leg / name).lstat()
+        if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or
+                not (0 if name == 'perf.log' else 1) <= info.st_size <= limit):
+            raise ValueError('perf artifact is not private and bounded: ' + name)
+    receipt = json.loads((leg / 'capture.json').read_text())
+    fields = {'pid', 'start_ticks', 'enable_ack_utc', 'disable_ack_utc', 'perf_bytes',
+              'loss_checked', 'pread64_entries', 'pread64_exits'}
+    main_calls = origin_file_range_read(critical['encryption_reads'][ORIGIN_FILE_RANGE_READ])['read_calls']
+    if (type(receipt) is not dict or set(receipt) != fields or receipt['loss_checked'] is not True or
+            type(receipt['pid']) is not int or receipt['pid'] <= 1 or
+            type(receipt['start_ticks']) is not str or not receipt['start_ticks'].isascii() or
+            not receipt['start_ticks'].isdecimal() or int(receipt['start_ticks']) <= 0 or
+            type(receipt['perf_bytes']) is not int or receipt['perf_bytes'] != (leg / 'perf.data').stat().st_size or
+            type(receipt['pread64_entries']) is not int or type(receipt['pread64_exits']) is not int or
+            not 0 < main_calls <= receipt['pread64_entries'] == receipt['pread64_exits']):
+        raise ValueError('perf receipt lacks the authenticated main positional syscall count floor')
+    try:
+        enabled, disabled = (datetime.fromisoformat(receipt[field]) for field in ('enable_ack_utc', 'disable_ack_utc'))
+    except (TypeError, ValueError) as error:
+        raise ValueError('invalid perf acknowledgment timestamps') from error
+    if enabled.tzinfo != timezone.utc or disabled.tzinfo != timezone.utc or not 0 < (disabled - enabled).total_seconds() <= 1200:
+        raise ValueError('invalid perf acknowledgment interval')
+    return dict(receipt, authenticated_main_read_calls=main_calls, per_read_attribution_qualified=False)
+
+
+def perf_fixture_files(database):
+    repositories = [path for path in database.iterdir() if re.fullmatch(r'[0-9a-f]{64}', path.name)]
+    if len(repositories) != 1:
+        raise ValueError('perf fixture must have exactly one repository object scope')
+    repository, = repositories
+    origins = (repository / 'db', database / 'wal' / repository.name / 'db')
+    files = []
+
+    def fail(error):
+        raise error
+
+    for origin in origins:
+        if origin.resolve(strict=True) != origin or not origin.is_dir():
+            raise ValueError('perf fixture object scope is not a canonical directory')
+        for directory, children, names in os.walk(origin, onerror=fail):
+            node = Path(directory)
+            if any(not stat.S_ISDIR((node / child).lstat().st_mode) for child in children):
+                raise ValueError('perf fixture object scope contains a non-directory')
+            for name in names:
+                path = node / name
+                if not stat.S_ISREG(path.lstat().st_mode) or len(files) >= 8192:
+                    raise ValueError('perf fixture object allowlist is not regular and bounded')
+                files.append(path)
+    return files
+
+
+def verify_perf_read_attribution(root, measured, capture):
+    leg = root / 'group-64/forced'
+    path = leg / 'trace-window.json'
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or not 0 < info.st_size <= 2 << 20:
+        raise ValueError('perf trace-window receipt is not private and bounded')
+    window = json.loads(path.read_text())
+    if (type(window) is not dict or set(window) != {'writer_before', 'writer_after'} or
+            window['writer_before'] != measured['writer_before']):
+        raise ValueError('perf trace window differs from the authenticated backup baseline')
+    receipt = qualify_file_read_interval(window['writer_before'], window['writer_after'], True, True)
+    current = receipt['encryption_reads'][ORIGIN_FILE_RANGE_READ]
+    main = origin_file_range_read(measured['critical_path']['encryption_reads'][ORIGIN_FILE_RANGE_READ])
+    after = origin_file_range_read(measured['writer_after']['attribution']['encryption_reads'][ORIGIN_FILE_RANGE_READ])
+    endpoint = origin_file_range_read(window['writer_after']['attribution']['encryption_reads'][ORIGIN_FILE_RANGE_READ])
+    for name in ('read_calls', 'read_bytes'):
+        if not 0 < main[name] <= current[name] or endpoint[name] > after[name]:
+            raise ValueError('perf trace window is outside authenticated counter bounds')
+    decoded = analyze_recording(leg / 'perf.data', capture['pid'], perf_fixture_files(leg / 'db'),
+                                (current['read_calls'], current['read_bytes']))
+    if decoded['syscalls'] != capture['pread64_entries']:
+        raise ValueError('perf decoded syscall total differs from the capture receipt')
+    return dict(decoded, scope='daemon command window, approved NFS objects; not RPC or exclusive wall time')
+
+
 def bottleneck_report(critical):
     encryption, source = critical.get('encryption_reads') or {}, critical.get('source_reads')
     reconciliation = critical.get('reconciliation') or {}
@@ -1456,6 +1549,9 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
             'single_pass_sustained_qualified': main >= 600, 'deployment_qualified': False}
     if file_qualification is not None:
         report['file_read_qualification'] = file_qualification
+    if root.parent in ORIGIN_FILE_PERF_ROOTS:
+        report['perf_capture'] = verify_perf_capture_receipt(root, critical)
+        report['perf_nfs_reads'] = verify_perf_read_attribution(root, measured, report['perf_capture'])
     return report
 
 
@@ -2290,6 +2386,77 @@ def execute_chunk_series(immutable=False, reconcile=False, caches=False, pipelin
 
 
 class ChunkComparisonTests(unittest.TestCase):
+    def test_perf_trace_recording_events(self):
+        from perf_read_trace import ENTER, EXIT, NFS, require_recording_events
+
+        entry = ENTER + ' inherit: 1'
+        exit_event = EXIT + ' inherit: 1'
+        nfs_event = NFS + ' inherit: 1'
+        switches = 'dummy:u: context_switch: 1, inherit: 1'
+        require_recording_events([entry + ', context_switch: 1', exit_event, nfs_event])
+        require_recording_events([entry, exit_event, nfs_event, switches])
+        for attributes in ([entry, exit_event, nfs_event], [entry, exit_event, switches],
+                           [entry, exit_event, nfs_event, switches.replace('switch: 1', 'switch: 0')]):
+            with self.assertRaisesRegex(ValueError, 'lacks positional/NFS events or task switch recording'):
+                require_recording_events(attributes)
+
+    def test_perf_trace_thread_and_file_join(self):
+        from perf_read_trace import analyze_reads
+
+        lines = [
+            'worker 42/43 [001] 1.000000000: syscalls:sys_enter_pread64: fd: 0x7, buf: 0x0, count: 0x10, pos: 0x20',
+            'worker 42/43 [001] 1.000000001: nfs:nfs_file_read: fileid=00:169:99 fhandle=0x1 offset=32 count=16 ki_flags=',
+            'worker 42/43 [-01] 1.000000002: PERF_RECORD_SWITCH OUT',
+            'worker 42/43 [002] 1.000000007: PERF_RECORD_SWITCH IN',
+            'worker 42/43 [002] 1.000000010: syscalls:sys_exit_pread64: 0x10',
+        ]
+        self.assertEqual(analyze_reads(lines, 42, (0, 361), {99}),
+                         dict(syscalls=1, matched_reads=1, matched_bytes=16, syscall_ns=10, off_cpu_ns=5))
+        split = lines[:4] + ['worker 42/43 [-01] 1.000000008: PERF_RECORD_SWITCH OUT preempt',
+                     'worker 42/43 [-01] 1.000000009: PERF_RECORD_SWITCH IN', lines[4]]
+        self.assertEqual(analyze_reads(split, 42, (0, 361), {99}, split_preempt=True),
+                 dict(syscalls=1, matched_reads=1, matched_bytes=16, syscall_ns=10, off_cpu_ns=6,
+                      preempted_off_cpu_ns=1, unclassified_off_cpu_ns=5))
+        for invalid in (lines + ['PERF_RECORD_LOST_SAMPLES'], lines + [lines[-1]], lines[:3] + lines[4:],
+                        [line.replace('00:169:99', '00:169:98') for line in lines],
+                        [line.replace('offset=32', 'offset=33') for line in lines],
+                        [line.replace('SWITCH OUT', 'SWITCH OUT unknown') for line in lines],
+                        [line.replace('42/43 [002]', '44/43 [002]') for line in lines],
+                        [line.replace('[002]', '[-01]') for line in lines],
+                        lines[:-1] + [lines[-1].replace('0x10', '0x8')]):
+            with self.assertRaises(ValueError):
+                analyze_reads(invalid, 42, (0, 361), {99})
+
+    def test_perf_capture_receipt(self):
+        counts = dict.fromkeys(ORIGIN_FILE_RANGE_READ_FIELDS, 0)
+        counts['read_calls'] = 2
+        critical = {'encryption_reads': {ORIGIN_FILE_RANGE_READ: counts}}
+        receipt = dict(pid=987, start_ticks='123', enable_ack_utc='2026-11-18T07:00:00Z',
+                       disable_ack_utc='2026-11-18T07:00:01Z', perf_bytes=4,
+                       loss_checked=True, pread64_entries=3, pread64_exits=3)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = root / 'group-64/forced'
+            leg.mkdir(parents=True)
+            for name, content in (('perf.data', b'data'), ('perf.log', b''), ('capture.json', b'')):
+                path = leg / name
+                path.write_bytes(content)
+                path.chmod(0o600)
+            capture = leg / 'capture.json'
+            capture.write_text(json.dumps(receipt))
+            self.assertEqual(verify_perf_capture_receipt(root, critical),
+                             dict(receipt, authenticated_main_read_calls=2, per_read_attribution_qualified=False))
+            for change in (dict(loss_checked=False), dict(pread64_entries=1, pread64_exits=1),
+                           dict(pread64_entries=4), dict(perf_bytes=5),
+                           dict(disable_ack_utc='2026-11-18T07:30:01Z')):
+                capture.write_text(json.dumps(dict(receipt, **change)))
+                with self.assertRaises(ValueError):
+                    verify_perf_capture_receipt(root, critical)
+            capture.write_text(json.dumps(receipt))
+            (leg / 'perf.data').chmod(0o644)
+            with self.assertRaises(ValueError):
+                verify_perf_capture_receipt(root, critical)
+
     def test_origin_file_control_route_and_policy(self):
         label = 'leg-01-file'
         root, runtime, tasks = producer_leg(label)

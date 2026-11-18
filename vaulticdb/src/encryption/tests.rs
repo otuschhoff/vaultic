@@ -192,6 +192,15 @@ mod tests {
             drop(release);
             occupied.await.unwrap();
             assert_eq!(body.await.unwrap(), Bytes::from_static(b"agnos"));
+            #[cfg(target_os = "linux")]
+            if let Ok(expected) = std::env::var("VAULTIC_DIAGNOSTIC_SCHED_COMM") {
+                let worker = tokio::task::spawn_blocking(|| {
+                    std::fs::read_to_string("/proc/thread-self/comm").unwrap()
+                }).await.unwrap();
+                assert_eq!(worker.trim_end(), expected);
+                let caller = std::fs::read_to_string("/proc/thread-self/comm").unwrap();
+                assert_ne!(caller.trim_end(), expected);
+            }
             let file = encrypted.read_metrics.file_read_metrics.snapshot();
             assert_eq!((file.calls, file.started, file.finished, file.resumed), (1, 1, 1, 1));
             assert_eq!((file.errors, file.panics, file.abandoned, file.active, file.cancellations, file.direct_calls), (0, 0, 0, 0, 0, 0));
