@@ -3649,6 +3649,127 @@ The immutable `verified-observation.json` and `METADATA-READ-SHA256SUMS` in the
 50k evidence root retain the measurements and explicit limits. Do not rerun the
 create-only analyzer or rewrite the sealed receipt.
 
+## NASDA2 Concurrency Headroom
+
+On 2026-11-18, two six-second passes covered hot reads, wide reads, writes,
+and mixed traffic at each of depths 2, 8, 24, 56, and 96. Six additional
+30-second holds compared depth 24 with a selected depth for each of wide
+reads, writes, and mixed traffic. Direct, 262,160-byte reads matched the
+dominant request size of the accepted backup trace and used 170 read-only
+metadata objects totaling 38.27 GiB. One-MiB writes used fresh private files,
+with per-file `fdatasync`, tail readback and cleanup. Mixed legs allocated
+half the requested workers to each direction. Direct I/O bypassed the client
+page cache, not necessarily NASDA2's cache.
+
+| Workload | Requested Depth | Effective Read / Write Depth | Read / Write MiB/s | Read / Write p99 ms |
+| --- | ---: | ---: | ---: | ---: |
+| Wide | 24 | 24.0 / - | 356 / - | 89.9 / - |
+| Wide | 96 | 95.7 / - | 511 / - | 217.6 / - |
+| Write | 24 | - / 23.5 | - / 1,045 | - / 31.7 |
+| Write | 56 | - / 55.4 | - / 952 | - / 71.0 |
+| Mixed | 24 | 12.0 / 11.6 | 95 / 990 | 115.6 / 16.3 |
+| Mixed | 56 | 27.9 / 27.6 | 163 / 726 | 143.9 / 81.3 |
+
+The wide-read holds delivered 43% more completions at higher depth despite
+higher latency. Client READ RPC queueing stayed below 0.05 ms on average;
+mean RTT rose from 14.0 to 44.6 ms. Hot reads already reached 1,020-1,104 MiB/s
+at depth 8, close to the observed ceiling on the 10 GbE client path. Cache
+order mattered: wide reads at depth 2 delivered 57 and 776 MiB/s in the two
+passes. These are client-observed results, not cold-media measurements or
+proof of HDD seek scheduling. No NAS-side disk, cache, or server queue
+telemetry was collected.
+
+Write-only holds saw one NFS COMMIT per completed application write and about
+1.4 ms of final drain. Mean client WRITE RPC queue time rose from 13.9 to
+49.1 ms while RTT stayed near 4 ms. Higher depth reduced write completions in
+the longer hold. Mixed results varied with run order and the direction being
+measured; sizing by aggregate MiB/s hides that tradeoff. Do not treat
+`fdatasync` and NFS COMMIT as a physical-media power-loss test.
+
+The accepted unchanged backup read directly from `/ncl1-1-vs-50/fme_cae1`.
+Exact replay of its 152,317 matched NASDA2 reads measured a mean depth of 4.25,
+depth zero for 48.3% of the 300.15-second interval from first matched entry
+to last matched completion, and a brief peak of 90. Its 32-slot lookup limiter
+recorded 0.481 aggregate seconds of admission wait across 83,378 size RPCs.
+That does not justify a 32-to-64 RPC-cap backup trial. Keep existing caps;
+test a bounded source of independent native reads that can fill idle periods
+instead of enlarging bursts, and vary source traversal separately. This sweep
+did not establish NCL1 source saturation or qualify a changed-data backup.
+
+The exact trace contained 144.903 seconds with no matched read outstanding.
+Contiguous gaps of 1-10 ms accounted for 46.941 seconds (14,060 gaps), and
+10-100 ms gaps accounted for 44.342 seconds (1,660 gaps). Another 26.224
+seconds fell between 100 ms and 1 second; five gaps of at least one second
+totaled 24.085 seconds, including the 17.838-second maximum. Gaps shorter
+than 1 ms accounted for the remaining 3.311 seconds. These are gaps in the
+allowlisted reads, not proof that the daemon or NAS was idle.
+
+At the locked SlateDB revision, multi-get already fans out planned SST reads
+up to 32 at a time and restores SST rank before resolving versions. The
+encrypted store also joins the chunks of an eligible range concurrently.
+Before adding another fan-out layer, collect same-clock samples of lookup
+batch readiness, native read admission, and matched reads in flight. The
+retained reconciliation progress has no shared monotonic timestamps with the
+read trace, so it cannot identify ready work during each gap. A useful
+candidate must reduce gaps with ready work without adding origin bytes or
+relaxing version and authentication checks.
+
+The opt-in Go runtime trace now marks size-lookup slot wait, batches ready
+after local cache and deduplication checks, and actual RPC start and finish
+after coalescing. A batch-ready event is not a daemon read. A traced fixture
+emitted 32 ready batches and two RPCs; the authenticated native lookup emitted
+one ready batch and one RPC. Perf now requests `CLOCK_MONOTONIC` explicitly.
+In two positive recorder smokes, the unique kernel `pread64` entry and exit
+fell between the Go trace markers bracketing that same read. This validates
+the clock join on this host, not production timing. The CLI trace was then
+capped at 512 MiB with a completion receipt; the native observer was capped
+at 16 MiB and records submission time, worker start time and Linux thread
+ID. An encrypted fixture validated this boundary, and a separate exact
+five-byte perf join measured 154,663 ns from submission to worker start
+and 79,913 ns from worker start to kernel entry. Those are fixture timings,
+not estimates of admission cost in a representative backup.
+
+The first same-clock 800k route used the direct NCL1 source and finished
+the backup command in 303.683 seconds (296.602 seconds main), with zero new
+data blobs. The command-window gate and perf replay matched 152,312 reads
+and 40,755,813,940 bytes exactly. The later status sample, taken after a
+snapshot lookup, failed the origin request/body drain check. Its counters
+were not preserved and the native admission file was not retained; neither
+restore nor encrypted reopen ran. This is a rejected qualification, not a
+joined admission result or a speed comparison. The retry uses the strictly
+checked command endpoint for attribution, retains the separate post-lookup
+status, and copies the native stream before snapshot lookup. The rejected
+evidence is sealed under `ncl1-admission-fme-cae1-20261118-800k` in the same
+NASDA2 evidence directory.
+
+Retry 1 finished the direct-source backup in 308.920 seconds (301.882 seconds
+main), with zero new data blobs. Its strict command-window replay matched
+152,303 reads and 40,753,454,500 bytes. Qualification stopped before snapshot
+lookup, restore, or reopen: the Go daemon launcher filtered the ambient native
+admission path, so the file never existed. The retry evidence is separately
+sealed under `ncl1-admission-fme-cae1-20261118-800k-retry1`; it does not support
+an admission or throughput conclusion. Activation now uses an explicit test
+option on the measured child only, with an artifact check before backup.
+An encrypted launch and reopen using the same pinned native binary produced
+nine valid admission records; the uninstrumented launch produced none.
+
+Retry 2 finished the direct-source backup in 300.124 seconds (292.992 seconds
+main), with zero new data blobs. Snapshot validation, verified restore,
+encrypted reopen, and source digest comparison all passed. All three
+traces were retained, but strict perf replay rejected an unpaired scheduler
+edge inside a positional syscall. The sealed series under
+`ncl1-admission-fme-cae1-20261118-800k-retry2` remains rejected for scheduler
+attribution. A separate positional-only replay verified 152,346 syscall
+pairs and matched 152,305 reads and 40,753,978,820 bytes exactly against
+the authenticated command window. It does not report off-CPU timing or
+change the rejection. The full Go/native admission join was not qualified,
+so this run does not explain the gaps or justify a concurrency change.
+
+All 46 legs, the read-depth replay, and the sweep inputs are retained under
+`/volume2/NASDA2/vaultic-test-m6/nasda2-headroom-20261118-v0ruxc9f`. Verify
+`SHA256SUMS` from that directory. The disposable write payloads were removed;
+the retained object corpus and historical backup receipts were not changed.
+
 ## Correctness Contract
 
 1. Size/mtime and normally ctime/inode describe source changes, not repository

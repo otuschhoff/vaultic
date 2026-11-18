@@ -1020,6 +1020,10 @@ const publicationOriginFileRange800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1
 const publicationOriginFileRange800kBin = "/root/proj/vaultic/bin/phase35-ncl1-origin-file-range800k-20261117/linux-amd64"
 const publicationOriginFilePerf800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-origin-file-perf-fme-cae1-20261118-800k-retry3"
 const publicationOriginFilePerfLeg = "leg-03-file-perf"
+const publicationAdmissionRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-admission-fme-cae1-20261118-800k-retry2"
+const publicationAdmissionLeg = "leg-01-read-admission"
+const publicationAdmissionBin = "/root/proj/vaultic/bin/phase35-ncl1-admission800k-20261118-retry2/linux-amd64"
+const publicationAdmissionGoMax = 512 << 20
 
 func publicationFileReadGate(ctx context.Context, root string, before daemon.WriterStatus, after *daemon.WriterStatus, critical json.RawMessage) (json.RawMessage, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -1116,6 +1120,9 @@ func publicationProducerLeg(root, label string) (int, error) {
 	if label == publicationOriginFilePerfLeg && root == filepath.Join(publicationOriginFilePerf800kRoot, label) {
 		return 56, nil
 	}
+	if label == publicationAdmissionLeg && root == filepath.Join(publicationAdmissionRoot, label) {
+		return 56, nil
+	}
 	return 0, fmt.Errorf("producer comparison requires its exact scheduled private leg")
 }
 
@@ -1126,6 +1133,7 @@ func TestPublicationOriginFilePolicy(t *testing.T) {
 		{publicationOriginFileRuntime800kRoot, "leg-01-file-runtime"},
 		{publicationOriginFileRange800kRoot, "leg-01-file-range"},
 		{publicationOriginFilePerf800kRoot, publicationOriginFilePerfLeg},
+		{publicationAdmissionRoot, publicationAdmissionLeg},
 	} {
 		t.Run(route.label, func(t *testing.T) {
 			for _, key := range []string{"VAULTIC_PHASE35_READERS_LEG", "VAULTIC_PHASE35_RAM32_LEG", "VAULTIC_PHASE35_RAM64_LEG", "VAULTIC_PHASE35_ORIGINAL_PARENT", "VAULTIC_PHASE35_PRODUCER_LEG"} {
@@ -3339,6 +3347,9 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 				root == filepath.Join(publicationOriginFilePerf800kRoot, publicationOriginFilePerfLeg) {
 				candidate, binary = filepath.Join(publicationOriginFileRange800kBin, "vaultic"), filepath.Join(publicationOriginFileRange800kBin, "vaulticdb")
 			}
+			if root == filepath.Join(publicationAdmissionRoot, publicationAdmissionLeg) {
+				candidate, binary = filepath.Join(publicationAdmissionBin, "vaultic"), filepath.Join(publicationAdmissionBin, "vaulticdb")
+			}
 		}
 		if os.Getenv("VAULTIC_PHASE35_RAM32_LEG") != "" {
 			candidate, binary = filepath.Join(publicationRAM32800kBin, "vaultic"), filepath.Join(publicationRAM32800kBin, "vaulticdb")
@@ -4002,7 +4013,8 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 		}
 		modes = []bool{true}
 	}
-	perfTiming := rawRoot == filepath.Join(publicationOriginFilePerf800kRoot, publicationOriginFilePerfLeg)
+	admissionTiming := rawRoot == filepath.Join(publicationAdmissionRoot, publicationAdmissionLeg)
+	perfTiming := admissionTiming || rawRoot == filepath.Join(publicationOriginFilePerf800kRoot, publicationOriginFilePerfLeg)
 	if perfTiming && (!original || len(paths) != 800_000 || len(modes) != 1 || !modes[0]) {
 		t.Fatal("perf trace requires the exact guarded forced 800k comparison")
 	}
@@ -4050,7 +4062,9 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 		} else {
 			rtest.OK(t, os.WriteFile(binding, []byte("vaulticdb-local-wal-after-bulk-import-v1:"+current.DataDir+"/wal"), 0600))
 		}
+		current.ReadAdmissionTraceForTesting = admissionTiming
 		*owner, err = daemon.Ensure(t.Context(), current)
+		current.ReadAdmissionTraceForTesting = false
 		rtest.OK(t, err)
 		legOptions := publicationQualificationOptions(filepath.Join(leg, "repo"), current.Socket, current.PassphraseFile)
 		rtest.OK(t, publicationQualificationLoadPassword(&legOptions))
@@ -4124,7 +4138,14 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 			args = append(args, "--bounded-inode-manifest="+filepath.Join(rawRoot, "inode-manifest.json"))
 		}
 		args = append(args, source)
-		if publicationPipeline400kVariant(os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT")) || len(paths) == 800_000 {
+		if admissionTiming {
+			info, err := os.Lstat(filepath.Join(control, "read-admission.bin"))
+			rtest.OK(t, err)
+			if !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || info.Size() < 24 {
+				t.Fatal("native admission observer did not record a private startup sample")
+			}
+			args = append(args, "--trace-profile="+control, fmt.Sprintf("--trace-profile-max-bytes=%d", publicationAdmissionGoMax))
+		} else if publicationPipeline400kVariant(os.Getenv("VAULTIC_PHASE35_CHUNK_VARIANT")) || len(paths) == 800_000 {
 			profileRoot := filepath.Join(leg, "cpu")
 			rtest.OK(t, os.Mkdir(profileRoot, 0700))
 			rtest.OK(t, os.Chmod(profileRoot, 0700))
@@ -4141,6 +4162,7 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 			t.Cleanup(trace.close)
 		}
 		wall, cpu := publicationQualificationCommand(t, leg, "backup", candidate, args...)
+		var commandEndpoint daemon.WriterStatus
 		if trace != nil {
 			traceAfter, err := (*owner).WriterStatus(t.Context())
 			rtest.OK(t, err)
@@ -4156,6 +4178,13 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 			}
 			for _, name := range []string{"perf.data", "perf.log", "capture.json"} {
 				publicationQualificationCopy(t, filepath.Join(leg, name), filepath.Join(control, "perf", name))
+			}
+			if admissionTiming {
+				commandEndpoint = traceAfter
+				for _, name := range []string{"trace.out", "trace.complete"} {
+					publicationQualificationCopy(t, filepath.Join(leg, name), filepath.Join(control, name))
+				}
+				publicationQualificationCopy(t, filepath.Join(leg, "read-admission.bin"), filepath.Join(control, "read-admission.bin"))
 			}
 		}
 		output, err := os.ReadFile(filepath.Join(leg, "backup.stdout.log"))
@@ -4209,6 +4238,10 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 		rtest.OK(t, err)
 		if after.ActiveTransactions != 0 || after.ActiveWriteIntents != 0 {
 			t.Fatal("comparison left active writer work")
+		}
+		if admissionTiming {
+			rtest.OK(t, publicationFileReadReceipt(filepath.Join(leg, "post-snapshot-status.json"), after))
+			after = commandEndpoint
 		}
 		if fileTiming {
 			receipt, err := publicationFileReadGate(t.Context(), rawRoot, before, &after, critical)

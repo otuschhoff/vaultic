@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -370,6 +371,100 @@ func TestDaemonEnvironmentFiltersAmbientSecrets(t *testing.T) {
 		!strings.Contains(walS3, "VAULTICDB_WAL_S3_SESSION_TOKEN=wal-session-token") {
 		t.Fatalf("WAL S3 daemon environment is not credential-chain scoped: %s", walS3)
 	}
+}
+
+func TestDaemonCommandReadAdmissionTraceRequiresExplicitOptIn(t *testing.T) {
+	const key = "VAULTIC_DIAGNOSTIC_READ_ADMISSION="
+	t.Setenv(strings.TrimSuffix(key, "="), "/ambient")
+	options := Options{RepositoryID: "admission-env", Socket: testSocket(t), DaemonPath: "/path/to/vaulticdb", ObjectStore: "local"}.withDefaults()
+	for _, enabled := range []bool{false, true} {
+		options.ReadAdmissionTraceForTesting = enabled
+		command, authRead, authWrite, err := prepareDaemonCommand(options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = authRead.Close(); _ = authWrite.Close() })
+		var observed []string
+		for _, entry := range command.Env {
+			if strings.HasPrefix(entry, key) {
+				observed = append(observed, entry)
+			}
+		}
+		var expected []string
+		if enabled {
+			expected = []string{key + filepath.Join(filepath.Dir(options.Socket), "read-admission.bin")}
+		}
+		if !slices.Equal(observed, expected) {
+			t.Fatalf("read admission environment = %v, want %v", observed, expected)
+		}
+	}
+}
+
+func TestDaemonReadAdmissionTraceOnEncryptedReopen(t *testing.T) {
+	native := os.Getenv("VAULTICDB_ADMISSION_TEST_BINARY")
+	if native == "" {
+		t.Skip("requires an admission-instrumented vaulticdb binary")
+	}
+	t.Setenv("VAULTICDB_BACKEND_ACCESS_MODE", "dedicated-force")
+	t.Setenv("VAULTICDB_SST_FRESHNESS", "immutable")
+	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
+	defer cancel()
+	passphrase := filepath.Join(t.TempDir(), "recovery-passphrase")
+	if err := os.WriteFile(passphrase, []byte("diagnostic fixture passphrase\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	options := Options{RepositoryID: "admission-encrypted", Socket: testSocket(t), DaemonPath: native,
+		DataDir: t.TempDir(), EncryptionMode: "initialize", PassphraseFile: passphrase}
+	client, err := Ensure(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close(context.Background()) })
+	key, payload := []byte("admission/key"), []byte("encrypted fixture value")
+	if _, err := client.WriteBatch(ctx, []Mutation{{Key: key, Value: payload}}, nil, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(filepath.Dir(options.Socket), "read-admission.bin")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("disabled observer path: %v", err)
+	}
+	options.Socket, options.EncryptionMode, options.ReadAdmissionTraceForTesting = testSocket(t), "required", true
+	reader, err := Ensure(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close(context.Background()) })
+	value, found, err := reader.Get(ctx, key, "")
+	if err != nil || !found || !bytes.Equal(value, payload) {
+		t.Fatalf("encrypted lookup: found=%t, err=%v", found, err)
+	}
+	path := filepath.Join(filepath.Dir(options.Socket), "read-admission.bin")
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || info.Size() < 24 {
+		t.Fatalf("native admission artifact mode=%v size=%d", info.Mode(), info.Size())
+	}
+	if err := reader.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) < 24 || len(data)%24 != 0 {
+		t.Fatalf("partial native admission stream: %d bytes", len(data))
+	}
+	for offset := 0; offset < len(data); offset += 24 {
+		submit, start, tid := binary.LittleEndian.Uint64(data[offset:]), binary.LittleEndian.Uint64(data[offset+8:]), binary.LittleEndian.Uint64(data[offset+16:])
+		if submit == 0 || start < submit || tid == 0 {
+			t.Fatalf("invalid native admission record at byte %d", offset)
+		}
+	}
+	t.Logf("validated %d encrypted native admission records", len(data)/24)
 }
 
 func TestDaemonEnvironmentForwardsChunkLimits(t *testing.T) {

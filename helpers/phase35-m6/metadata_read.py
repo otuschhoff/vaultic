@@ -101,7 +101,9 @@ ORIGIN_FILE_RANGE_BIN = WORKSPACE / 'bin/phase35-ncl1-origin-file-range800k-2026
 ORIGIN_FILE_PERF_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-origin-file-perf-fme-cae1-20261118-800k')
 ORIGIN_FILE_PERF_RETRY_ROOT = ORIGIN_FILE_PERF_ROOT.with_name(ORIGIN_FILE_PERF_ROOT.name + '-retry2')
 ORIGIN_FILE_PERF_DRAIN_ROOT = ORIGIN_FILE_PERF_ROOT.with_name(ORIGIN_FILE_PERF_ROOT.name + '-retry3')
-ORIGIN_FILE_PERF_ROOTS = (ORIGIN_FILE_PERF_ROOT, ORIGIN_FILE_PERF_RETRY_ROOT, ORIGIN_FILE_PERF_DRAIN_ROOT)
+ADMISSION_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-admission-fme-cae1-20261118-800k-retry2')
+ADMISSION_BIN = WORKSPACE / 'bin/phase35-ncl1-admission800k-20261118-retry2/linux-amd64'
+ORIGIN_FILE_PERF_ROOTS = (ORIGIN_FILE_PERF_ROOT, ORIGIN_FILE_PERF_RETRY_ROOT, ORIGIN_FILE_PERF_DRAIN_ROOT, ADMISSION_ROOT)
 ORIGIN_FILE_ROOTS = (ORIGIN_FILE_ROOT, ORIGIN_FILE_LIVE_ROOT, ORIGIN_FILE_RUNTIME_ROOT, ORIGIN_FILE_RANGE_ROOT, *ORIGIN_FILE_PERF_ROOTS)
 ORIGIN_OUTCOME_COUNTERS = ('ciphertext_origin_request_successes', 'ciphertext_origin_request_not_found',
                            'ciphertext_origin_request_errors', 'ciphertext_origin_request_cancellations',
@@ -243,6 +245,8 @@ def producer_leg(label):
         return ORIGIN_FILE_PERF_RETRY_ROOT / label, Path('/run/vaultic-unchanged-ncl1-perf2'), 56
     if label == 'leg-03-file-perf':
         return ORIGIN_FILE_PERF_DRAIN_ROOT / label, Path('/run/vaultic-unchanged-ncl1-perf3'), 56
+    if label == 'leg-01-read-admission':
+        return ADMISSION_ROOT / label, Path('/run/vaultic-unchanged-ncl1-admit-r2'), 56
     raise ValueError('producer comparison requires its exact scheduled private leg')
 
 
@@ -363,6 +367,8 @@ def binaries(profile):
             bundle = ORIGIN_FILE_RUNTIME_BIN
         if root.parent in (ORIGIN_FILE_RANGE_ROOT, *ORIGIN_FILE_PERF_ROOTS):
             bundle = ORIGIN_FILE_RANGE_BIN
+        if root.parent == ADMISSION_ROOT:
+            bundle = ADMISSION_BIN
         return bundle / 'vaultic', bundle / 'vaulticdb'
     if os.environ.get('VAULTIC_PHASE35_RAM64_LEG'):
         original_parent_selected()
@@ -1515,9 +1521,18 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
                 require_origin_read_coverage(deltas, **origin_policy)
     if inode_limit == 800000:
         require_cache_reuse(critical['reconciliation'], expected_entries, None if identities is None else identities['metadata_records'])
-        cpu = root / 'group-64/forced/cpu/cpu.pprof'
-        if not cpu.is_file() or not 0 < cpu.stat().st_size <= 32 << 20 or cpu.stat().st_mode & 0o777 != 0o600:
-            raise ValueError('800k CPU profile lacks private bounded capture')
+        if root.parent == ADMISSION_ROOT:
+            leg = root / 'group-64/forced'
+            for name, limit in (('trace.out', 512 << 20), ('trace.complete', 32), ('read-admission.bin', 16 << 20)):
+                info = (leg / name).lstat()
+                if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or not 0 < info.st_size <= limit:
+                    raise ValueError('admission route lacks a private bounded ' + name)
+            if (leg / 'trace.complete').read_bytes() != f'{(leg / "trace.out").stat().st_size}\n'.encode():
+                raise ValueError('runtime trace completion receipt differs')
+        else:
+            cpu = root / 'group-64/forced/cpu/cpu.pprof'
+            if not cpu.is_file() or not 0 < cpu.stat().st_size <= 32 << 20 or cpu.stat().st_mode & 0o777 != 0o600:
+                raise ValueError('800k CPU profile lacks private bounded capture')
         if outcome.get('backup_runtime_limit_seconds') != 1200 or outcome.get('backup_runtime_guard_finished') is not True:
             raise ValueError('800k capture lacks accepted 1200-second backup runtime guard')
     if variant in CACHE_VARIANTS:
@@ -2417,6 +2432,18 @@ class ChunkComparisonTests(unittest.TestCase):
         self.assertEqual(analyze_reads(split, 42, (0, 361), {99}, split_preempt=True),
                  dict(syscalls=1, matched_reads=1, matched_bytes=16, syscall_ns=10, off_cpu_ns=6,
                       preempted_off_cpu_ns=1, unclassified_off_cpu_ns=5))
+        unpaired = lines[:2] + lines[3:]
+        finished = []
+        with self.assertRaisesRegex(ValueError, 'unpaired scheduler edge'):
+            analyze_reads(unpaired, 42, (0, 361), {99})
+        self.assertEqual(analyze_reads(unpaired, 42, (0, 361), {99}, positional_only=True,
+                                       on_read=lambda tid, read: finished.append((tid, read.last, read.matched))),
+                         dict(syscalls=1, matched_reads=1, matched_bytes=16, syscall_ns=10))
+        self.assertEqual(finished, [(43, 1_000_000_010, True)])
+        for invalid in (unpaired + ['PERF_RECORD_LOST_SAMPLES'], unpaired[:-1],
+                        unpaired[:-1] + [unpaired[-1].replace('0x10', '0x8')]):
+            with self.assertRaises(ValueError):
+                analyze_reads(invalid, 42, (0, 361), {99}, positional_only=True)
         for invalid in (lines + ['PERF_RECORD_LOST_SAMPLES'], lines + [lines[-1]], lines[:3] + lines[4:],
                         [line.replace('00:169:99', '00:169:98') for line in lines],
                         [line.replace('offset=32', 'offset=33') for line in lines],

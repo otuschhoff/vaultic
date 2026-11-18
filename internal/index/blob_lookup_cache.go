@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/trace"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -584,15 +585,19 @@ func (lookup *CachedBlobLookup) LookupSizesContext(ctx context.Context, handles 
 		return results, nil
 	}
 	slotStarted := time.Now()
+	region := trace.StartRegion(lookup.ctx, "vaultic.metadata.size.slot")
 	select {
 	case lookup.slots <- struct{}{}:
 	case <-ctx.Done():
+		region.End()
 		lookup.stats.slotWaitNanoseconds.Add(uint64(time.Since(slotStarted)))
 		return nil, ctx.Err()
 	case <-lookup.ctx.Done():
+		region.End()
 		lookup.stats.slotWaitNanoseconds.Add(uint64(time.Since(slotStarted)))
 		return nil, context.Cause(lookup.ctx)
 	}
+	region.End()
 	lookup.stats.slotWaitNanoseconds.Add(uint64(time.Since(slotStarted)))
 	results, err = lookup.localSizes(ctx, handles)
 	if err != nil {
@@ -634,6 +639,7 @@ func (lookup *CachedBlobLookup) LookupSizesContext(ctx context.Context, handles 
 		waiting[ordinal] = result
 	}
 	if len(missing) > 0 {
+		trace.Log(lookup.ctx, "vaultic.metadata.size", "batch-ready")
 		lookup.workers.Add(1)
 		go lookup.fetch(missing, batch)
 	} else {
@@ -801,7 +807,9 @@ func (lookup *CachedBlobLookup) querySizes(handles []vaultic.BlobHandle) ([]vaul
 			break
 		}
 	}
+	region := trace.StartRegion(lookup.ctx, "vaultic.metadata.size.rpc")
 	sizes, err := lookup.session.LookupBlobSizesContext(lookup.ctx, handles)
+	region.End()
 	elapsed := time.Since(started)
 	lookup.stats.sizeRPCActive.Add(^uint64(0))
 	lookup.stats.sizeRPCNanoseconds.Add(uint64(elapsed))

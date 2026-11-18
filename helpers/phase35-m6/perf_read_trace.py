@@ -36,10 +36,12 @@ class PendingRead:
     preempted_off_cpu: int = 0
 
 
-def analyze_reads(lines, pid, device, inodes, *, split_preempt=False):
+def analyze_reads(lines, pid, device, inodes, *, split_preempt=False, positional_only=False, on_read=None):
     """Measure only reads joined to caller-approved NFS file identities."""
     if pid <= 1 or not inodes or any(inode <= 0 for inode in inodes):
         raise ValueError('trace requires a target PID and nonempty inode allowlist')
+    if positional_only and split_preempt:
+        raise ValueError('positional-only replay cannot attribute preemption')
     active = {}
     result = dict(syscalls=0, matched_reads=0, matched_bytes=0, syscall_ns=0, off_cpu_ns=0)
     preempted_off_cpu = 0
@@ -52,6 +54,8 @@ def analyze_reads(lines, pid, device, inodes, *, split_preempt=False):
         if record is None:
             raise ValueError('unrecognized perf event format')
         process, thread, cpu, seconds, nanos, event = record.groups()
+        if positional_only and event.startswith(SWITCH):
+            continue
         if cpu == '-01' and not event.startswith(SWITCH):
             raise ValueError('missing CPU on traced syscall or NFS event')
         if int(process) != pid:
@@ -110,6 +114,8 @@ def analyze_reads(lines, pid, device, inodes, *, split_preempt=False):
                 result['syscall_ns'] += timestamp - pending.start
                 result['off_cpu_ns'] += pending.off_cpu
                 preempted_off_cpu += pending.preempted_off_cpu
+            if on_read is not None:
+                on_read(int(thread), pending)
         else:
             raise ValueError('unknown event inside positional syscall')
     if active or not result['matched_reads']:
@@ -117,6 +123,8 @@ def analyze_reads(lines, pid, device, inodes, *, split_preempt=False):
     if split_preempt:
         result['preempted_off_cpu_ns'] = preempted_off_cpu
         result['unclassified_off_cpu_ns'] = result['off_cpu_ns'] - preempted_off_cpu
+    if positional_only:
+        del result['off_cpu_ns']
     return result
 
 
@@ -136,7 +144,9 @@ def require_recording_events(attributes):
         raise ValueError('recording lacks positional/NFS events or task switch recording')
 
 
-def analyze_recording(path, pid, files, expected=None, *, split_preempt=False):
+def analyze_recording(path, pid, files, expected=None, *, split_preempt=False, positional_only=False, on_read=None):
+    if positional_only and (expected is None or any(value <= 0 for value in expected)):
+        raise ValueError('positional-only replay requires positive same-window reference counts')
     info = path.lstat()
     if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or not 0 < info.st_size < PERF_TRACE_MAX_BYTES:
         raise ValueError('perf recording is not a private bounded file')
@@ -161,8 +171,13 @@ def analyze_recording(path, pid, files, expected=None, *, split_preempt=False):
         timer = threading.Timer(120, expire)
         timer.start()
         try:
+            options = {'split_preempt': split_preempt}
+            if positional_only:
+                options['positional_only'] = True
+            if on_read is not None:
+                options['on_read'] = on_read
             result = analyze_reads(bounded_lines(decoder.stdout), pid, (os.major(device), os.minor(device)),
-                                   {identity.st_ino for identity in identities}, split_preempt=split_preempt)
+                                   {identity.st_ino for identity in identities}, **options)
             if decoder.wait() != 0:
                 raise ValueError('perf decoder did not exit successfully')
         except BaseException:

@@ -9,7 +9,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	runtimetrace "runtime/trace"
 	"strconv"
 	"strings"
 	"testing"
@@ -92,7 +94,7 @@ func startPublicationPerfTrace(ctx context.Context, directory string, pid int, l
 	ctx, cancel := context.WithTimeout(ctx, limit)
 	trace := &publicationPerfTrace{context: ctx, cancel: cancel, control: controlWrite, ack: ackRead,
 		reader: bufio.NewReader(ackRead), path: filepath.Join(directory, "perf.data"), pid: pid, ticks: ticks}
-	trace.command = exec.CommandContext(ctx, "/usr/bin/perf", "record", "--no-buildid", "-N", "--switch-events", "-D", "-1",
+	trace.command = exec.CommandContext(ctx, "/usr/bin/perf", "record", "--no-buildid", "-N", "--switch-events", "--clockid", "mono", "-D", "-1",
 		"--control=fd:3,4", fmt.Sprintf("--max-size=%dM", publicationPerfMaxBytes>>20), "-o", trace.path,
 		"-e", "syscalls:sys_enter_pread64,syscalls:sys_exit_pread64,nfs:nfs_file_read", "-p", strconv.Itoa(pid))
 	trace.command.ExtraFiles = []*os.File{controlRead, ackWrite}
@@ -259,8 +261,23 @@ func TestPublicationPerfTrace(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer file.Close()
+		clock, err := os.OpenFile(os.Getenv("VAULTIC_PUBLICATION_PERF_TEST_CLOCK"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := runtimetrace.Start(clock); err != nil {
+			clock.Close()
+			t.Fatal(err)
+		}
 		var data [13]byte
-		if _, err := file.ReadAt(data[:], 17); err != nil {
+		runtimetrace.Log(t.Context(), "vaultic-clock-smoke", "before")
+		_, err = file.ReadAt(data[:], 17)
+		runtimetrace.Log(t.Context(), "vaultic-clock-smoke", "after")
+		runtimetrace.Stop()
+		if closeErr := clock.Close(); closeErr != nil {
+			t.Fatal(closeErr)
+		}
+		if err != nil {
 			t.Fatal(err)
 		}
 		fmt.Println("read finished")
@@ -277,8 +294,10 @@ func TestPublicationPerfTrace(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
+	directory := filepath.Join(t.TempDir(), "perf")
+	clockPath := filepath.Join(filepath.Dir(directory), "go.trace")
 	child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestPublicationPerfTrace$")
-	child.Env = append(os.Environ(), "VAULTIC_PUBLICATION_PERF_TEST_CHILD=1")
+	child.Env = append(os.Environ(), "VAULTIC_PUBLICATION_PERF_TEST_CHILD=1", "VAULTIC_PUBLICATION_PERF_TEST_CLOCK="+clockPath)
 	stdin, err := child.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -297,7 +316,6 @@ func TestPublicationPerfTrace(t *testing.T) {
 			_ = child.Wait()
 		}
 	}()
-	directory := filepath.Join(t.TempDir(), "perf")
 	trace, err := startPublicationPerfTrace(ctx, directory, child.Process.Pid, 12*time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -340,11 +358,35 @@ func TestPublicationPerfTrace(t *testing.T) {
 	if err := child.Wait(); err != nil {
 		t.Fatal(err)
 	}
-	output, err := exec.CommandContext(ctx, "/usr/bin/perf", "--no-pager", "script", "--show-lost-events", "-i", trace.path).CombinedOutput()
+	output, err := exec.CommandContext(ctx, "/usr/bin/perf", "--no-pager", "script", "--ns", "--show-lost-events", "-i", trace.path).CombinedOutput()
 	text := string(output)
 	if err != nil || strings.Contains(text, "PERF_RECORD_LOST") ||
 		strings.Count(text, "count: 0x0000000d, pos: 0x00000011") != 1 ||
 		strings.Count(text, "syscalls:sys_exit_pread64: 0xd\n") != 1 {
 		t.Fatalf("unexpected smoke trace: %v\n%s", err, text)
 	}
+	clockOutput, err := exec.CommandContext(ctx, filepath.Join(runtime.GOROOT(), "bin", "go"), "tool", "trace", "-d=parsed", clockPath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("decode Go clock markers: %v\n%s", err, clockOutput)
+	}
+	before := publicationTraceTimestamp(t, string(clockOutput), `Time=(\d+) .*Category="vaultic-clock-smoke" Message="before"`)
+	after := publicationTraceTimestamp(t, string(clockOutput), `Time=(\d+) .*Category="vaultic-clock-smoke" Message="after"`)
+	entry := publicationTraceTimestamp(t, text, `(\d+\.\d{9}):\s+syscalls:sys_enter_pread64: .*count: 0x0000000d, pos: 0x00000011`)
+	exit := publicationTraceTimestamp(t, text, `(\d+\.\d{9}):\s+syscalls:sys_exit_pread64: 0xd\n`)
+	if before > entry || entry > exit || exit > after {
+		t.Fatalf("perf clock falls outside the Go read bracket: before=%d entry=%d exit=%d after=%d", before, entry, exit, after)
+	}
+}
+
+func publicationTraceTimestamp(t *testing.T, text, pattern string) int64 {
+	t.Helper()
+	matches := regexp.MustCompile(pattern).FindAllStringSubmatch(text, 2)
+	if len(matches) != 1 {
+		t.Fatalf("expected exactly one clock marker for %q, got %d", pattern, len(matches))
+	}
+	timestamp, err := strconv.ParseInt(strings.ReplaceAll(matches[0][1], ".", ""), 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return timestamp
 }

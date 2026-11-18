@@ -116,6 +116,7 @@ type Options struct {
 	BulkImportReadCacheBytes      uint64
 	AttributionDisabledForTesting bool
 	ObjectDelayProfileForTesting  string
+	ReadAdmissionTraceForTesting  bool
 	commitResponseDelayForTesting time.Duration
 	ResponseDeliveryForTesting    func(context.Context, string) error
 	testEnvironment               []string
@@ -1100,6 +1101,12 @@ func prepareDaemonCommand(options Options) (*exec.Cmd, *os.File, *os.File, error
 	}
 	if options.ObjectDelayProfileForTesting != "" {
 		cmd.Env = append(cmd.Env, "VAULTICDB_TEST_OBJECT_DELAY_PROFILE="+options.ObjectDelayProfileForTesting)
+	}
+	if options.ReadAdmissionTraceForTesting {
+		if !filepath.IsAbs(options.Socket) {
+			return nil, nil, nil, fmt.Errorf("read admission trace requires an absolute daemon socket path")
+		}
+		cmd.Env = append(cmd.Env, "VAULTIC_DIAGNOSTIC_READ_ADMISSION="+filepath.Join(filepath.Dir(options.Socket), "read-admission.bin"))
 	}
 	if len(options.testEnvironment) != 0 || options.AttributionDisabledForTesting || options.ObjectDelayProfileForTesting != "" {
 		cmd.Env = append(cmd.Env, "VAULTICDB_TEST_CAPABILITY=vaulticdb-process-tests-v1")

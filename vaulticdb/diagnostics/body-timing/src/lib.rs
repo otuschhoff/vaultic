@@ -34,6 +34,143 @@ mod scheduler_tag {
     }
 }
 
+#[cfg(target_os = "linux")]
+mod admission_trace {
+    use std::fs::{File, OpenOptions};
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::sync::{Mutex, OnceLock};
+
+    const LIMIT: usize = 16 << 20;
+    const RECORD_BYTES: usize = 24;
+    const ENV: &str = "VAULTIC_DIAGNOSTIC_READ_ADMISSION";
+    static RECORDS: OnceLock<Option<Mutex<Records>>> = OnceLock::new();
+
+    struct Records {
+        file: File,
+        remaining: usize,
+    }
+
+    fn monotonic_ns() -> Option<u64> {
+        let mut stamp = std::mem::MaybeUninit::<libc::timespec>::uninit();
+        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, stamp.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        let stamp = unsafe { stamp.assume_init() };
+        u64::try_from(stamp.tv_sec)
+            .ok()?
+            .checked_mul(1_000_000_000)?
+            .checked_add(u64::try_from(stamp.tv_nsec).ok()?)
+    }
+
+    fn open_records() -> Option<Mutex<Records>> {
+        let Some(path) = std::env::var_os(ENV) else {
+            return None;
+        };
+        let opened = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .and_then(|file| {
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+                Ok(file)
+            });
+        match opened {
+            Ok(file) => Some(Mutex::new(Records {
+                file,
+                remaining: LIMIT,
+            })),
+            Err(error) => {
+                eprintln!("native read admission trace rejected: {error}");
+                None
+            }
+        }
+    }
+
+    pub(super) fn submit() -> Option<u64> {
+        RECORDS.get_or_init(open_records).as_ref()?;
+        monotonic_ns()
+    }
+
+    pub(super) fn start(submitted: Option<u64>) {
+        let Some(submitted) = submitted else {
+            return;
+        };
+        let Some(started) = monotonic_ns() else {
+            return;
+        };
+        let tid = unsafe { libc::syscall(libc::SYS_gettid) };
+        if tid <= 0 {
+            return;
+        }
+        let Some(records) = RECORDS.get().and_then(Option::as_ref) else {
+            return;
+        };
+        if let Ok(mut records) = records.lock() {
+            if let Err(error) = records.record(submitted, started, tid as u64) {
+                eprintln!("native read admission trace rejected: {error}");
+            }
+        }
+    }
+
+    impl Records {
+        fn record(&mut self, submitted: u64, started: u64, tid: u64) -> std::io::Result<()> {
+            if self.remaining == 0 {
+                return Ok(());
+            }
+            if self.remaining < RECORD_BYTES {
+                self.remaining = 0;
+                return Err(std::io::Error::other("byte limit reached"));
+            }
+            let mut record = [0; RECORD_BYTES];
+            for (field, value) in record.chunks_exact_mut(8).zip([submitted, started, tid]) {
+                field.copy_from_slice(&value.to_le_bytes());
+            }
+            if let Err(error) = self.file.write_all(&record) {
+                self.remaining = 0;
+                return Err(error);
+            }
+            self.remaining -= RECORD_BYTES;
+            Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn records_use_ordered_monotonic_time_and_stop_at_cap() {
+        let path = std::env::temp_dir().join(format!("vaultic-admission-{}", std::process::id()));
+        let file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let mut records = Records {
+            file,
+            remaining: RECORD_BYTES + 1,
+        };
+        let submitted = monotonic_ns().unwrap();
+        let started = monotonic_ns().unwrap();
+        assert!(started >= submitted && submitted > 0);
+        records.record(submitted, started, 123).unwrap();
+        assert!(records.record(submitted, started, 124).is_err());
+        records.record(submitted, started, 125).unwrap();
+        drop(records);
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(bytes.len(), RECORD_BYTES);
+        assert_eq!(
+            u64::from_le_bytes(bytes[..8].try_into().unwrap()),
+            submitted
+        );
+        assert_eq!(
+            u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+            started
+        );
+        assert_eq!(u64::from_le_bytes(bytes[16..].try_into().unwrap()), 123);
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct FileReadMetrics {
     calls: AtomicU64,
@@ -187,6 +324,8 @@ impl FileReadObservation {
         FileReadWorker {
             metrics: self.0.clone(),
             submitted,
+            #[cfg(target_os = "linux")]
+            admission_submitted: blocking.then(admission_trace::submit).flatten(),
             blocking,
             started: None,
             finished: false,
@@ -198,6 +337,8 @@ impl FileReadObservation {
 pub struct FileReadWorker {
     metrics: Arc<FileReadMetrics>,
     submitted: Instant,
+    #[cfg(target_os = "linux")]
+    admission_submitted: Option<u64>,
     blocking: bool,
     started: Option<Instant>,
     finished: bool,
@@ -246,7 +387,10 @@ impl FileReadWorker {
                 started.duration_since(self.submitted),
             );
             #[cfg(target_os = "linux")]
-            scheduler_tag::mark();
+            {
+                admission_trace::start(self.admission_submitted);
+                scheduler_tag::mark();
+            }
         }
         self.metrics.started.fetch_add(1, Ordering::Relaxed);
         self.started = Some(Instant::now());
