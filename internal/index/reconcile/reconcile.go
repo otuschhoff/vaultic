@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime/trace"
 	"sort"
 	"strings"
 	"sync"
@@ -1296,7 +1297,9 @@ func (reconciler *Reconciler) prefetchExistingPublicationRecords(items []prepare
 		}
 	}
 	started := time.Now()
+	pointerRegion := trace.StartRegion(reconciler.ctx, "vaultic.reconcile.prefetch.pointer_lookup")
 	values, found, err := reconciler.lookup(keys, &reconciler.pointerLookup)
+	pointerRegion.End()
 	reconciler.existingRecordLookupNS.Add(uint64(time.Since(started)))
 	if err != nil || len(values) != len(items) || len(found) != len(items) {
 		return
@@ -1320,7 +1323,9 @@ func (reconciler *Reconciler) prefetchExistingPublicationRecords(items []prepare
 	if len(revisionKeys) == 0 || reconciler.options.ScalarRevisionReads {
 		return
 	}
+	revisionRegion := trace.StartRegion(reconciler.ctx, "vaultic.reconcile.prefetch.revision_lookup")
 	revisions, revisionFound, err := reconciler.lookup(revisionKeys, &reconciler.revisionLookup)
+	revisionRegion.End()
 	if err != nil || len(revisions) != len(indices) || len(revisionFound) != len(indices) {
 		return
 	}
@@ -1443,6 +1448,7 @@ func (reconciler *Reconciler) publishHardlinks(
 }
 
 func (reconciler *Reconciler) publishDirectories(directories []preparedItem, published map[string]publishedItem) {
+	defer trace.StartRegion(reconciler.ctx, "vaultic.reconcile.directories").End()
 	if err := reconciler.ctx.Err(); err != nil {
 		reconciler.fail("directories", err)
 		return
@@ -1451,15 +1457,19 @@ func (reconciler *Reconciler) publishDirectories(directories []preparedItem, pub
 		reconciler.fail("directories", err)
 		return
 	}
+	indexRegion := trace.StartRegion(reconciler.ctx, "vaultic.reconcile.directories.index_children")
 	childrenByParent := make(map[string][]string)
 	for sourcePath := range published {
 		if err := reconciler.ctx.Err(); err != nil {
+			indexRegion.End()
 			reconciler.fail("directories", err)
 			return
 		}
 		parent := reconciler.filesystem.Dir(sourcePath)
 		childrenByParent[parent] = append(childrenByParent[parent], sourcePath)
 	}
+	indexRegion.End()
+	sortRegion := trace.StartRegion(reconciler.ctx, "vaultic.reconcile.directories.sort")
 	sort.Slice(directories, func(left, right int) bool {
 		leftDepth, rightDepth := pathDepth(directories[left].sourcePath), pathDepth(directories[right].sourcePath)
 		if leftDepth != rightDepth {
@@ -1467,9 +1477,12 @@ func (reconciler *Reconciler) publishDirectories(directories []preparedItem, pub
 		}
 		return directories[left].sourcePath < directories[right].sourcePath
 	})
+	sortRegion.End()
 	type pendingDirectory struct {
-		item  preparedItem
-		value []byte
+		item         preparedItem
+		value        []byte
+		depth        int
+		snapshotPath string
 	}
 	groupSize := reconciler.options.PublicationGroupSize
 	if groupSize == 0 {
@@ -1480,11 +1493,16 @@ func (reconciler *Reconciler) publishDirectories(directories []preparedItem, pub
 		if len(pending) == 0 {
 			return
 		}
+		setupRegion := trace.StartRegion(reconciler.ctx, "vaultic.reconcile.directories.group_setup")
 		items := make([]preparedItem, len(pending))
 		for index, entry := range pending {
 			items[index] = entry.item
 		}
+		setupRegion.End()
+		prefetchRegion := trace.StartRegion(reconciler.ctx, "vaultic.reconcile.directories.prefetch")
 		reconciler.prefetchExistingPublicationRecords(items)
+		prefetchRegion.End()
+		setupRegion = trace.StartRegion(reconciler.ctx, "vaultic.reconcile.directories.group_setup")
 		for index := range pending {
 			pending[index].item = items[index]
 		}
@@ -1522,6 +1540,8 @@ func (reconciler *Reconciler) publishDirectories(directories []preparedItem, pub
 			}
 		}
 		var workers sync.WaitGroup
+		setupRegion.End()
+		workersRegion := trace.StartRegion(reconciler.ctx, "vaultic.reconcile.directories.workers")
 		for index, entry := range pending {
 			workers.Go(func() {
 				results[index].key, results[index].reused, results[index].err =
@@ -1529,6 +1549,8 @@ func (reconciler *Reconciler) publishDirectories(directories []preparedItem, pub
 			})
 		}
 		workers.Wait()
+		workersRegion.End()
+		resultsRegion := trace.StartRegion(reconciler.ctx, "vaultic.reconcile.directories.group_results")
 		for index, entry := range pending {
 			directory := entry.item
 			result := results[index]
@@ -1552,6 +1574,7 @@ func (reconciler *Reconciler) publishDirectories(directories []preparedItem, pub
 			}
 		}
 		pending = pending[:0]
+		resultsRegion.End()
 	}
 	for _, directory := range directories {
 		if err := reconciler.ctx.Err(); err != nil {
@@ -1559,18 +1582,28 @@ func (reconciler *Reconciler) publishDirectories(directories []preparedItem, pub
 			reconciler.fail(directory.sourcePath, err)
 			return
 		}
+		compatibilityRegion := trace.StartRegion(reconciler.ctx, "vaultic.reconcile.directories.group_compatibility")
+		depth := pathDepth(directory.sourcePath)
+		snapshotPath := normalizeSnapshotPath(directory.snapshotPath)
+		conflict := false
 		for _, entry := range pending {
-			if pathDepth(entry.item.sourcePath) != pathDepth(directory.sourcePath) ||
+			if entry.depth != depth ||
 				entry.item.identity == directory.identity || entry.item.parent == directory.identity ||
 				directory.parent == entry.item.identity || entry.item.sourcePath == directory.sourcePath ||
-				normalizeSnapshotPath(entry.item.snapshotPath) == normalizeSnapshotPath(directory.snapshotPath) {
-				flush()
+				entry.snapshotPath == snapshotPath {
+				conflict = true
 				break
 			}
 		}
+		compatibilityRegion.End()
+		if conflict {
+			flush()
+		}
+		assembleRegion := trace.StartRegion(reconciler.ctx, "vaultic.reconcile.directories.assemble_record")
 		children := make([]schema.DirectoryChild, 0)
 		for _, sourcePath := range childrenByParent[directory.sourcePath] {
 			if err := reconciler.ctx.Err(); err != nil {
+				assembleRegion.End()
 				flush()
 				reconciler.fail(directory.sourcePath, err)
 				return
@@ -1604,15 +1637,18 @@ func (reconciler *Reconciler) publishDirectories(directories []preparedItem, pub
 			Mode: uint32(directory.stat.Mode), UID: directory.stat.UID, GID: directory.stat.GID,
 			Known: known,
 
-			SourcePath: normalizeSnapshotPath(directory.snapshotPath), Freshness: schema.FreshnessVerified,
+			SourcePath: snapshotPath, Freshness: schema.FreshnessVerified,
 		}
+		assembleRegion.End()
+		encodeRegion := trace.StartRegion(reconciler.ctx, "vaultic.reconcile.directories.encode_record")
 		value, err := record.MarshalBinary()
+		encodeRegion.End()
 		if err != nil {
 			flush()
 			reconciler.fail(directory.sourcePath, err, directory.debtKeys)
 			continue
 		}
-		pending = append(pending, pendingDirectory{item: directory, value: value})
+		pending = append(pending, pendingDirectory{item: directory, value: value, depth: depth, snapshotPath: snapshotPath})
 		if len(pending) == groupSize {
 			flush()
 		}

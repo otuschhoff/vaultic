@@ -101,9 +101,20 @@ ORIGIN_FILE_RANGE_BIN = WORKSPACE / 'bin/phase35-ncl1-origin-file-range800k-2026
 ORIGIN_FILE_PERF_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-origin-file-perf-fme-cae1-20261118-800k')
 ORIGIN_FILE_PERF_RETRY_ROOT = ORIGIN_FILE_PERF_ROOT.with_name(ORIGIN_FILE_PERF_ROOT.name + '-retry2')
 ORIGIN_FILE_PERF_DRAIN_ROOT = ORIGIN_FILE_PERF_ROOT.with_name(ORIGIN_FILE_PERF_ROOT.name + '-retry3')
-ADMISSION_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-admission-fme-cae1-20261118-800k-retry2')
-ADMISSION_BIN = WORKSPACE / 'bin/phase35-ncl1-admission800k-20261118-retry2/linux-amd64'
-ORIGIN_FILE_PERF_ROOTS = (ORIGIN_FILE_PERF_ROOT, ORIGIN_FILE_PERF_RETRY_ROOT, ORIGIN_FILE_PERF_DRAIN_ROOT, ADMISSION_ROOT)
+PREVIOUS_ADMISSION_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-admission-fme-cae1-20261118-800k-retry2')
+PHASE_ADMISSION_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-admission-fme-cae1-20261118-800k-phases')
+DIRECTORY_ADMISSION_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-admission-fme-cae1-20261120-800k-directories')
+ADMISSION_ROOT = Path('/volume2/NASDA2/vaultic-test-m6/ncl1-admission-fme-cae1-20261120-800k-dir-split')
+ADMISSION_BIN = WORKSPACE / 'bin/phase35-ncl1-admission800k-20261120-dir-split/linux-amd64'
+DIRECTORY_PAIR = {
+    'leg-01-dir-control': 'control',
+    'leg-02-dir-candidate': 'candidate',
+}
+DIRECTORY_PAIR_ROOTS = {label: ADMISSION_ROOT.with_name(ADMISSION_ROOT.name + '-' + variant)
+                        for label, variant in DIRECTORY_PAIR.items()}
+ORIGIN_FILE_PERF_ROOTS = (ORIGIN_FILE_PERF_ROOT, ORIGIN_FILE_PERF_RETRY_ROOT, ORIGIN_FILE_PERF_DRAIN_ROOT,
+                          PREVIOUS_ADMISSION_ROOT, PHASE_ADMISSION_ROOT, DIRECTORY_ADMISSION_ROOT, ADMISSION_ROOT,
+                          *DIRECTORY_PAIR_ROOTS.values())
 ORIGIN_FILE_ROOTS = (ORIGIN_FILE_ROOT, ORIGIN_FILE_LIVE_ROOT, ORIGIN_FILE_RUNTIME_ROOT, ORIGIN_FILE_RANGE_ROOT, *ORIGIN_FILE_PERF_ROOTS)
 ORIGIN_OUTCOME_COUNTERS = ('ciphertext_origin_request_successes', 'ciphertext_origin_request_not_found',
                            'ciphertext_origin_request_errors', 'ciphertext_origin_request_cancellations',
@@ -246,7 +257,9 @@ def producer_leg(label):
     if label == 'leg-03-file-perf':
         return ORIGIN_FILE_PERF_DRAIN_ROOT / label, Path('/run/vaultic-unchanged-ncl1-perf3'), 56
     if label == 'leg-01-read-admission':
-        return ADMISSION_ROOT / label, Path('/run/vaultic-unchanged-ncl1-admit-r2'), 56
+        return ADMISSION_ROOT / label, Path('/run/vaultic-unchanged-ncl1-dir-split'), 56
+    if label in DIRECTORY_PAIR:
+        return DIRECTORY_PAIR_ROOTS[label] / label, Path('/run/vaultic-unchanged-ncl1-dir-' + DIRECTORY_PAIR[label]), 56
     raise ValueError('producer comparison requires its exact scheduled private leg')
 
 
@@ -369,6 +382,8 @@ def binaries(profile):
             bundle = ORIGIN_FILE_RANGE_BIN
         if root.parent == ADMISSION_ROOT:
             bundle = ADMISSION_BIN
+        if root.name in DIRECTORY_PAIR:
+            bundle = ADMISSION_BIN.parent.with_name(ADMISSION_BIN.parent.name + '-' + DIRECTORY_PAIR[root.name]) / ADMISSION_BIN.name
         return bundle / 'vaultic', bundle / 'vaulticdb'
     if os.environ.get('VAULTIC_PHASE35_RAM64_LEG'):
         original_parent_selected()
@@ -1304,11 +1319,15 @@ def verify_perf_read_attribution(root, measured, capture):
     for name in ('read_calls', 'read_bytes'):
         if not 0 < main[name] <= current[name] or endpoint[name] > after[name]:
             raise ValueError('perf trace window is outside authenticated counter bounds')
+    positional_only = root.parent in (PHASE_ADMISSION_ROOT, DIRECTORY_ADMISSION_ROOT, ADMISSION_ROOT, *DIRECTORY_PAIR_ROOTS.values())
     decoded = analyze_recording(leg / 'perf.data', capture['pid'], perf_fixture_files(leg / 'db'),
-                                (current['read_calls'], current['read_bytes']))
+                                (current['read_calls'], current['read_bytes']), positional_only=positional_only)
     if decoded['syscalls'] != capture['pread64_entries']:
         raise ValueError('perf decoded syscall total differs from the capture receipt')
-    return dict(decoded, scope='daemon command window, approved NFS objects; not RPC or exclusive wall time')
+    report = dict(decoded, scope='daemon command window, approved NFS objects; not RPC or exclusive wall time')
+    if positional_only:
+        report['scheduler_attribution'] = False
+    return report
 
 
 def bottleneck_report(critical):
@@ -1521,7 +1540,7 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
                 require_origin_read_coverage(deltas, **origin_policy)
     if inode_limit == 800000:
         require_cache_reuse(critical['reconciliation'], expected_entries, None if identities is None else identities['metadata_records'])
-        if root.parent == ADMISSION_ROOT:
+        if root.parent in (ADMISSION_ROOT, *DIRECTORY_PAIR_ROOTS.values()):
             leg = root / 'group-64/forced'
             for name, limit in (('trace.out', 512 << 20), ('trace.complete', 32), ('read-admission.bin', 16 << 20)):
                 info = (leg / name).lstat()

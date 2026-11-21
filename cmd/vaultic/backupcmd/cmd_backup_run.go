@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"runtime/trace"
 	"sort"
 	"strings"
 	"sync"
@@ -1450,7 +1451,10 @@ func configureBackupScanner(ctx context.Context, run *backupRun, byName archiver
 	if !run.globalOptions.JSON {
 		run.printer.V("start scan on %v", run.targets)
 	}
-	run.group.Go(func() error { return scanner.Scan(ctx, run.targets) })
+	run.group.Go(func() error {
+		defer trace.StartRegion(ctx, "vaultic.backup.source.scan").End()
+		return scanner.Scan(ctx, run.targets)
+	})
 }
 
 func configureBackupHooks(ctx context.Context, run *backupRun) error {
@@ -1503,6 +1507,7 @@ func configureReconciliationHooks(ctx context.Context, run *backupRun) error {
 		run.reconciler = reconciler
 		reconcile.Attach(run.archiver, reconciler)
 		run.hooks.beforeSnapshot = func() error {
+			defer trace.StartRegion(ctx, "vaultic.backup.reconcile.drain").End()
 			if err := reconciler.Close(); err != nil {
 				return err
 			}
@@ -1643,7 +1648,9 @@ func executeBackup(run *backupRun) error {
 		run.printer.V("start backup on %v", run.targets)
 	}
 	var err error
+	snapshotRegion := trace.StartRegion(run.ctx, "vaultic.backup.snapshot")
 	run.snapshot, run.snapshotID, run.summary, err = run.archiver.Snapshot(run.ctx, run.targets, run.snapshotOpts)
+	snapshotRegion.End()
 	if err == nil && !run.options.DryRun && run.repositorySession != nil && run.repositorySession.createdSnapshots != nil && !run.snapshotID.IsNull() {
 		run.repositorySession.createdSnapshots.Insert(run.snapshotID)
 	}
@@ -1723,6 +1730,7 @@ func publishReconciledBackup(run *backupRun, snapshotErr error) error {
 	if len(rootKey) == 0 {
 		return fmt.Errorf("reconcile authoritative snapshot metadata: missing snapshot root")
 	}
+	defer trace.StartRegion(run.ctx, "vaultic.backup.reconcile.publish").End()
 	if err := run.authoritativeEngine.PublishSnapshotScope(run.ctx, run.snapshotID, rootKey); err != nil {
 		return fmt.Errorf("publish authoritative snapshot scope: %w", err)
 	}

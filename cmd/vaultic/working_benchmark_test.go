@@ -1020,9 +1020,22 @@ const publicationOriginFileRange800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1
 const publicationOriginFileRange800kBin = "/root/proj/vaultic/bin/phase35-ncl1-origin-file-range800k-20261117/linux-amd64"
 const publicationOriginFilePerf800kRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-origin-file-perf-fme-cae1-20261118-800k-retry3"
 const publicationOriginFilePerfLeg = "leg-03-file-perf"
-const publicationAdmissionRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-admission-fme-cae1-20261118-800k-retry2"
+const publicationAdmissionRoot = "/volume2/NASDA2/vaultic-test-m6/ncl1-admission-fme-cae1-20261120-800k-dir-split"
 const publicationAdmissionLeg = "leg-01-read-admission"
-const publicationAdmissionBin = "/root/proj/vaultic/bin/phase35-ncl1-admission800k-20261118-retry2/linux-amd64"
+const publicationAdmissionBin = "/root/proj/vaultic/bin/phase35-ncl1-admission800k-20261120-dir-split/linux-amd64"
+
+func publicationAdmissionBundle(root string) string {
+	switch root {
+	case filepath.Join(publicationAdmissionRoot, publicationAdmissionLeg):
+		return publicationAdmissionBin
+	case filepath.Join(publicationAdmissionRoot+"-control", "leg-01-dir-control"):
+		return filepath.Join(filepath.Dir(publicationAdmissionBin)+"-control", filepath.Base(publicationAdmissionBin))
+	case filepath.Join(publicationAdmissionRoot+"-candidate", "leg-02-dir-candidate"):
+		return filepath.Join(filepath.Dir(publicationAdmissionBin)+"-candidate", filepath.Base(publicationAdmissionBin))
+	default:
+		return ""
+	}
+}
 const publicationAdmissionGoMax = 512 << 20
 
 func publicationFileReadGate(ctx context.Context, root string, before daemon.WriterStatus, after *daemon.WriterStatus, critical json.RawMessage) (json.RawMessage, error) {
@@ -1120,7 +1133,7 @@ func publicationProducerLeg(root, label string) (int, error) {
 	if label == publicationOriginFilePerfLeg && root == filepath.Join(publicationOriginFilePerf800kRoot, label) {
 		return 56, nil
 	}
-	if label == publicationAdmissionLeg && root == filepath.Join(publicationAdmissionRoot, label) {
+	if filepath.Base(root) == label && publicationAdmissionBundle(root) != "" {
 		return 56, nil
 	}
 	return 0, fmt.Errorf("producer comparison requires its exact scheduled private leg")
@@ -1134,6 +1147,8 @@ func TestPublicationOriginFilePolicy(t *testing.T) {
 		{publicationOriginFileRange800kRoot, "leg-01-file-range"},
 		{publicationOriginFilePerf800kRoot, publicationOriginFilePerfLeg},
 		{publicationAdmissionRoot, publicationAdmissionLeg},
+		{publicationAdmissionRoot + "-control", "leg-01-dir-control"},
+		{publicationAdmissionRoot + "-candidate", "leg-02-dir-candidate"},
 	} {
 		t.Run(route.label, func(t *testing.T) {
 			for _, key := range []string{"VAULTIC_PHASE35_READERS_LEG", "VAULTIC_PHASE35_RAM32_LEG", "VAULTIC_PHASE35_RAM64_LEG", "VAULTIC_PHASE35_ORIGINAL_PARENT", "VAULTIC_PHASE35_PRODUCER_LEG"} {
@@ -3347,8 +3362,8 @@ func TestPublicationForceComparisonRetry(t *testing.T) {
 				root == filepath.Join(publicationOriginFilePerf800kRoot, publicationOriginFilePerfLeg) {
 				candidate, binary = filepath.Join(publicationOriginFileRange800kBin, "vaultic"), filepath.Join(publicationOriginFileRange800kBin, "vaulticdb")
 			}
-			if root == filepath.Join(publicationAdmissionRoot, publicationAdmissionLeg) {
-				candidate, binary = filepath.Join(publicationAdmissionBin, "vaultic"), filepath.Join(publicationAdmissionBin, "vaulticdb")
+			if bundle := publicationAdmissionBundle(root); bundle != "" {
+				candidate, binary = filepath.Join(bundle, "vaultic"), filepath.Join(bundle, "vaulticdb")
 			}
 		}
 		if os.Getenv("VAULTIC_PHASE35_RAM32_LEG") != "" {
@@ -4013,7 +4028,7 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 		}
 		modes = []bool{true}
 	}
-	admissionTiming := rawRoot == filepath.Join(publicationAdmissionRoot, publicationAdmissionLeg)
+	admissionTiming := publicationAdmissionBundle(rawRoot) != ""
 	perfTiming := admissionTiming || rawRoot == filepath.Join(publicationOriginFilePerf800kRoot, publicationOriginFilePerfLeg)
 	if perfTiming && (!original || len(paths) != 800_000 || len(modes) != 1 || !modes[0]) {
 		t.Fatal("perf trace requires the exact guarded forced 800k comparison")

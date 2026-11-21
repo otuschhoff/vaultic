@@ -2223,6 +2223,49 @@ func TestDaemonBackedDirectoryPublication(t *testing.T) {
 	}
 }
 
+func BenchmarkPublishUnchangedDirectoryGroups(b *testing.B) {
+	const siblings = 4096
+	for _, width := range []int{4, 64} {
+		b.Run(fmt.Sprintf("width%d", width), func(b *testing.B) {
+			reconciler := &Reconciler{
+				ctx: context.Background(), filesystem: testFilesystem(), store: newFakeStore(),
+				options: Options{PublicationGroupSize: width},
+			}
+			directories := make([]preparedItem, 0, siblings+1)
+			for index := range siblings {
+				inode := uint64(index + 10)
+				directories = append(directories, preparedItem{
+					workItem: workItem{
+						sourcePath:   fmt.Sprintf("/source/project/revision/design/blocks/directory-%04d", index),
+						snapshotPath: fmt.Sprintf("/snapshot/project/revision/design/blocks/directory-%04d", index),
+					},
+					identity: identity{fsid: 1, inode: inode}, parent: identity{fsid: 1, inode: 1}, stat: dirInfo(1, inode),
+				})
+			}
+			directories = append(directories, preparedItem{
+				workItem: workItem{sourcePath: "/source/project/revision/design/blocks", snapshotPath: "/snapshot/project/revision/design/blocks"},
+				identity: identity{fsid: 1, inode: 1}, parent: identity{fsid: 1, inode: 2}, stat: dirInfo(1, 1),
+			})
+			published := make(map[string]publishedItem, len(directories))
+			reconciler.publishDirectories(directories, published)
+			seeded := reconciler.Metrics()
+			if seeded.Changed != uint64(len(directories)) || len(reconciler.errors) != 0 {
+				b.Fatalf("seeded %d directories, errors=%v", seeded.Changed, reconciler.errors)
+			}
+			for b.Loop() {
+				clear(published)
+				reconciler.publishDirectories(directories, published)
+			}
+			final := reconciler.Metrics()
+			if len(reconciler.errors) != 0 || len(published) != len(directories) ||
+				final.Reused-seeded.Reused != uint64(b.N*len(directories)) || final.Changed != seeded.Changed ||
+				final.DirectoryPublicationCalls != seeded.DirectoryPublicationCalls || final.RevisionsReserved != seeded.RevisionsReserved {
+				b.Fatalf("unchanged publication mismatch: before=%+v after=%+v errors=%v", seeded, final, reconciler.errors)
+			}
+		})
+	}
+}
+
 func TestPublishDirectoriesCancelsDuringParentIndex(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

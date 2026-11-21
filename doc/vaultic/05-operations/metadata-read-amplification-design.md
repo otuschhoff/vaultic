@@ -3762,8 +3762,208 @@ edge inside a positional syscall. The sealed series under
 attribution. A separate positional-only replay verified 152,346 syscall
 pairs and matched 152,305 reads and 40,753,978,820 bytes exactly against
 the authenticated command window. It does not report off-CPU timing or
-change the rejection. The full Go/native admission join was not qualified,
-so this run does not explain the gaps or justify a concurrency change.
+change the rejection.
+
+The first joined replay hit the Go trace decoder's time limit while formatting
+the full trace. A selective extractor using the same installed Go trace
+reader decoded to EOF and matched all 85,985 reported size RPCs. It joined
+152,096 reads to unique same-thread native starts, excluding 209 first reads
+on a thread from admission timing because startup records precede perf.
+Native submission-to-start p99 for joined reads was 97.9 microseconds.
+There were 145.561 seconds at zero matched depth over a 298.821-second span.
+Of those gap seconds, 1.924 overlapped native queued reads, 0.318 overlapped
+a CLI lookup-slot wait, and 68.137 overlapped an in-flight size RPC. These
+intervals can overlap one another and cover only the recorded stages. They
+do not establish the cause of the gaps or imply that NASDA2 was idle.
+Keep the current limits; the measured queue overlaps do not support raising
+the CLI slot cap or native blocking pool as the first experiment.
+
+The sealed retry 2 replay also split the 25,960 gaps by duration. Times below
+are mutually exclusive: an in-flight size RPC takes precedence; queue/slot
+time is counted only outside RPCs; the remainder is unclassified. A ready
+event is a point, not a measured wait duration.
+
+| Gap Duration | Gaps | Total Seconds | RPC Seconds | Queue/Slot Outside RPC Seconds | Unclassified Seconds |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Under 1 ms | 9,650 | 3.579 | 3.578 | <0.001 | 0.001 |
+| 1 to under 10 ms | 14,457 | 47.242 | 42.923 | 0.039 | 4.280 |
+| 10 to under 100 ms | 1,716 | 44.590 | 18.243 | 0.046 | 26.301 |
+| 100 ms to under 1 s | 132 | 26.849 | 3.337 | 0.008 | 23.505 |
+| At least 1 s | 5 | 23.302 | 0.058 | <0.001 | 23.244 |
+| Total | 25,960 | 145.561 | 68.137 | 0.093 | 77.330 |
+
+3,536 gaps contained a ready event outside any size RPC; 668 contained
+neither an in-flight RPC nor a ready event. The longest gap (17.173 s) fell
+in the latter group. This points to different measurements for short gaps
+inside RPCs and longer gaps outside them. It does not show whether an
+emitted batch remained pending or whether the NAS was idle.
+
+The backup now emits opt-in Go trace regions for the progress source scan,
+the enclosing archiver snapshot call, the authoritative reconciliation drain,
+and the final scope publication. Small ordinary and authoritative backup and
+restore tests emitted balanced pairs for all four. The scan is not the whole
+archiver traversal, the drain is not the whole reconciliation pipeline, and
+the regions can overlap. Use them to narrow the long-gap boundary, then add
+markers inside the owning phase only as needed. For short gaps inside RPCs,
+the next refinement is daemon receipt, read-plan completion, and first
+submission. Do not select a throughput candidate solely from overlaps;
+compare a concrete change only after verifying the affected phase on the
+direct NCL1 source with the same parent and disposable NASDA2 output.
+
+The next direct-source phase capture passed backup, verified restore,
+encrypted reopen, source-integrity checks, and exact positional replay:
+152,309 matched reads and 40,755,027,460 bytes. It took 494.535 seconds main
+and 501.881 seconds for the command. This is a diagnostic leg, not a paired
+performance comparison. Scheduler attribution was not attempted.
+
+The first phase replay incorrectly required the optional progress scan even
+though the command used `--no-scan`. Replaying the same sealed artifacts with
+that expectation corrected required one balanced snapshot, drain, and
+publication region, and matched all 116,187 reported size RPCs. The 33,714
+gaps totaled 331.972 seconds over a 500.551-second span. Of that gap time,
+119.091 seconds overlapped size RPCs and 212.707 seconds were unclassified
+after accounting for RPCs and recorded queues. The longest gap (17.717 s)
+overlapped the reconciliation drain for 17.512 seconds and final scope
+publication for 0.099 seconds. Drain accounted for 20.952 of the 38.900 gap
+seconds in gaps at least one second long; other multi-second gaps occurred
+inside the snapshot but outside the drain. These are phase overlaps, not
+exclusive costs or a storage saturation result. Inspect the work inside the
+reconciliation drain before changing concurrency to address the longest gap.
+
+The retained 480-second writer sample was in `publish_directories` and had
+been there for 17.621 seconds. Final writer counters recorded 30.056 seconds
+in that phase, 1.873 seconds in root finalization, and 0.213 seconds in
+hardlink finalization. They also recorded 799,076 reused records, zero
+changed records, and zero directory publication calls. The directory phase
+name therefore does not imply a write bottleneck. There are no same-clock
+subphase boundaries for it in that capture.
+
+Directory finalization now emits Go trace regions around the full method,
+grouped existing-record prefetch, and worker dispatch through join. The last
+region includes reuse checks and any writes; it is not a storage-write
+timer. Directory index, independent sibling overlap, and cancellation
+fixtures emitted balanced regions. In a future capture, compare the longest
+drain gap with these intervals; time outside prefetch and workers is not
+automatically attributable to preparation or encoding.
+
+The 2026-11-20 directory capture passed backup, verified restore, encrypted
+reopen, source integrity, and both evidence seals. It ran directly on NCL1
+with unchanged settings: 288.185 seconds main, 295.483 seconds command,
+152,311 exactly matched reads and 40,755,551,780 bytes, and all 81,613
+reported size RPCs reconciled. The writer recorded 31.164 seconds in
+directory finalization, 799,076 reused records, zero changes, and zero
+directory publication calls. This was not a paired timing comparison.
+
+Of the longest 18.994-second gap, 18.792 seconds overlapped reconciliation
+drain and 16.774 overlapped directory finalization. Within the directory
+overlap, 8.961 seconds fell inside grouped prefetch, 0.400 inside worker
+dispatch through join, and 7.414 outside both regions. Across all gaps,
+directory finalization overlapped 30.877 seconds, of which 15.389 were
+prefetch and 0.631 were workers. The residual is not measured preparation
+time. There was no matched read in flight in these gap intervals, but
+other operations could be active. The grouped prefetch currently batches
+current pointers first and then batches dependent revision lookups; split
+those two waits and measure child indexing, sorting, and record encoding
+before changing group width. Increasing directory worker concurrency is
+not the first candidate. The sealed series is
+`ncl1-admission-fme-cae1-20261120-800k-directories`.
+
+A read-only replay of the retained Go trace accounted for all 16.774 seconds
+of directory-writer overlap in that longest gap. Inside prefetch, the writer
+spent 3.965 seconds blocked at the current-pointer lookup's `select` and
+4.132 seconds at the dependent revision lookup's `select`. These are Go
+caller waits, not server service times. Prefetch also included 0.782 seconds
+in the Go `Running` state and 0.081 seconds runnable. Outside prefetch and
+workers, the writer was `Running` for 7.409 of the 7.414 seconds. `Running`
+is a Go scheduler state, not measured CPU time, and the retained markers do
+not split this interval by operation.
+
+The follow-up markers bracket those two lookup calls separately, and split
+out child indexing, directory sorting, directory record assembly, and
+encoding. Assembly can also include cross-filesystem debt handling; it is
+not an exclusive CPU timer. The traced fixture exercised actual encrypted
+daemon publication and reopen, unchanged reuse without new commits, sibling
+publication, and cancellation during child indexing. It emitted balanced
+marker pairs. No new representative backup or concurrency change was made.
+
+The subsequent `ncl1-admission-fme-cae1-20261120-800k-dir-split` capture
+used the direct NCL1 source and the same controls. Both seals, verified
+restore, encrypted reopen, and source integrity passed. Replay exactly
+matched 152,310 reads and 40,755,289,620 bytes and reconciled 84,635 size
+RPCs. Main and command elapsed were 282.358 and 289.773 seconds. The
+writer reused 799,076 records, changed none, and made no directory
+publication calls. This unpaired run does not establish a speedup.
+
+In the longest gap (18.894 seconds), directory finalization overlapped
+16.681 seconds. Prefetch overlapped 8.691 seconds, including 4.109 seconds
+in current-pointer lookup and 4.377 in dependent revision lookup. Assembly
+overlapped 0.749 seconds, encoding 0.715, and workers 0.377; indexing and
+sorting did not overlap this gap. The disjoint markers leave 6.148 seconds
+unattributed within directory finalization. Sorting was the largest marked
+directory operation in the second-longest gap (1.170 of 2.399 seconds),
+with another 0.532 seconds in child indexing. Across all gaps, directory
+finalization overlapped 30.661 seconds, including 15.028 in prefetch and
+11.153 outside the marked subregions. These are elapsed overlaps, not CPU
+or storage service time.
+
+Keep worker and RPC limits fixed. Before another representative run, use
+a bounded unchanged-directory fixture to test whether group-compatibility
+checks account for the unmarked time. The pending-group loop recomputes
+depth and normalized paths for pairs of entries; measuring that loop
+separately would distinguish it from group setup and result bookkeeping.
+
+The bounded unchanged-directory fixture exercised 4,096 siblings and their
+parent against an in-memory store, excluding the initial seed from timing.
+At group width 64, the baseline traced medians were 295.6 ms for directory
+finalization, 228.9 ms for compatibility checks, 2.1 ms for group setup, and
+4.4 ms for result handling. The candidate computes cleaned depth and
+normalized snapshot path once per directory and leaves the conflict checks
+and flush boundaries unchanged.
+
+In eight untraced trials (ABBA then BAAB, five passes per trial), median
+width-64 elapsed fell from 281.4 to 69.7 ms per pass; width 4 moved from
+75.3 to 71.7 ms. Every measured pass reused all 4,097 records without new
+publication or revision allocation. The candidate also passed the real
+encrypted-daemon reuse and reopen test and the focused indexing, sibling
+publication, and cancellation tests. This establishes a local mechanism,
+which the representative pair below tests directly.
+
+One ordered control/candidate pair read `/ncl1-1-vs-50/fme_cae1` directly
+with the same sealed parent, selected input hash, native daemon, group width
+64, 56 blob tasks, 32 metadata-read slots, 1 ms coalescing and trace markers.
+The control Go overlay restored only the repeated path calculations. Both
+legs passed filtered restore, encrypted reopen and source identity checks;
+each reused 799,076 records, changed none, issued no directory publication
+calls and added no data blobs. Neither touched the production repository.
+
+| Measurement | Control | Cached paths |
+| --- | ---: | ---: |
+| Main backup | 287.240 s | 275.420 s |
+| Command elapsed | 294.390 s | 282.545 s |
+| Directory writer elapsed | 31.270 s | 19.077 s |
+| Compatibility overlap across no-read gaps | 10.478 s | 0.591 s |
+| Prefetch overlap across no-read gaps | 15.235 s | 12.784 s |
+| Longest gap with no matched read in flight | 18.500 s | 11.628 s |
+| Compatibility overlap in longest gap | 5.780 s | 0.347 s |
+| Total time with no matched read in flight | 134.067 s | 142.918 s |
+
+Each leg matched its authenticated command window exactly: 152,305 reads
+and 40,753,978,820 versus 40,753,454,576 bytes. Size RPCs were 85,146 versus
+86,773, so identical input does not mean identical read traffic. The 94%
+reduction in measured compatibility overlap and shorter directory phase
+support the path-caching mechanism on NCL1. Main elapsed was 11.820 s (4.1%)
+lower in this pair; fixed order, cache state and background load limit that
+estimate. Neither leg passed the 600 s sustained qualification gate. No
+matched read in flight does not imply an idle NAS or daemon, and the trace
+does not measure native scheduler time. Prefetch is now the largest measured
+directory overlap; these results do not justify raising concurrency caps.
+
+Both `DIAGNOSTIC-SHA256SUMS` and leg-local `FOLLOWUP-SHA256SUMS` were checked
+from their respective roots. The sealed series are under
+`/volume2/NASDA2/vaultic-test-m6/ncl1-admission-fme-cae1-20261120-800k-dir-split-control`
+and `/volume2/NASDA2/vaultic-test-m6/ncl1-admission-fme-cae1-20261120-800k-dir-split-candidate`.
+The local replay reports and paired summary are in
+`/run/vaultic-directory-pair-inputs-20261120`.
 
 All 46 legs, the read-depth replay, and the sweep inputs are retained under
 `/volume2/NASDA2/vaultic-test-m6/nasda2-headroom-20261118-v0ruxc9f`. Verify
