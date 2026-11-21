@@ -3965,6 +3965,156 @@ and `/volume2/NASDA2/vaultic-test-m6/ncl1-admission-fme-cae1-20261120-800k-dir-s
 The local replay reports and paired summary are in
 `/run/vaultic-directory-pair-inputs-20261120`.
 
+The follow-up directory prefetch attribution leg used the same direct source,
+input hash, sealed parent, group width, concurrency, cache settings and
+native daemon. It matched 152,302 positional reads and 40,753,192,340 bytes
+exactly to the authenticated command window. Restore, reopen, reuse of all
+799,076 records, zero new data and directory publications, both checksum
+seals and runtime cleanup verified. This was an attribution leg, not a
+matched throughput comparison.
+
+| Directory prefetch stage | Calls | Full width (64) | Found / requested | Caller elapsed | RPC elapsed | Server storage elapsed |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Pointer | 1,885 | 1,867 | 120,025 / 120,025 | 5.659 s | 5.566 s | 4.662 s |
+| Revision | 1,885 | 1,867 | 120,025 / 120,025 | 6.711 s | 6.631 s | 5.536 s |
+
+Both stages had zero failures and a validated timing sample for every call;
+their counts matched the same-writer prefetch trace regions. Server storage
+was 83.8% and 83.5% of RPC elapsed, respectively. The two stages had 1.978 s
+outside the server handler combined; eliminating a round trip would not by
+itself remove the 10.198 s measured inside storage. The 99.0% full batches
+also leave little room to improve occupancy at width 64. Finding a record
+does not imply a cache hit: the 769,853 block hits and 443,374 misses cover
+the whole command and cannot be assigned to either stage. Server storage
+elapsed includes engine work and waits, not just physical I/O.
+
+Prefetch overlapped 6.416 s of the longest 10.982 s gap without a matched
+read in flight. Across the command, size RPCs overlapped 74.807 s of
+143.557 s in such gaps; this remains a separate investigation, not proof
+of storage saturation. Before changing read policy, isolate per-stage block
+reuse and physical reads on the encrypted fixture. Only advance a candidate
+that reduces storage work or demonstrably overlaps independent work without
+changing publication order, then use a reverse-order direct-source pair.
+The sealed attribution series is under
+`/volume2/NASDA2/vaultic-test-m6/ncl1-admission-fme-cae1-20261120-800k-dir-split-prefetch`;
+the local receipts are in `/run/vaultic-directory-prefetch-inputs-20261121`.
+
+The opt-in encrypted directory fixture ran one 64-key batch per stage and
+repeated both stages, reopening the daemon to reverse their order. Each
+window verified one authenticated engine MultiGet with 64 keys and no open
+transaction or write intent. Local and private NASDA2 fixtures agreed:
+
+| Window | SlateDB block hits / misses | Positional file reads, 16 MiB chunk cache | Positional file reads, chunk cache disabled |
+| --- | ---: | ---: | ---: |
+| Pointer, first touch in either order | 0 / 1 | 0 | 1 (13,731 B) |
+| Revision, first touch in either order | 1 / 2 | 0 | 1 (13,731 B) |
+| Pointer repeat | 1 / 0 | 0 | 0 |
+| Revision repeat | 3 / 0 | 0 | 0 |
+
+With the chunk cache enabled, each first-touch window hit the same layer
+once without fetching an origin body. A SlateDB block miss therefore did
+not imply a positional read even on NASDA2. These counters measure file
+read calls, not NAS RPCs or physical media. Fresh daemon opens do not clear
+the OS cache and can populate the chunk cache before the window starts.
+The small fixture showed no order-dependent change in file work and does
+not justify tuning the representative cache.
+
+A same-clock replay of the sealed direct-source attribution leg classified
+every matched positional read by its full syscall interval. Pointer windows
+contained 30 reads (7,864,800 B, 0.016 s summed syscall time) and revision
+windows contained 246 reads (64,491,360 B, 0.267 s). No read crossed a stage
+boundary and none of these 276 reads overlapped a traced blob-size RPC.
+The remaining 152,026 reads and 40,680,836,180 B were outside both stages;
+the bins conserve the exact authenticated command totals. This is temporal
+overlap, not a request ID join. Syscall intervals exclude work before entry
+and after exit, and do not measure physical NAS media activity.
+
+The command added 270,285 chunk-cache hits, 151,783 misses, 86,398 evictions
+and 700 sampled refetches (against 1,632 sampled first fetches). These are
+shared cache counters, not attributable per stage in this capture; the
+refetch counters sample fingerprints and are not total fetch counts. The
+replay does not show enough accounted file work inside directory batches to
+prioritize reducing their file read count. To explain the remaining
+directory storage elapsed, separate cached engine work and waits before
+considering another cache knob. Investigate the much larger blob-size path
+separately. The replay and report are retained at
+`/run/vaultic-directory-file-overlap-20261121.py` and
+`/run/vaultic-directory-prefetch-inputs-20261121/prefetch-file-overlap.json`.
+
+A second replay split the union of each caller's windows into disjoint
+wall-time bins. A matched syscall takes precedence over a native admission
+interval for a joined read; the latter excludes first-on-thread reads that
+cannot be joined, but all exact positional reads remain in the syscall bin.
+
+| Caller windows | Total | Matched read active | Matched admission only | Neither observed |
+| --- | ---: | ---: | ---: | ---: |
+| Directory pointer | 5.657 s | 0.016 s | 0.002 s | 5.638 s |
+| Directory revision | 6.708 s | 0.265 s | 0.018 s | 6.425 s |
+| Blob-size RPC | 218.860 s | 144.053 s | 1.683 s | 73.124 s |
+
+During blob-size RPC activity, mean actual matched read depth was 5.86
+including zero-depth time, with peak 77. Mean RPC depth was 5.24 with
+peak 32. The peaks need not coincide. The 85,988 authenticated blob-size
+RPCs accounted for 1,140.864 s of summed RPC elapsed, of which 1,078.801 s
+(94.6%) was server storage. These are overlapping worker times, not wall
+time or additive to the table. The uncovered wall time is not proof of
+CPU work, source limitation, or idle storage. Source I/O timing here is
+also cumulative, without aligned source activity intervals.
+
+The native database-read timer includes taking the database read lock and
+awaiting the SlateDB read. It does not expose per-stage lock wait, cache
+processing, or unobserved async waits. Separating those components, and
+aligning source intervals with the blob-size windows, would distinguish
+the remaining hypotheses. The observed admission-only time does not
+justify changing queue limits. The disjoint replay report is retained at
+`/run/vaultic-directory-prefetch-inputs-20261121/prefetch-and-size-activity.json`.
+
+The next direct NCL1 attribution leg added same-clock source payload read
+regions and split the native database timer for authenticated directory
+MultiGets. It ran the same forced 800k input in 272.787 s of main backup
+time and matched 152,307 positional reads and 40,754,503,140 bytes exactly
+to the command counters. Both seals, restore, encrypted reopen, source
+identity, and runtime cleanup verified. The run reused all 799,076 records
+with zero new data blobs or directory publications and did not modify the
+production repository.
+
+| Directory stage | Validated samples | Storage elapsed | Outer read lock wait | SlateDB MultiGet elapsed |
+| --- | ---: | ---: | ---: | ---: |
+| Pointer | 1,885 | 5.267 s | 0.924 ms | 5.240 s |
+| Revision | 1,885 | 6.096 s | 0.857 ms | 6.039 s |
+
+Each stage requested and found 120,025 keys, with 1,867 full-width batches
+and no failures. The outer read lock took only 1.781 ms of the combined
+11.363 s storage elapsed, versus 11.279 s inside the SlateDB await. That
+rules out the outer lock as a meaningful target in this capture, not
+internal engine contention. Engine elapsed includes execution and waits.
+
+The source trace matched all 2,742,821 payload read calls. Their wall-time
+union was 165.469 s. Within the 216.114 s union of blob-size RPC windows,
+the replay separated source payload reads from matched NASDA2 positional
+reads on the same monotonic clock:
+
+| Observed activity during a blob-size RPC | Wall time |
+| --- | ---: |
+| Both source payload and NASDA2 positional reads | 92.642 s |
+| Source payload reads only | 54.406 s |
+| NASDA2 positional reads only | 52.056 s |
+| Neither observed | 17.010 s |
+
+Source reads overlapped 68.0% of active blob-size RPC time, including
+54.406 s of the 71.416 s with no matched positional read in flight. Source
+regions cover elapsed payload read calls, including scheduling, not source
+traversal or physical I/O. A missing matched positional read does not mean
+metadata processing stopped. Overlap does not establish a dependency or
+identify the throughput limiter. This short unpaired capture does not
+qualify a speedup or saturation claim. Prioritize profiling the larger
+blob-size storage path over outer-lock or directory origin-read tuning.
+
+The sealed capture is under
+`/volume2/NASDA2/vaultic-test-m6/ncl1-admission-fme-cae1-20261120-800k-dir-split-source-db/leg-01-source-db`.
+Local receipts, including `source-db-summary.json` and
+`three-way-overlap.json`, are in `/run/vaultic-source-db-inputs-20261121`.
+
 All 46 legs, the read-depth replay, and the sweep inputs are retained under
 `/volume2/NASDA2/vaultic-test-m6/nasda2-headroom-20261118-v0ruxc9f`. Verify
 `SHA256SUMS` from that directory. The disposable write payloads were removed;

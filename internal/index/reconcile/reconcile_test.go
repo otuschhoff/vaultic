@@ -2189,6 +2189,24 @@ func TestDaemonBackedDirectoryPublication(t *testing.T) {
 		reused.RevisionAllocationCalls != metrics.RevisionAllocationCalls || client.CommitRPCStats() != afterRPC {
 		t.Fatalf("reused directories issued Commits: before=%+v after=%+v rpc=%+v", metrics, reused, client.CommitRPCStats())
 	}
+	for _, stage := range []struct {
+		name          string
+		before, after PrefetchLookupMetrics
+	}{
+		{"pointer", metrics.DirectoryPrefetch.Pointer, reused.DirectoryPrefetch.Pointer},
+		{"revision", metrics.DirectoryPrefetch.Revision, reused.DirectoryPrefetch.Revision},
+	} {
+		if stage.after.Calls-stage.before.Calls != 1 || stage.after.FullWidth-stage.before.FullWidth != 1 ||
+			stage.after.Keys-stage.before.Keys != siblings || stage.after.Found-stage.before.Found != siblings ||
+			stage.after.Failures != stage.before.Failures || stage.after.NS <= stage.before.NS {
+			t.Errorf("%s prefetch: before=%+v after=%+v", stage.name, stage.before, stage.after)
+		}
+		if stage.after.TimedRPCs-stage.before.TimedRPCs != 1 || stage.after.StorageNS <= stage.before.StorageNS ||
+			stage.after.StorageNS-stage.before.StorageNS > stage.after.HandlerNS-stage.before.HandlerNS ||
+			stage.after.HandlerNS-stage.before.HandlerNS > stage.after.RPCNS-stage.before.RPCNS {
+			t.Errorf("%s authenticated timing: before=%+v after=%+v", stage.name, stage.before, stage.after)
+		}
+	}
 	t.Logf("directories=%d seconds=%.6f commits=%d failures=%d durable_us=%d", siblings+1, elapsed.Seconds(),
 		after.Attribution.CommitRequest.Attempts-before.Attribution.CommitRequest.Attempts,
 		after.Attribution.CommitRequest.Failures-before.Attribution.CommitRequest.Failures,
@@ -2196,15 +2214,21 @@ func TestDaemonBackedDirectoryPublication(t *testing.T) {
 	if err := client.Close(ctx); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := daemon.Ensure(ctx, daemon.Options{
+	reopenOptions := daemon.Options{
 		Socket: filepath.Join(socketDirectory, "reopen.sock"), RepositoryID: "directory-publication",
 		DaemonPath: reconciliationDaemonBinary(t), DataDir: root, WALFlushInterval: 25 * time.Millisecond,
-		EncryptionMode: "required", PassphraseFile: passphrase,
-	})
+		EncryptionMode: "required", PassphraseFile: passphrase, EngineMultiGet: true,
+		BlockCacheBytes: 512 << 20, MetaCacheBytes: 2 << 30,
+	}
+	reopened, err := daemon.Ensure(ctx, reopenOptions)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer reopened.Close(context.Background())
+	var revisionKeys [][]byte
+	if os.Getenv("VAULTICDB_TEST_DIRECTORY_PREFETCH_READS") == "1" {
+		revisionKeys = measureDirectoryPrefetchReads(t, ctx, reopened, directories[:siblings], nil)
+	}
 	value, found, err := daemon.NewSchemaStore(reopened).Get(ctx, schema.CurrentDirectoryKey(1, 1))
 	if err != nil || !found {
 		t.Fatalf("reopened root found=%t err=%v", found, err)
@@ -2221,6 +2245,100 @@ func TestDaemonBackedDirectoryPublication(t *testing.T) {
 	if err != nil || len(record.Children) != siblings {
 		t.Fatalf("reopened children=%d err=%v", len(record.Children), err)
 	}
+	if revisionKeys != nil {
+		if err := reopened.Close(ctx); err != nil {
+			t.Fatal(err)
+		}
+		reopenOptions.Socket = filepath.Join(socketDirectory, "reverse.sock")
+		reversed, err := daemon.Ensure(ctx, reopenOptions)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer reversed.Close(context.Background())
+		measureDirectoryPrefetchReads(t, ctx, reversed, directories[:siblings], revisionKeys)
+	}
+}
+
+func measureDirectoryPrefetchReads(t *testing.T, ctx context.Context, client *daemon.Client, directories []preparedItem, revisionKeys [][]byte) [][]byte {
+	t.Helper()
+	store := daemon.NewSchemaStore(client)
+	pointerKeys := make([][]byte, len(directories))
+	for index, directory := range directories {
+		pointerKeys[index] = schema.CurrentDirectoryKey(directory.identity.fsid, directory.identity.inode)
+	}
+	snapshot := func() daemon.WriterStatus {
+		status, err := client.WriterStatus(ctx)
+		if err != nil || status.ActiveTransactions != 0 || status.ActiveWriteIntents != 0 ||
+			!status.Attribution.EngineMultiGetMetricsAvailable || status.Attribution.CacheReads == nil ||
+			status.Attribution.EncryptionReads == nil {
+			t.Fatalf("isolated snapshot unavailable: %v", err)
+		}
+		return status
+	}
+	read := func(stage string, keys [][]byte) []daemon.KeyValue {
+		before := snapshot()
+		var timing daemon.ReadTiming
+		values, found, err := store.MultiGet(daemon.WithReadTiming(ctx, &timing), keys)
+		after := snapshot()
+		if err != nil || !timing.Valid || before.InstanceID != after.InstanceID ||
+			after.Attribution.EngineMultiGetCalls-before.Attribution.EngineMultiGetCalls != 1 ||
+			after.Attribution.EngineMultiGetInputKeys-before.Attribution.EngineMultiGetInputKeys != uint64(len(keys)) {
+			t.Fatalf("%s did not isolate one timed engine batch: timing=%+v err=%v", stage, timing, err)
+		}
+		if os.Getenv("VAULTICDB_TEST_DATABASE_READ_TIMING") == "1" &&
+			(!timing.DatabaseTimingValid || timing.EngineNS == 0 || timing.DatabaseLockNS+timing.EngineNS > timing.StorageNS) {
+			t.Fatalf("%s missing or inconsistent database timing: %+v", stage, timing)
+		}
+		for index, present := range found {
+			if !present || !bytes.Equal(values[index].Key, keys[index]) {
+				t.Fatalf("%s missing or reordered key at %d", stage, index)
+			}
+		}
+		oldBlocks, newBlocks := (*before.Attribution.CacheReads)["block"], (*after.Attribution.CacheReads)["block"]
+		oldEncryption, newEncryption := before.Attribution.EncryptionReads, after.Attribution.EncryptionReads
+		oldReads, newReads := oldEncryption.CiphertextOriginFileRangeRead, newEncryption.CiphertextOriginFileRangeRead
+		if oldReads == nil || newReads == nil || newBlocks.Hits < oldBlocks.Hits || newBlocks.Misses < oldBlocks.Misses ||
+			newReads.ReadCalls < oldReads.ReadCalls || newReads.ReadBytes < oldReads.ReadBytes {
+			t.Fatalf("%s read counters unavailable or reset", stage)
+		}
+		t.Logf("stage=%s keys=%d block_hits=%d block_misses=%d chunk_hits=%d chunk_misses=%d origin_calls=%d origin_bytes=%d file_range_calls=%d file_range_bytes=%d storage_ns=%d",
+			stage, len(keys), newBlocks.Hits-oldBlocks.Hits, newBlocks.Misses-oldBlocks.Misses,
+			newEncryption.ChunkCacheHits-oldEncryption.ChunkCacheHits, newEncryption.ChunkCacheMisses-oldEncryption.ChunkCacheMisses,
+			newEncryption.CiphertextOriginCalls-oldEncryption.CiphertextOriginCalls, newEncryption.CiphertextOriginBytes-oldEncryption.CiphertextOriginBytes,
+			newReads.ReadCalls-oldReads.ReadCalls, newReads.ReadBytes-oldReads.ReadBytes, timing.StorageNS)
+		return values
+	}
+	reverse := revisionKeys != nil
+	if reverse {
+		read("revision-first", revisionKeys)
+	}
+	pointerStage := "pointer-first"
+	if reverse {
+		pointerStage = "pointer-after-revision"
+	}
+	pointers := read(pointerStage, pointerKeys)
+	if !reverse {
+		revisionKeys = make([][]byte, len(pointers))
+	}
+	for index, value := range pointers {
+		pointer, err := schema.UnmarshalCurrentPointer(value.Value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reverse && !bytes.Equal(revisionKeys[index], pointer.RecordKey) {
+			t.Fatalf("revision key changed after reopen at %d", index)
+		}
+		revisionKeys[index] = pointer.RecordKey
+	}
+	if reverse {
+		read("revision-repeat-reverse", revisionKeys)
+		read("pointer-repeat-reverse", pointerKeys)
+	} else {
+		read("revision-after-pointer", revisionKeys)
+		read("pointer-repeat", pointerKeys)
+		read("revision-repeat", revisionKeys)
+	}
+	return revisionKeys
 }
 
 func BenchmarkPublishUnchangedDirectoryGroups(b *testing.B) {

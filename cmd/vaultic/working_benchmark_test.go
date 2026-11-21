@@ -1032,6 +1032,10 @@ func publicationAdmissionBundle(root string) string {
 		return filepath.Join(filepath.Dir(publicationAdmissionBin)+"-control", filepath.Base(publicationAdmissionBin))
 	case filepath.Join(publicationAdmissionRoot+"-candidate", "leg-02-dir-candidate"):
 		return filepath.Join(filepath.Dir(publicationAdmissionBin)+"-candidate", filepath.Base(publicationAdmissionBin))
+	case filepath.Join(publicationAdmissionRoot+"-prefetch", "leg-01-dir-prefetch"):
+		return filepath.Join(filepath.Dir(publicationAdmissionBin)+"-prefetch", filepath.Base(publicationAdmissionBin))
+	case filepath.Join(publicationAdmissionRoot+"-source-db", "leg-01-source-db"):
+		return filepath.Join(filepath.Dir(publicationAdmissionBin)+"-source-db", filepath.Base(publicationAdmissionBin))
 	default:
 		return ""
 	}
@@ -1149,6 +1153,8 @@ func TestPublicationOriginFilePolicy(t *testing.T) {
 		{publicationAdmissionRoot, publicationAdmissionLeg},
 		{publicationAdmissionRoot + "-control", "leg-01-dir-control"},
 		{publicationAdmissionRoot + "-candidate", "leg-02-dir-candidate"},
+		{publicationAdmissionRoot + "-prefetch", "leg-01-dir-prefetch"},
+		{publicationAdmissionRoot + "-source-db", "leg-01-source-db"},
 	} {
 		t.Run(route.label, func(t *testing.T) {
 			for _, key := range []string{"VAULTIC_PHASE35_READERS_LEG", "VAULTIC_PHASE35_RAM32_LEG", "VAULTIC_PHASE35_RAM64_LEG", "VAULTIC_PHASE35_ORIGINAL_PARENT", "VAULTIC_PHASE35_PRODUCER_LEG"} {

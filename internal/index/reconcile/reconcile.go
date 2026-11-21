@@ -89,6 +89,7 @@ func (options Options) withDefaults() (Options, error) {
 type Metrics struct {
 	PointerLookup                             LookupMetrics                                   `json:"pointer_lookup"`
 	RevisionLookup                            LookupMetrics                                   `json:"revision_lookup"`
+	DirectoryPrefetch                         DirectoryPrefetchMetrics                        `json:"directory_prefetch"`
 	ContentLookup                             LookupMetrics                                   `json:"content_lookup"`
 	ComparisonNS                              uint64                                          `json:"comparison_ns"`
 	WriterWaitFirstNS                         uint64                                          `json:"writer_wait_first_ns"`
@@ -174,6 +175,70 @@ type LookupMetrics struct {
 	NS    uint64 `json:"ns"`
 }
 
+type DirectoryPrefetchMetrics struct {
+	Pointer  PrefetchLookupMetrics `json:"pointer"`
+	Revision PrefetchLookupMetrics `json:"revision"`
+}
+
+type PrefetchLookupMetrics struct {
+	LookupMetrics
+	Found             uint64 `json:"found"`
+	Failures          uint64 `json:"failures"`
+	FullWidth         uint64 `json:"full_width"`
+	TimedRPCs         uint64 `json:"timed_rpcs"`
+	RPCNS             uint64 `json:"rpc_ns"`
+	HandlerNS         uint64 `json:"handler_ns"`
+	StorageNS         uint64 `json:"storage_ns"`
+	DatabaseTimedRPCs uint64 `json:"database_timed_rpcs"`
+	DatabaseLockNS    uint64 `json:"database_lock_ns"`
+	EngineNS          uint64 `json:"engine_ns"`
+}
+
+type prefetchCounters struct {
+	lookupCounters
+	found, failures, fullWidth                  atomic.Uint64
+	timedRPCs, rpcNS, handlerNS, storageNS      atomic.Uint64
+	databaseTimedRPCs, databaseLockNS, engineNS atomic.Uint64
+}
+
+func (counter *prefetchCounters) snapshot() PrefetchLookupMetrics {
+	return PrefetchLookupMetrics{LookupMetrics: counter.lookupCounters.snapshot(), Found: counter.found.Load(),
+		Failures: counter.failures.Load(), FullWidth: counter.fullWidth.Load(), TimedRPCs: counter.timedRPCs.Load(),
+		RPCNS: counter.rpcNS.Load(), HandlerNS: counter.handlerNS.Load(), StorageNS: counter.storageNS.Load(),
+		DatabaseTimedRPCs: counter.databaseTimedRPCs.Load(), DatabaseLockNS: counter.databaseLockNS.Load(), EngineNS: counter.engineNS.Load()}
+}
+
+func (counter *prefetchCounters) record(keys, width int, elapsed uint64, found []bool, err error, timing daemon.ReadTiming) {
+	counter.calls.Add(1)
+	counter.keys.Add(uint64(keys))
+	counter.ns.Add(elapsed)
+	if keys == width {
+		counter.fullWidth.Add(1)
+	}
+	if err != nil {
+		counter.failures.Add(1)
+		return
+	}
+	var hits uint64
+	for _, present := range found {
+		if present {
+			hits++
+		}
+	}
+	counter.found.Add(hits)
+	if timing.Valid {
+		counter.timedRPCs.Add(1)
+		counter.rpcNS.Add(timing.ClientNS)
+		counter.handlerNS.Add(timing.HandlerNS)
+		counter.storageNS.Add(timing.StorageNS)
+		if timing.DatabaseTimingValid {
+			counter.databaseTimedRPCs.Add(1)
+			counter.databaseLockNS.Add(timing.DatabaseLockNS)
+			counter.engineNS.Add(timing.EngineNS)
+		}
+	}
+}
+
 type lookupCounters struct {
 	calls atomic.Uint64
 	keys  atomic.Uint64
@@ -185,8 +250,12 @@ func (counter *lookupCounters) snapshot() LookupMetrics {
 }
 
 func (reconciler *Reconciler) lookup(keys [][]byte, counter *lookupCounters) ([]daemon.KeyValue, []bool, error) {
+	return reconciler.lookupContext(reconciler.ctx, keys, counter)
+}
+
+func (reconciler *Reconciler) lookupContext(ctx context.Context, keys [][]byte, counter *lookupCounters) ([]daemon.KeyValue, []bool, error) {
 	started := time.Now()
-	values, found, err := reconciler.store.MultiGet(reconciler.ctx, keys)
+	values, found, err := reconciler.store.MultiGet(ctx, keys)
 	counter.calls.Add(1)
 	counter.keys.Add(uint64(len(keys)))
 	counter.ns.Add(uint64(time.Since(started)))
@@ -286,6 +355,8 @@ type Reconciler struct {
 	statWorkerNS           atomic.Uint64
 	pointerLookup          lookupCounters
 	revisionLookup         lookupCounters
+	directoryPointer       prefetchCounters
+	directoryRevision      prefetchCounters
 	contentLookup          lookupCounters
 	comparisonNS           atomic.Uint64
 	writerWaitFirstNS      atomic.Uint64
@@ -437,7 +508,8 @@ func (reconciler *Reconciler) Close() error {
 func (reconciler *Reconciler) Metrics() Metrics {
 	metrics := Metrics{
 		PointerLookup: reconciler.pointerLookup.snapshot(), RevisionLookup: reconciler.revisionLookup.snapshot(),
-		ContentLookup: reconciler.contentLookup.snapshot(), ComparisonNS: reconciler.comparisonNS.Load(),
+		DirectoryPrefetch: DirectoryPrefetchMetrics{Pointer: reconciler.directoryPointer.snapshot(), Revision: reconciler.directoryRevision.snapshot()},
+		ContentLookup:     reconciler.contentLookup.snapshot(), ComparisonNS: reconciler.comparisonNS.Load(),
 		WriterWaitFirstNS: reconciler.writerWaitFirstNS.Load(), WriterWaitFillNS: reconciler.writerWaitFillNS.Load(),
 		BatchReadyBlockedNS: reconciler.batchReadyBlockedNS.Load(),
 		CollectionBatches:   reconciler.collectionBatches.Load(), CollectionItems: reconciler.collectionItems.Load(),
@@ -1127,7 +1199,7 @@ func (reconciler *Reconciler) publishInodesWithAllocator(
 		}
 	}
 	items = append([]preparedItem(nil), items...)
-	reconciler.prefetchExistingPublicationRecords(items)
+	reconciler.prefetchExistingPublicationRecords(items, 0)
 	started := time.Now()
 	reconciler.publicationGroups[len(items)-1].Add(1)
 	defer func() { reconciler.publicationGroupNS.Add(uint64(time.Since(started))) }()
@@ -1281,7 +1353,7 @@ func (reconciler *Reconciler) atomicPublicationPrefix(items []preparedItem) int 
 	return len(items)
 }
 
-func (reconciler *Reconciler) prefetchExistingPublicationRecords(items []preparedItem) {
+func (reconciler *Reconciler) prefetchExistingPublicationRecords(items []preparedItem, directoryWidth int) {
 	if len(items) < 2 {
 		return
 	}
@@ -1298,9 +1370,18 @@ func (reconciler *Reconciler) prefetchExistingPublicationRecords(items []prepare
 	}
 	started := time.Now()
 	pointerRegion := trace.StartRegion(reconciler.ctx, "vaultic.reconcile.prefetch.pointer_lookup")
-	values, found, err := reconciler.lookup(keys, &reconciler.pointerLookup)
+	ctx := reconciler.ctx
+	var pointerTiming daemon.ReadTiming
+	if directoryWidth != 0 {
+		ctx = daemon.WithReadTiming(ctx, &pointerTiming)
+	}
+	values, found, err := reconciler.lookupContext(ctx, keys, &reconciler.pointerLookup)
 	pointerRegion.End()
-	reconciler.existingRecordLookupNS.Add(uint64(time.Since(started)))
+	pointerElapsed := uint64(time.Since(started))
+	reconciler.existingRecordLookupNS.Add(pointerElapsed)
+	if directoryWidth != 0 {
+		reconciler.directoryPointer.record(len(keys), directoryWidth, pointerElapsed, found, err, pointerTiming)
+	}
 	if err != nil || len(values) != len(items) || len(found) != len(items) {
 		return
 	}
@@ -1323,9 +1404,18 @@ func (reconciler *Reconciler) prefetchExistingPublicationRecords(items []prepare
 	if len(revisionKeys) == 0 || reconciler.options.ScalarRevisionReads {
 		return
 	}
+	ctx = reconciler.ctx
+	var revisionTiming daemon.ReadTiming
+	if directoryWidth != 0 {
+		started = time.Now()
+		ctx = daemon.WithReadTiming(ctx, &revisionTiming)
+	}
 	revisionRegion := trace.StartRegion(reconciler.ctx, "vaultic.reconcile.prefetch.revision_lookup")
-	revisions, revisionFound, err := reconciler.lookup(revisionKeys, &reconciler.revisionLookup)
+	revisions, revisionFound, err := reconciler.lookupContext(ctx, revisionKeys, &reconciler.revisionLookup)
 	revisionRegion.End()
+	if directoryWidth != 0 {
+		reconciler.directoryRevision.record(len(revisionKeys), directoryWidth, uint64(time.Since(started)), revisionFound, err, revisionTiming)
+	}
 	if err != nil || len(revisions) != len(indices) || len(revisionFound) != len(indices) {
 		return
 	}
@@ -1500,7 +1590,7 @@ func (reconciler *Reconciler) publishDirectories(directories []preparedItem, pub
 		}
 		setupRegion.End()
 		prefetchRegion := trace.StartRegion(reconciler.ctx, "vaultic.reconcile.directories.prefetch")
-		reconciler.prefetchExistingPublicationRecords(items)
+		reconciler.prefetchExistingPublicationRecords(items, groupSize)
 		prefetchRegion.End()
 		setupRegion = trace.StartRegion(reconciler.ctx, "vaultic.reconcile.directories.group_setup")
 		for index := range pending {

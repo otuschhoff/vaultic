@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"runtime/trace"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -162,12 +163,15 @@ func (counters *sourceReadCounters) snapshot() SourceReadMetrics {
 type measuredSourceReader struct {
 	reader   io.Reader
 	counters *sourceReadCounters
+	ctx      context.Context
 }
 
 func (reader measuredSourceReader) Read(buffer []byte) (int, error) {
+	region := trace.StartRegion(reader.ctx, "vaultic.source.read")
 	started := time.Now()
 	count, err := reader.reader.Read(buffer)
 	elapsed := uint64(time.Since(started))
+	region.End()
 	reader.counters.calls.Add(1)
 	reader.counters.bytes.Add(uint64(count))
 	reader.counters.nanoseconds.Add(elapsed)
@@ -468,7 +472,7 @@ func (s *fileSaver) saveFile(ctx context.Context, params saveFileParams) {
 
 	node.Content = []vaultic.ID{}
 	node.Size = 0
-	reader := measuredSourceReader{reader: params.file, counters: s.sourceReads}
+	reader := measuredSourceReader{reader: params.file, counters: s.sourceReads, ctx: ctx}
 	var idx int
 	for {
 		chunkStarted := time.Now()

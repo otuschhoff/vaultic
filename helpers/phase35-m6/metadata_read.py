@@ -110,8 +110,9 @@ DIRECTORY_PAIR = {
     'leg-01-dir-control': 'control',
     'leg-02-dir-candidate': 'candidate',
 }
+DIRECTORY_ROUTES = {**DIRECTORY_PAIR, 'leg-01-dir-prefetch': 'prefetch', 'leg-01-source-db': 'source-db'}
 DIRECTORY_PAIR_ROOTS = {label: ADMISSION_ROOT.with_name(ADMISSION_ROOT.name + '-' + variant)
-                        for label, variant in DIRECTORY_PAIR.items()}
+                        for label, variant in DIRECTORY_ROUTES.items()}
 ORIGIN_FILE_PERF_ROOTS = (ORIGIN_FILE_PERF_ROOT, ORIGIN_FILE_PERF_RETRY_ROOT, ORIGIN_FILE_PERF_DRAIN_ROOT,
                           PREVIOUS_ADMISSION_ROOT, PHASE_ADMISSION_ROOT, DIRECTORY_ADMISSION_ROOT, ADMISSION_ROOT,
                           *DIRECTORY_PAIR_ROOTS.values())
@@ -258,8 +259,8 @@ def producer_leg(label):
         return ORIGIN_FILE_PERF_DRAIN_ROOT / label, Path('/run/vaultic-unchanged-ncl1-perf3'), 56
     if label == 'leg-01-read-admission':
         return ADMISSION_ROOT / label, Path('/run/vaultic-unchanged-ncl1-dir-split'), 56
-    if label in DIRECTORY_PAIR:
-        return DIRECTORY_PAIR_ROOTS[label] / label, Path('/run/vaultic-unchanged-ncl1-dir-' + DIRECTORY_PAIR[label]), 56
+    if label in DIRECTORY_ROUTES:
+        return DIRECTORY_PAIR_ROOTS[label] / label, Path('/run/vaultic-unchanged-ncl1-dir-' + DIRECTORY_ROUTES[label]), 56
     raise ValueError('producer comparison requires its exact scheduled private leg')
 
 
@@ -382,8 +383,8 @@ def binaries(profile):
             bundle = ORIGIN_FILE_RANGE_BIN
         if root.parent == ADMISSION_ROOT:
             bundle = ADMISSION_BIN
-        if root.name in DIRECTORY_PAIR:
-            bundle = ADMISSION_BIN.parent.with_name(ADMISSION_BIN.parent.name + '-' + DIRECTORY_PAIR[root.name]) / ADMISSION_BIN.name
+        if root.name in DIRECTORY_ROUTES:
+            bundle = ADMISSION_BIN.parent.with_name(ADMISSION_BIN.parent.name + '-' + DIRECTORY_ROUTES[root.name]) / ADMISSION_BIN.name
         return bundle / 'vaultic', bundle / 'vaulticdb'
     if os.environ.get('VAULTIC_PHASE35_RAM64_LEG'):
         original_parent_selected()

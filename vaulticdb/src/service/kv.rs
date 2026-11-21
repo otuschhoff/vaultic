@@ -29,6 +29,17 @@ fn timed_read_response<T>(payload: T, started: Instant, storage_elapsed: Duratio
     response
 }
 
+fn set_database_read_timing<T>(response: &mut Response<T>, timing: Option<(Duration, Duration)>) {
+    if let Some((lock, engine)) = timing {
+        for (header, elapsed) in [
+            ("x-vaulticdb-read-db-lock-ns", lock),
+            ("x-vaulticdb-read-engine-ns", engine),
+        ] {
+            response.metadata_mut().insert(header, elapsed.as_nanos().to_string().parse().unwrap());
+        }
+    }
+}
+
 pub(crate) fn validate_scan(request: &ScanRequest) -> Result<(), Status> {
     if request.page_size == 0 || request.page_size > MAX_PAGE_ITEMS {
         return Err(VaulticDbError::InvalidRequest {
@@ -149,18 +160,22 @@ impl Service {
         let request = request.into_inner();
         let storage = self.storage().await?;
         let storage_started = Instant::now();
+        let mut database_timing = None;
         let results = storage
-            .multi_get(
+            .multi_get_with_timing(
                 &request.keys,
                 &request.transaction_id,
                 MAX_MESSAGE_BYTES as usize,
+                &mut database_timing,
             )
             .await?;
-        Ok(timed_read_response(
+        let mut response = timed_read_response(
             MultiGetResponse { results },
             started,
             storage_started.elapsed(),
-        ))
+        );
+        set_database_read_timing(&mut response, database_timing);
+        Ok(response)
     }
 
     pub(super) async fn handle_scan(
@@ -190,7 +205,7 @@ mod tests {
 
     #[test]
     fn read_timing_metadata_preserves_payload() {
-        let response = timed_read_response(
+        let mut response = timed_read_response(
             42,
             Instant::now() - Duration::from_millis(1),
             Duration::from_nanos(250),
@@ -214,5 +229,9 @@ mod tests {
             .unwrap();
         assert!(handler >= 1_000_000);
         assert_eq!(storage, 250);
+        assert!(response.metadata().get("x-vaulticdb-read-db-lock-ns").is_none());
+        set_database_read_timing(&mut response, Some((Duration::from_nanos(10), Duration::from_nanos(200))));
+        assert_eq!(response.metadata().get("x-vaulticdb-read-db-lock-ns").unwrap(), "10");
+        assert_eq!(response.metadata().get("x-vaulticdb-read-engine-ns").unwrap(), "200");
     }
 }

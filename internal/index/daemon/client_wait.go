@@ -14,6 +14,34 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
+type readTimingKey struct{}
+
+// ReadTiming records validated timing headers for one synchronous daemon read.
+type ReadTiming struct {
+	ClientNS, HandlerNS, StorageNS uint64
+	Valid                          bool
+	DatabaseLockNS, EngineNS       uint64
+	DatabaseTimingValid            bool
+}
+
+func WithReadTiming(ctx context.Context, timing *ReadTiming) context.Context {
+	return context.WithValue(ctx, readTimingKey{}, timing)
+}
+
+func databaseReadTiming(headers metadata.MD, storage uint64) (uint64, uint64, bool) {
+	lockValues := headers.Get("x-vaulticdb-read-db-lock-ns")
+	engineValues := headers.Get("x-vaulticdb-read-engine-ns")
+	if len(lockValues) != 1 || len(engineValues) != 1 {
+		return 0, 0, false
+	}
+	lock, lockErr := strconv.ParseUint(lockValues[0], 10, 64)
+	engine, engineErr := strconv.ParseUint(engineValues[0], 10, 64)
+	if lockErr != nil || engineErr != nil || lock > storage || engine > storage-lock {
+		return 0, 0, false
+	}
+	return lock, engine, true
+}
+
 type RPCWaitStats struct {
 	Method               string `json:"method"`
 	Calls                uint64 `json:"calls"`
@@ -121,6 +149,10 @@ func (counters *rpcWaitCounters) intercept(ctx context.Context, method string, r
 				valid = handlerError == nil && storageError == nil && storage <= handler && handler <= elapsed
 			}
 			if valid {
+				if timing, ok := ctx.Value(readTimingKey{}).(*ReadTiming); ok && timing != nil {
+					*timing = ReadTiming{ClientNS: elapsed, HandlerNS: handler, StorageNS: storage, Valid: true}
+					timing.DatabaseLockNS, timing.EngineNS, timing.DatabaseTimingValid = databaseReadTiming(headers, storage)
+				}
 				value.ServerTimingCalls++
 				value.ServerTimingClientNS += elapsed
 				value.ServerHandlerNS += handler

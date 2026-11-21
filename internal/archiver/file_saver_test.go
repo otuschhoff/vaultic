@@ -52,7 +52,7 @@ func startFileSaver(ctx context.Context, t testing.TB, _ fs.FS) (*fileSaver, *mo
 
 func TestMeasuredSourceReader(t *testing.T) {
 	counters := &sourceReadCounters{}
-	reader := measuredSourceReader{reader: iotest.OneByteReader(strings.NewReader("source")), counters: counters}
+	reader := measuredSourceReader{reader: iotest.OneByteReader(strings.NewReader("source")), counters: counters, ctx: t.Context()}
 	contents, err := io.ReadAll(reader)
 	if err != nil || string(contents) != "source" {
 		t.Fatalf("measured reader changed contents: %q, %v", contents, err)

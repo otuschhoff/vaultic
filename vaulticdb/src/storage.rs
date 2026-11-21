@@ -13,7 +13,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc, Weak,
     },
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{bail, Context, Result};
@@ -3359,11 +3359,23 @@ impl Storage {
         Ok(Self::get_response(key, value))
     }
 
+    #[cfg(test)]
     pub(crate) async fn multi_get(
         &self,
         keys: &[Vec<u8>],
         transaction_id: &str,
         max_response_bytes: usize,
+    ) -> Result<Vec<GetResponse>, Status> {
+        self.multi_get_with_timing(keys, transaction_id, max_response_bytes, &mut None)
+            .await
+    }
+
+    pub(crate) async fn multi_get_with_timing(
+        &self,
+        keys: &[Vec<u8>],
+        transaction_id: &str,
+        max_response_bytes: usize,
+        database_timing: &mut Option<(Duration, Duration)>,
     ) -> Result<Vec<GetResponse>, Status> {
         for key in keys {
             validate_key(key)?;
@@ -3377,7 +3389,9 @@ impl Storage {
         if transaction_id.is_empty() {
             if self.slatedb_multiget {
                 let mut read_timer = self.attribution.multi_get_database_read.timer();
+                let lock_started = Instant::now();
                 let database = self.database.read().await;
+                let engine_started = Instant::now();
                 let values = match &*database {
                     Database::Writer(db) => db.multi_get(keys).await.map_err(storage_error),
                     Database::Reader(reader) => {
@@ -3390,6 +3404,7 @@ impl Storage {
                         .into())
                     }
                 };
+                *database_timing = Some((engine_started - lock_started, engine_started.elapsed()));
                 read_timer.record_status_result(&values);
                 drop(read_timer);
                 let values = values?;
