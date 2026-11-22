@@ -142,7 +142,10 @@ func TestEncryptedBlobSizeReadAttribution(t *testing.T) {
 	}
 	dispersed := os.Getenv("VAULTICDB_TEST_BLOB_SIZE_DISPERSED") == "1"
 	filtered := dispersed && os.Getenv("VAULTICDB_TEST_BLOB_SIZE_FILTERED") == "1"
-	if filtered {
+	highFanout := dispersed && os.Getenv("VAULTICDB_TEST_BLOB_SIZE_HIGH_FANOUT") == "1"
+	if highFanout {
+		options.L0SSTSizeBytes = 16 << 10
+	} else if filtered {
 		options.L0SSTSizeBytes = 192 << 10
 	} else if dispersed && os.Getenv("VAULTICDB_TEST_BLOB_SIZE_MULTI_SST") == "1" {
 		options.L0SSTSizeBytes = 64 << 10

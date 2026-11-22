@@ -28,6 +28,7 @@ type BlobSaveMetrics struct {
 	HashNS           uint64 `json:"hash_ns"`
 	AdmissionCalls   uint64 `json:"admission_calls"`
 	AdmissionNS      uint64 `json:"admission_ns"`
+	HandleReadyNS    uint64 `json:"handle_ready_to_admission_ns"`
 	Known            uint64 `json:"known"`
 	New              uint64 `json:"new"`
 	Failures         uint64 `json:"failures"`
@@ -38,6 +39,7 @@ type BlobSaveMetrics struct {
 
 type blobSaveCounters struct {
 	calls, hashCalls, hashNS, admissionCalls, admissionNS, known, new, failures atomic.Uint64
+	handleReadyNS                                                               atomic.Uint64
 	active, admissionActive                                                     atomic.Int64
 	concurrencyLimit                                                            atomic.Uint64
 }
@@ -47,7 +49,8 @@ func (r *Repository) BlobSaveMetrics() BlobSaveMetrics {
 	return BlobSaveMetrics{
 		Calls: counters.calls.Load(), HashCalls: counters.hashCalls.Load(), HashNS: counters.hashNS.Load(),
 		AdmissionCalls: counters.admissionCalls.Load(), AdmissionNS: counters.admissionNS.Load(),
-		Known: counters.known.Load(), New: counters.new.Load(), Failures: counters.failures.Load(),
+		HandleReadyNS: counters.handleReadyNS.Load(),
+		Known:         counters.known.Load(), New: counters.new.Load(), Failures: counters.failures.Load(),
 		Active: counters.active.Load(), AdmissionActive: counters.admissionActive.Load(),
 		ConcurrencyLimit: counters.concurrencyLimit.Load(),
 	}
@@ -59,6 +62,7 @@ func (metrics BlobSaveMetrics) Delta(baseline BlobSaveMetrics) BlobSaveMetrics {
 	metrics.HashNS -= baseline.HashNS
 	metrics.AdmissionCalls -= baseline.AdmissionCalls
 	metrics.AdmissionNS -= baseline.AdmissionNS
+	metrics.HandleReadyNS -= baseline.HandleReadyNS
 	metrics.Known -= baseline.Known
 	metrics.New -= baseline.New
 	metrics.Failures -= baseline.Failures
@@ -413,6 +417,7 @@ func (r *Repository) saveBlob(
 	} else {
 		newID = id
 	}
+	handleReady := time.Now()
 
 	// first try to add to pending blobs; if not successful, this blob is already known
 	engine, err := r.legacyIndexEngine()
@@ -421,6 +426,7 @@ func (r *Repository) saveBlob(
 	}
 	handle := vaultic.BlobHandle{ID: newID, Type: t}
 	admissionStarted := time.Now()
+	counters.handleReadyNS.Add(uint64(admissionStarted.Sub(handleReady)))
 	counters.admissionCalls.Add(1)
 	counters.admissionActive.Add(1)
 	if admission, ok := engine.(enginepkg.ContextWriteEngine); ok {

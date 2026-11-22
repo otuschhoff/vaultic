@@ -560,7 +560,12 @@ func testPublicationReadCandidate(t *testing.T, candidate string, extraFlags []s
 				MessageType    string  `json:"message_type"`
 				Phase          string  `json:"phase"`
 				SecondsElapsed float64 `json:"seconds_elapsed"`
-				BlobLookup     struct {
+				BlobSaves      struct {
+					AdmissionCalls uint64 `json:"admission_calls"`
+					AdmissionNS    uint64 `json:"admission_ns"`
+					HandleReadyNS  uint64 `json:"handle_ready_to_admission_ns"`
+				} `json:"blob_saves"`
+				BlobLookup struct {
 					SizeRPCs       uint64                     `json:"size_rpcs"`
 					SizeHandles    uint64                     `json:"size_handles"`
 					SizeRPCWork    *daemon.BlobReadWorkTotals `json:"size_rpc_work"`
@@ -610,6 +615,10 @@ func testPublicationReadCandidate(t *testing.T, candidate string, extraFlags []s
 				t.Logf("CLI blob work: %d size RPCs, work %+v", main.BlobLookup.SizeRPCs, work)
 				t.Logf("CLI blob batching: delay_ns=%d handles=%d rpcs=%d collect_ns=%d result_wait_ns=%d main_seconds=%.6f",
 					main.BlobLookup.DelayNS, main.BlobLookup.SizeHandles, work.Samples, main.BlobLookup.CollectNS, main.BlobLookup.ResultWaitNS, main.SecondsElapsed)
+				if main.BlobSaves.AdmissionCalls > 0 && main.BlobSaves.HandleReadyNS > 0 {
+					t.Logf("CLI blob admission: calls=%d handle_ready_to_admission_ns=%d admission_ns=%d",
+						main.BlobSaves.AdmissionCalls, main.BlobSaves.HandleReadyNS, main.BlobSaves.AdmissionNS)
+				}
 			}
 			if summary.TotalFilesProcessed != regularFiles || summary.DataBlobs != 0 ||
 				(!blobWork && (summary.Unmodified != regularFiles || summary.New != 0 || summary.Changed != 0)) {

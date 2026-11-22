@@ -4214,6 +4214,44 @@ scale. A bounded catalog-only probe can report these costs separately;
 an on-demand read-ahead experiment should prioritize discovered blob IDs
 and report useful hits and foreground wait rather than target full coverage.
 
+A local forced-backup probe measured a mean 0.43-0.47 us between a handle
+being ready and foreground admission, which itself averaged 2.11-2.26 ms
+per save. A private prototype moved the existing 1 ms collection window
+to a bounded post-hash admission queue instead of adding another timer.
+The checksummed 1,024-file seed screen ran off/on/on/off and restored
+exactly with zero new data blobs in all arms. Size RPCs were 84/90/90/82;
+command wall was 1.430/1.451/1.432/1.434 s. In the larger screen, both
+queued arms restored exactly but issued more RPCs and took longer than
+the first control. The final control completed backup, but the test
+timed out during its restore. Do not advance the queue or infer a
+representative speedup. Logs and the private prototype are under
+`/run/vaultic-admission-small.LBcJWUpK` and
+`/run/vaultic-admission-queue.42pLbS0i`.
+
+The pinned MultiGet reader counts scheduled SST views before per-key
+range or filter checks. It queues every L0 view for each touched tree,
+groups pending keys by covering view within each compacted run, and
+schedules older views before newer disk results are known. A visit is
+therefore neither a surviving key probe nor a physical read. The guarded
+26.42 visits per size RPC do not yet identify how many were L0 versus
+compacted runs, or how many scheduled views had no in-range key.
+
+The opt-in `VAULTICDB_TEST_BLOB_SIZE_HIGH_FANOUT=1` fixture uses a 16 KiB
+L0 target and screened widths 5/20/20/5 on the same 4,000 deterministic
+keys, with the usual 1/32/32/1 depth schedule inside each run. All windows
+validated the returned sizes and reconciled authenticated samples with
+engine counters. Per 4,000 keys, visits fell from 8,002 to 2,396 and
+planned blocks from 18,872 to 11,038. Visits per RPC rose from 10.00 to
+11.98, with 23,984 candidate keys and no filter negatives at either width.
+At depth 32, first-pass wall fell from 50-59 ms to 23-30 ms, but p99 RPC
+latency rose from 5.3-8.5 ms to 9.2-13.3 ms and file reads stayed at 12-14.
+The workload finishes sooner with fewer RPCs, not faster individual
+lookups. This layout is not a replica of the representative topology or
+filter behavior. Do not advance a timer or pruning change on these
+results. A narrower next diagnostic would split authenticated visits by
+L0 and compacted runs and count views with no in-range keys separately.
+Logs are in `/run/vaultic-blob-fanout.QdsOTqkC`.
+
 All 46 legs, the read-depth replay, and the sweep inputs are retained under
 `/volume2/NASDA2/vaultic-test-m6/nasda2-headroom-20261118-v0ruxc9f`. Verify
 `SHA256SUMS` from that directory. The disposable write payloads were removed;
