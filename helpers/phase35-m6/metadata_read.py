@@ -110,7 +110,14 @@ DIRECTORY_PAIR = {
     'leg-01-dir-control': 'control',
     'leg-02-dir-candidate': 'candidate',
 }
-DIRECTORY_ROUTES = {**DIRECTORY_PAIR, 'leg-01-dir-prefetch': 'prefetch', 'leg-01-source-db': 'source-db'}
+DIRECTORY_ROUTES = {**DIRECTORY_PAIR, 'leg-01-dir-prefetch': 'prefetch', 'leg-01-source-db': 'source-db',
+                    'leg-01-blob-work': 'blob-work', 'leg-02-blob-work': 'blob-work-retry2',
+                    'leg-01-catalog-control': 'catalog-control', 'leg-02-catalog-on': 'catalog-on'}
+
+
+def blob_work_environment(label, inherited):
+    flag = 'VAULTICDB_DIAGNOSTIC_BLOB_WORK'
+    return {flag: '1'} if label in ('leg-01-blob-work', 'leg-02-blob-work') and inherited.get(flag) == '1' else {}
 DIRECTORY_PAIR_ROOTS = {label: ADMISSION_ROOT.with_name(ADMISSION_ROOT.name + '-' + variant)
                         for label, variant in DIRECTORY_ROUTES.items()}
 ORIGIN_FILE_PERF_ROOTS = (ORIGIN_FILE_PERF_ROOT, ORIGIN_FILE_PERF_RETRY_ROOT, ORIGIN_FILE_PERF_DRAIN_ROOT,
@@ -842,6 +849,7 @@ def execute(mode, inode_limit=10000, profile=None, chunk_leg=None):
                     environment['VAULTIC_PHASE35_RAM64_LEG'] = os.environ['VAULTIC_PHASE35_RAM64_LEG']
                 if os.environ.get('VAULTIC_PHASE35_PRODUCER_LEG'):
                     environment['VAULTIC_PHASE35_PRODUCER_LEG'] = os.environ['VAULTIC_PHASE35_PRODUCER_LEG']
+                    environment.update(blob_work_environment(environment['VAULTIC_PHASE35_PRODUCER_LEG'], os.environ))
             elif parent_setup:
                 environment['VAULTIC_PHASE35_ORIGINAL_PARENT'] = '1'
                 environment.update({key: str(value) for key, value in SCALE800K_CHUNKS.items()})
@@ -1445,6 +1453,8 @@ def followup_metadata_flags(settings, variant, inode_limit, root):
         flags += ['--metadata-reconciliation-batch-size=5000', '--metadata-reconciliation-read-ahead=1']
         if root.parent in (PRODUCER_ROOT, COALESCE_ROOT, NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, *ORIGIN_FILE_ROOTS):
             flags += ['--read-open-in-workers', f'--blob-save-concurrency={producer_leg(root.name)[2]}']
+        if exact_catalog_route(root):
+            flags += ['--metadata-exact-catalog']
     return flags
 
 
@@ -1532,7 +1542,10 @@ def summarize_followup(root, profile, inode_limit=50000, expected_candidate=None
         if root.parent == COALESCE_ROOT:
             require_coalesce_coverage(critical, settings['batch_delay_ns'])
         if root.parent in (NATIVE_READ_ROOT, ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, *ORIGIN_FILE_ROOTS):
-            require_coalesce_coverage(critical, 1000000)
+            if exact_catalog_route(root):
+                require_exact_catalog_coverage(critical)
+            else:
+                require_coalesce_coverage(critical, 1000000)
             require_native_read_coverage(critical)
         if root.parent in (ORIGIN_READ_ROOT, ORIGIN_OUTCOME_ROOT, ORIGIN_DETAIL_ROOT, ORIGIN_CONDITIONAL_ROOT, *ORIGIN_FILE_ROOTS):
             origin_policy = origin_read_policy(root)
@@ -1992,6 +2005,21 @@ def require_native_read_coverage(critical):
         raise ValueError('native read stages missing, unmeasured or not drained')
 
 
+def exact_catalog_route(root):
+    return root == DIRECTORY_PAIR_ROOTS['leg-02-catalog-on'] / 'leg-02-catalog-on'
+
+
+def require_exact_catalog_coverage(critical):
+    lookup = critical['blob_lookup']
+    if (lookup['exact_catalog'] is not True or lookup['coalesce_delay_nanoseconds'] != 1000000
+            or any(type(lookup[key]) is not int or lookup[key] <= 0 for key in
+                   ('catalog_entries', 'catalog_load_nanoseconds', 'lookup_calls'))
+            or any(type(lookup[key]) is not int or lookup[key] != 0 for key in
+                   ('size_rpcs', 'size_handles', 'coalesce_groups', 'coalesce_followers',
+                    'coalesce_collect_nanoseconds', 'coalesce_follower_nanoseconds'))):
+        raise ValueError('exact catalog load or zero size dispatch coverage differs')
+
+
 def require_coalesce_coverage(critical, delay_ns):
     lookup = critical['blob_lookup']
     if (lookup['coalesce_delay_nanoseconds'] != delay_ns or lookup['coalesce_groups'] != lookup['size_rpcs']
@@ -2421,6 +2449,15 @@ def execute_chunk_series(immutable=False, reconcile=False, caches=False, pipelin
 
 
 class ChunkComparisonTests(unittest.TestCase):
+    def test_blob_work_environment_is_route_scoped(self):
+        flag = 'VAULTICDB_DIAGNOSTIC_BLOB_WORK'
+        for label, value, expected in (('leg-01-blob-work', '1', {flag: '1'}),
+                                       ('leg-02-blob-work', '1', {flag: '1'}),
+                                       ('leg-02-blob-work', None, {}),
+                                       ('leg-01-blob-work', '0', {}),
+                                       ('leg-01-source-db', '1', {})):
+            with self.subTest(label=label, value=value):
+                self.assertEqual(blob_work_environment(label, {flag: value, 'VAULTICDB_UNRELATED': '1'}), expected)
     def test_perf_trace_recording_events(self):
         from perf_read_trace import ENTER, EXIT, NFS, require_recording_events
 

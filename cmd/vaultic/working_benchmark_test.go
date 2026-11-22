@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -353,7 +354,33 @@ func publicationQualificationReopen(ctx context.Context, client **daemon.Client,
 }
 
 func TestPublicationQualificationOnDemandBackup(t *testing.T) {
-	testPublicationReadCandidate(t, "", nil, 0, false)
+	testPublicationReadCandidate(t, "", nil, 0, false, false)
+}
+
+func TestPublicationBlobWorkCLI(t *testing.T) {
+	candidate := os.Getenv("VAULTIC_TEST_BLOB_WORK_CLI")
+	if candidate == "" {
+		t.Skip("isolated blob work CLI is opt-in")
+	}
+	delay := os.Getenv("VAULTIC_TEST_BLOB_WORK_DELAY")
+	switch delay {
+	case "":
+		delay = "1ms"
+	case "1ms", "2ms", "5ms":
+	default:
+		t.Fatalf("unsupported blob work CLI delay %q", delay)
+	}
+	savers := os.Getenv("VAULTIC_TEST_BLOB_WORK_SAVERS")
+	flags := []string{"--force", "--read-concurrency=4", "--metadata-read-concurrency=4", "--metadata-batch-delay=" + delay}
+	switch savers {
+	case "":
+	case "56", "112":
+		flags = append(flags, "--blob-save-concurrency="+savers)
+	default:
+		t.Fatalf("unsupported blob work CLI saver limit %q", savers)
+	}
+	t.Setenv("VAULTICDB_DIAGNOSTIC_BLOB_WORK", "1")
+	testPublicationReadCandidate(t, candidate, flags, 64<<20, true, true)
 }
 
 func TestPublicationFollowupTelemetryNative(t *testing.T) {
@@ -361,7 +388,7 @@ func TestPublicationFollowupTelemetryNative(t *testing.T) {
 		t.Skip("isolated follow-up telemetry qualification is opt-in")
 	}
 	testPublicationReadCandidate(t, "/root/proj/vaultic/bin/phase35-forced-followup/linux-amd64/vaultic",
-		[]string{"--read-concurrency=64", "--metadata-read-concurrency=32", "--metadata-batch-delay=1ms", "--metadata-publication-group-size=64"}, 2<<30, true)
+		[]string{"--read-concurrency=64", "--metadata-read-concurrency=32", "--metadata-batch-delay=1ms", "--metadata-publication-group-size=64"}, 2<<30, true, false)
 }
 
 func TestMetadataReadCandidatesNative(t *testing.T) {
@@ -371,26 +398,45 @@ func TestMetadataReadCandidatesNative(t *testing.T) {
 	}
 	for _, capacity := range []uint64{128 << 20, 256 << 20, 512 << 20, 1024 << 20} {
 		t.Run(fmt.Sprintf("meta-cache-%d", capacity>>20), func(t *testing.T) {
-			testPublicationReadCandidate(t, candidate, []string{"--unchanged-read-concurrency=8"}, capacity, false)
+			testPublicationReadCandidate(t, candidate, []string{"--unchanged-read-concurrency=8"}, capacity, false, false)
 		})
 	}
 	for _, limit := range []int{4, 8, 16} {
 		t.Run(fmt.Sprintf("coalesced-rpc-%d", limit), func(t *testing.T) {
-			testPublicationReadCandidate(t, candidate, []string{"--unchanged-read-concurrency=16", "--metadata-batch-delay=1ms", fmt.Sprintf("--metadata-read-concurrency=%d", limit)}, 128<<20, true)
+			testPublicationReadCandidate(t, candidate, []string{"--unchanged-read-concurrency=16", "--metadata-batch-delay=1ms", fmt.Sprintf("--metadata-read-concurrency=%d", limit)}, 128<<20, true, false)
 		})
 	}
 	t.Run("exact-catalog", func(t *testing.T) {
-		testPublicationReadCandidate(t, candidate, []string{"--unchanged-read-concurrency=8", "--metadata-exact-catalog"}, 128<<20, false)
+		testPublicationReadCandidate(t, candidate, []string{"--unchanged-read-concurrency=8", "--metadata-exact-catalog"}, 128<<20, false, false)
 	})
 }
 
-func testPublicationReadCandidate(t *testing.T, candidate string, extraFlags []string, metaCacheBytes uint64, multiGet bool) {
+func testPublicationReadCandidate(t *testing.T, candidate string, extraFlags []string, metaCacheBytes uint64, multiGet, blobWork bool) {
 	t.Helper()
 	binary := testVaulticDBBinary(t)
 	defer feature.TestSetFlag(t, feature.Flag, feature.SlateDBAuthoritative, true)()
 	environment, cleanup := withTestEnvironment(t)
 	defer cleanup()
 	testSetupBackupData(t, environment)
+	sstBlobWork := blobWork && os.Getenv("VAULTIC_TEST_BLOB_WORK_SST") == "1"
+	catalogScreen := sstBlobWork && os.Getenv("VAULTIC_TEST_BLOB_CATALOG_SCREEN") == "1"
+	seedFiles := 1024
+	if catalogScreen {
+		switch scale := os.Getenv("VAULTIC_TEST_BLOB_CATALOG_SCALE"); scale {
+		case "", "1024":
+		case "32768":
+			seedFiles = 32768
+		default:
+			t.Fatalf("unsupported catalog seed size %q", scale)
+		}
+	}
+	if sstBlobWork {
+		for ordinal := range seedFiles {
+			name := fmt.Sprintf("sst-blob-%04d", ordinal)
+			payload := bytes.Repeat([]byte(name), 256)
+			rtest.OK(t, os.WriteFile(filepath.Join(environment.testdata, name), payload, 0600))
+		}
+	}
 	rtest.OK(t, os.Symlink(".", filepath.Join(environment.testdata, "qualification-symlink")))
 	environment.globalOptions.BackendTestHook = nil
 	rtest.OK(t, withTermStatus(t, environment.globalOptions, func(ctx context.Context, options global.Options) error {
@@ -408,11 +454,18 @@ func testPublicationReadCandidate(t *testing.T, candidate string, extraFlags []s
 		daemonOptions := daemon.Options{Socket: testMetadataSocket(t), RepositoryID: repositoryID,
 			DaemonPath: binary, DataDir: t.TempDir(), EncryptionMode: "initialize", PassphraseFile: passphrase,
 			MetaCacheBytes: metaCacheBytes, BlockCacheBytes: 512 << 20, EngineMultiGet: multiGet}
+		if sstBlobWork {
+			daemonOptions.L0SSTSizeBytes = 64 << 10
+		}
 		client, err := daemon.Ensure(ctx, daemonOptions)
 		if err != nil {
 			return err
 		}
-		defer client.Close(context.Background())
+		defer func() {
+			if client != nil {
+				rtest.OK(t, client.Close(context.Background()))
+			}
+		}()
 		options.MetadataDaemonSocket = daemonOptions.Socket
 		options.MetadataEncryptionMode = "required"
 		options.MetadataPassphraseFile = passphrase
@@ -429,7 +482,7 @@ func testPublicationReadCandidate(t *testing.T, candidate string, extraFlags []s
 			"--repo="+options.Repo, "--password-file="+password, "--metadata-daemon-socket="+daemonOptions.Socket,
 			"--metadata-encryption-mode=required", "--metadata-passphrase-file="+passphrase, "--no-cache", "--json",
 			"backup", "--dry-run", "--force", "--no-scan", "--one-file-system", environment.testdata)
-		paths, err := boundedLiveSourcePaths(environment.testdata, 10_000)
+		paths, err := boundedLiveSourcePaths(environment.testdata, uint64(seedFiles+10_000))
 		if err != nil {
 			return err
 		}
@@ -471,94 +524,185 @@ func testPublicationReadCandidate(t *testing.T, candidate string, extraFlags []s
 		if err := testRunRestoreAssumeFailure(t, ids[0].String(), restoreOptions{Target: t.TempDir(), Verify: true}, options); err != nil {
 			return err
 		}
-		unchanged := t.TempDir()
-		if candidate == "" {
-			candidate = "/root/proj/vaultic/bin/phase35-critical-path-paired-reads/linux-amd64/vaultic"
+		if sstBlobWork && !catalogScreen {
+			daemonOptions.EncryptionMode = "required"
+			rtest.OK(t, publicationQualificationReopen(ctx, &client, daemonOptions))
 		}
-		args := []string{
-			"--repo=" + options.Repo, "--password-file=" + password, "--metadata-daemon-socket=" + daemonOptions.Socket,
-			"--metadata-encryption-mode=required", "--metadata-passphrase-file=" + passphrase, "--no-cache", "--json",
-			"backup", "--no-scan", "--one-file-system", "--metadata-publication-group-size=64", "--metadata-on-demand", "--metadata-cache-mib=64",
-			"--working-memory-mode=ram", "--working-memory-ram-limit=160GiB", "--working-memory-scratch=" + scratch,
-			"--working-memory-disk-budget=2GiB"}
-		args = append(args, extraFlags...)
-		args = append(args, environment.testdata)
-		publicationQualificationCommand(t, unchanged, "unchanged", candidate, args...)
-		output, err = os.ReadFile(filepath.Join(unchanged, "unchanged.stdout.log"))
-		if err != nil {
-			return err
-		}
-		var summary m5BackupSummary
-		var main struct {
-			MessageType    string  `json:"message_type"`
-			Phase          string  `json:"phase"`
-			SecondsElapsed float64 `json:"seconds_elapsed"`
-			Reconciliation struct {
-				Observed          uint64                     `json:"observed"`
-				Scanned           uint64                     `json:"scanned"`
-				Failed            uint64                     `json:"failed"`
-				Deferred          uint64                     `json:"deferred"`
-				PublicationStages *daemon.PublicationMetrics `json:"publication_stages"`
-			} `json:"reconciliation"`
-		}
-		for _, line := range bytes.Split(output, []byte{'\n'}) {
-			var kind struct {
-				MessageType string `json:"message_type"`
+		runForced := func(options global.Options, client *daemon.Client, leg int, catalog bool) error {
+			unchanged := t.TempDir()
+			if candidate == "" {
+				candidate = "/root/proj/vaultic/bin/phase35-critical-path-paired-reads/linux-amd64/vaultic"
 			}
-			if json.Unmarshal(line, &kind) != nil {
-				continue
+			args := []string{
+				"--repo=" + options.Repo, "--password-file=" + password, "--metadata-daemon-socket=" + options.MetadataDaemonSocket,
+				"--metadata-encryption-mode=required", "--metadata-passphrase-file=" + passphrase, "--no-cache", "--json",
+				"backup", "--no-scan", "--one-file-system", "--metadata-publication-group-size=64", "--metadata-on-demand", "--metadata-cache-mib=64",
+				"--working-memory-mode=ram", "--working-memory-ram-limit=160GiB", "--working-memory-scratch=" + scratch,
+				"--working-memory-disk-budget=2GiB"}
+			args = append(args, extraFlags...)
+			if catalog {
+				args = append(args, "--metadata-exact-catalog")
 			}
-			switch kind.MessageType {
-			case "summary":
-				rtest.OK(t, json.Unmarshal(line, &summary))
-			case "backup_critical_path":
-				rtest.OK(t, json.Unmarshal(line, &main))
+			args = append(args, environment.testdata)
+			binary := candidate
+			rssPath := filepath.Join(unchanged, "peak-rss")
+			if catalogScreen {
+				binary = "/usr/bin/time"
+				args = append([]string{"-f", "%M", "-o", rssPath, "--", candidate}, args...)
 			}
-		}
-		if summary.Unmodified != regularFiles || summary.TotalFilesProcessed != regularFiles || summary.New != 0 || summary.Changed != 0 || summary.DataBlobs != 0 {
-			return fmt.Errorf("unchanged native crawl changed or transferred file data: %+v", summary)
-		}
-		if main.Phase != "main_backup" || main.SecondsElapsed <= 0 || main.Reconciliation.Observed != uint64(len(paths)) ||
-			main.Reconciliation.Scanned != uint64(len(paths)) || main.Reconciliation.Failed != 0 || main.Reconciliation.Deferred != 0 {
-			return fmt.Errorf("unchanged native crawl lacks complete main interval: %+v", main)
-		}
-		all := testListSnapshots(t, options, 2)
-		for _, id := range all {
-			if id != ids[0] {
-				snapshot := testLoadSnapshot(t, options, id)
-				if snapshot.Parent == nil || *snapshot.Parent != ids[0] || snapshot.CrawlPlan == nil || snapshot.CrawlPlan.Mode != "full" || snapshot.CrawlPlan.ReusedSubtrees != 0 {
-					return fmt.Errorf("unchanged native backup did not use a full crawl and the prior parent")
+			wall, _ := publicationQualificationCommand(t, unchanged, "unchanged", binary, args...)
+			output, err := os.ReadFile(filepath.Join(unchanged, "unchanged.stdout.log"))
+			if err != nil {
+				return err
+			}
+			var summary m5BackupSummary
+			var main struct {
+				MessageType    string  `json:"message_type"`
+				Phase          string  `json:"phase"`
+				SecondsElapsed float64 `json:"seconds_elapsed"`
+				BlobLookup     struct {
+					SizeRPCs       uint64                     `json:"size_rpcs"`
+					SizeHandles    uint64                     `json:"size_handles"`
+					SizeRPCWork    *daemon.BlobReadWorkTotals `json:"size_rpc_work"`
+					DelayNS        uint64                     `json:"coalesce_delay_nanoseconds"`
+					CollectNS      uint64                     `json:"coalesce_collect_nanoseconds"`
+					ResultWaitNS   uint64                     `json:"result_wait_nanoseconds"`
+					ExactCatalog   bool                       `json:"exact_catalog"`
+					CatalogEntries uint64                     `json:"catalog_entries"`
+					CatalogLoadNS  uint64                     `json:"catalog_load_nanoseconds"`
+				} `json:"blob_lookup"`
+				Reconciliation struct {
+					Observed          uint64                     `json:"observed"`
+					Scanned           uint64                     `json:"scanned"`
+					Failed            uint64                     `json:"failed"`
+					Deferred          uint64                     `json:"deferred"`
+					PublicationStages *daemon.PublicationMetrics `json:"publication_stages"`
+				} `json:"reconciliation"`
+			}
+			for _, line := range bytes.Split(output, []byte{'\n'}) {
+				var kind struct {
+					MessageType string `json:"message_type"`
 				}
-				restored := t.TempDir()
-				if err := testRunRestoreAssumeFailure(t, id.String(), restoreOptions{Target: restored, Verify: true}, options); err != nil {
+				if json.Unmarshal(line, &kind) != nil {
+					continue
+				}
+				switch kind.MessageType {
+				case "summary":
+					rtest.OK(t, json.Unmarshal(line, &summary))
+				case "backup_critical_path":
+					rtest.OK(t, json.Unmarshal(line, &main))
+				}
+			}
+			if catalog {
+				lookup := main.BlobLookup
+				if !lookup.ExactCatalog || lookup.CatalogEntries < uint64(seedFiles) || lookup.CatalogLoadNS == 0 || lookup.SizeRPCs != 0 ||
+					(lookup.SizeRPCWork != nil && *lookup.SizeRPCWork != (daemon.BlobReadWorkTotals{})) {
+					return fmt.Errorf("catalog did not replace size RPCs: %+v", lookup)
+				}
+			} else if blobWork {
+				work := main.BlobLookup.SizeRPCWork
+				if work == nil || work.Samples == 0 || work.Samples != main.BlobLookup.SizeRPCs || main.BlobLookup.SizeHandles < work.Samples {
+					return fmt.Errorf("incomplete CLI blob work: %d size RPCs, work %+v", main.BlobLookup.SizeRPCs, work)
+				}
+				if sstBlobWork && (work.SSTVisits == 0 || work.PlannedBlocks == 0) {
+					return fmt.Errorf("encrypted fixture did not exercise SST reads: %+v", work)
+				}
+				t.Logf("CLI blob work: %d size RPCs, work %+v", main.BlobLookup.SizeRPCs, work)
+				t.Logf("CLI blob batching: delay_ns=%d handles=%d rpcs=%d collect_ns=%d result_wait_ns=%d main_seconds=%.6f",
+					main.BlobLookup.DelayNS, main.BlobLookup.SizeHandles, work.Samples, main.BlobLookup.CollectNS, main.BlobLookup.ResultWaitNS, main.SecondsElapsed)
+			}
+			if summary.TotalFilesProcessed != regularFiles || summary.DataBlobs != 0 ||
+				(!blobWork && (summary.Unmodified != regularFiles || summary.New != 0 || summary.Changed != 0)) {
+				return fmt.Errorf("unchanged native crawl changed or transferred file data: %+v", summary)
+			}
+			if main.Phase != "main_backup" || main.SecondsElapsed <= 0 || main.Reconciliation.Observed != uint64(len(paths)) ||
+				main.Reconciliation.Scanned != uint64(len(paths)) || main.Reconciliation.Failed != 0 || main.Reconciliation.Deferred != 0 {
+				return fmt.Errorf("unchanged native crawl lacks complete main interval: %+v", main)
+			}
+			all := testListSnapshots(t, options, 2)
+			for _, id := range all {
+				if id != ids[0] {
+					snapshot := testLoadSnapshot(t, options, id)
+					if snapshot.CrawlPlan == nil || snapshot.CrawlPlan.Mode != "full" || snapshot.CrawlPlan.ReusedSubtrees != 0 {
+						return fmt.Errorf("unchanged native backup did not use a full crawl")
+					}
+					if (!blobWork && (snapshot.Parent == nil || *snapshot.Parent != ids[0])) || (blobWork && snapshot.Parent != nil) {
+						return fmt.Errorf("unexpected parent for unchanged native backup (forced=%t): %v", blobWork, snapshot.Parent)
+					}
+					restored := t.TempDir()
+					if err := testRunRestoreAssumeFailure(t, id.String(), restoreOptions{Target: restored, Verify: true}, options); err != nil {
+						return err
+					}
+					selected := make(map[string]bool, len(paths))
+					for _, path := range paths {
+						selected[path] = true
+					}
+					expectedHash, expectedFiles, expectedBytes := m5FilesSelected(t, environment.testdata, false, selected)
+					actualHash, actualFiles, actualBytes := m5FilesSelected(t, filepath.Join(restored, strings.TrimPrefix(environment.testdata, "/")), false, selected)
+					if expectedHash != actualHash || expectedFiles != actualFiles || expectedBytes != actualBytes {
+						return fmt.Errorf("unchanged snapshot restore differs from source")
+					}
+				}
+			}
+			t.Logf("unchanged_native_full_crawl files=%d observed=%d data_blobs=%d metadata_and_pack_bytes=%d main_seconds=%.6f files_per_second=%.3f archive_seconds=%.6f",
+				regularFiles, main.Reconciliation.Observed, summary.DataBlobs, summary.DataAdded, main.SecondsElapsed, float64(regularFiles)/main.SecondsElapsed, summary.TotalDuration)
+			status, err := client.WriterStatus(ctx)
+			if err != nil {
+				return err
+			}
+			if status.ActiveTransactions != 0 || status.ActiveWriteIntents != 0 || (metaCacheBytes != 0 && status.EngineMetaCacheBytes != metaCacheBytes) {
+				return fmt.Errorf("candidate left active work or ignored cache sizing")
+			}
+			if candidate == "/root/proj/vaultic/bin/phase35-metadata-read/linux-amd64/vaultic" && status.Attribution.EncryptionReads == nil {
+				return fmt.Errorf("authenticated native transport omitted encryption read attribution")
+			}
+			if candidate == "/root/proj/vaultic/bin/phase35-forced-followup/linux-amd64/vaultic" &&
+				(status.Attribution.EncryptionReads == nil || status.Attribution.CacheReads == nil || main.Reconciliation.PublicationStages == nil) {
+				return fmt.Errorf("authenticated follow-up transport omitted cache, encryption or publication attribution")
+			}
+			if catalogScreen {
+				rss, err := os.ReadFile(rssPath)
+				if err != nil {
 					return err
 				}
-				selected := make(map[string]bool, len(paths))
-				for _, path := range paths {
-					selected[path] = true
+				peak, err := strconv.ParseUint(strings.TrimSpace(string(rss)), 10, 64)
+				if err != nil || peak == 0 {
+					return fmt.Errorf("missing peak CLI RSS: %q", rss)
 				}
-				expectedHash, expectedFiles, expectedBytes := m5FilesSelected(t, environment.testdata, false, selected)
-				actualHash, actualFiles, actualBytes := m5FilesSelected(t, filepath.Join(restored, strings.TrimPrefix(environment.testdata, "/")), false, selected)
-				if expectedHash != actualHash || expectedFiles != actualFiles || expectedBytes != actualBytes {
-					return fmt.Errorf("unchanged snapshot restore differs from source")
+				t.Logf("catalog_screen leg=%d catalog=%t command_ns=%d main_seconds=%.6f cli_peak_kib=%d entries=%d load_ns=%d size_rpcs=%d",
+					leg, catalog, wall.Nanoseconds(), main.SecondsElapsed, peak, main.BlobLookup.CatalogEntries, main.BlobLookup.CatalogLoadNS, main.BlobLookup.SizeRPCs)
+			}
+			return nil
+		}
+		if !catalogScreen {
+			return runForced(options, client, 0, false)
+		}
+		rtest.OK(t, client.Close(context.Background()))
+		client = nil
+		for leg, catalog := range []bool{false, true, true, false} {
+			legOptions, legDaemon := options, daemonOptions
+			legOptions.Repo, legDaemon.DataDir = t.TempDir(), t.TempDir()
+			for _, pair := range [][2]string{{options.Repo, legOptions.Repo}, {daemonOptions.DataDir, legDaemon.DataDir}} {
+				source, target := pair[0]+"/", pair[1]+"/"
+				if output, err := exec.CommandContext(ctx, "/usr/bin/rsync", "-a", source, target).CombinedOutput(); err != nil {
+					return fmt.Errorf("clone catalog seed: %w: %s", err, output)
+				}
+				if output, err := exec.CommandContext(ctx, "/usr/bin/rsync", "-acni", "--delete", source, target).CombinedOutput(); err != nil || len(output) != 0 {
+					return fmt.Errorf("catalog seed clone differs: %v: %s", err, output)
 				}
 			}
-		}
-		t.Logf("unchanged_native_full_crawl files=%d observed=%d data_blobs=%d metadata_and_pack_bytes=%d main_seconds=%.6f files_per_second=%.3f archive_seconds=%.6f",
-			regularFiles, main.Reconciliation.Observed, summary.DataBlobs, summary.DataAdded, main.SecondsElapsed, float64(regularFiles)/main.SecondsElapsed, summary.TotalDuration)
-		status, err := client.WriterStatus(ctx)
-		if err != nil {
-			return err
-		}
-		if status.ActiveTransactions != 0 || status.ActiveWriteIntents != 0 || (metaCacheBytes != 0 && status.EngineMetaCacheBytes != metaCacheBytes) {
-			return fmt.Errorf("candidate left active work or ignored cache sizing")
-		}
-		if candidate == "/root/proj/vaultic/bin/phase35-metadata-read/linux-amd64/vaultic" && status.Attribution.EncryptionReads == nil {
-			return fmt.Errorf("authenticated native transport omitted encryption read attribution")
-		}
-		if candidate == "/root/proj/vaultic/bin/phase35-forced-followup/linux-amd64/vaultic" &&
-			(status.Attribution.EncryptionReads == nil || status.Attribution.CacheReads == nil || main.Reconciliation.PublicationStages == nil) {
-			return fmt.Errorf("authenticated follow-up transport omitted cache, encryption or publication attribution")
+			legDaemon.Socket = testMetadataSocket(t)
+			legOptions.MetadataDaemonSocket = legDaemon.Socket
+			legDaemon.EncryptionMode = "required"
+			client, err = daemon.Ensure(ctx, legDaemon)
+			if err != nil {
+				return err
+			}
+			if err := runForced(legOptions, client, leg+1, catalog); err != nil {
+				return err
+			}
+			rtest.OK(t, client.Close(context.Background()))
+			client = nil
 		}
 		return nil
 	}))
@@ -1036,10 +1180,19 @@ func publicationAdmissionBundle(root string) string {
 		return filepath.Join(filepath.Dir(publicationAdmissionBin)+"-prefetch", filepath.Base(publicationAdmissionBin))
 	case filepath.Join(publicationAdmissionRoot+"-source-db", "leg-01-source-db"):
 		return filepath.Join(filepath.Dir(publicationAdmissionBin)+"-source-db", filepath.Base(publicationAdmissionBin))
+	case filepath.Join(publicationAdmissionRoot+"-blob-work", "leg-01-blob-work"):
+		return filepath.Join(filepath.Dir(publicationAdmissionBin)+"-blob-work", filepath.Base(publicationAdmissionBin))
+	case filepath.Join(publicationAdmissionRoot+"-blob-work-retry2", "leg-02-blob-work"):
+		return filepath.Join(filepath.Dir(publicationAdmissionBin)+"-blob-work-retry2", filepath.Base(publicationAdmissionBin))
+	case filepath.Join(publicationAdmissionRoot+"-catalog-control", "leg-01-catalog-control"):
+		return filepath.Join(filepath.Dir(publicationAdmissionBin)+"-catalog-control", filepath.Base(publicationAdmissionBin))
+	case filepath.Join(publicationAdmissionRoot+"-catalog-on", "leg-02-catalog-on"):
+		return filepath.Join(filepath.Dir(publicationAdmissionBin)+"-catalog-on", filepath.Base(publicationAdmissionBin))
 	default:
 		return ""
 	}
 }
+
 const publicationAdmissionGoMax = 512 << 20
 
 func publicationFileReadGate(ctx context.Context, root string, before daemon.WriterStatus, after *daemon.WriterStatus, critical json.RawMessage) (json.RawMessage, error) {
@@ -1155,6 +1308,10 @@ func TestPublicationOriginFilePolicy(t *testing.T) {
 		{publicationAdmissionRoot + "-candidate", "leg-02-dir-candidate"},
 		{publicationAdmissionRoot + "-prefetch", "leg-01-dir-prefetch"},
 		{publicationAdmissionRoot + "-source-db", "leg-01-source-db"},
+		{publicationAdmissionRoot + "-blob-work", "leg-01-blob-work"},
+		{publicationAdmissionRoot + "-blob-work-retry2", "leg-02-blob-work"},
+		{publicationAdmissionRoot + "-catalog-control", "leg-01-catalog-control"},
+		{publicationAdmissionRoot + "-catalog-on", "leg-02-catalog-on"},
 	} {
 		t.Run(route.label, func(t *testing.T) {
 			for _, key := range []string{"VAULTIC_PHASE35_READERS_LEG", "VAULTIC_PHASE35_RAM32_LEG", "VAULTIC_PHASE35_RAM64_LEG", "VAULTIC_PHASE35_ORIGINAL_PARENT", "VAULTIC_PHASE35_PRODUCER_LEG"} {
@@ -4140,6 +4297,9 @@ func publicationQualificationForceComparison(t *testing.T, cell, source, candida
 			"backup", "--no-scan", "--one-file-system", "--read-concurrency=16",
 			"--metadata-reconciliation-queue-depth=256", "--metadata-on-demand", "--metadata-cache-mib=64",
 			"--working-memory-mode=ram", "--working-memory-ram-limit=160GiB", "--working-memory-scratch=" + filepath.Join(legOptions.Repo, "working"), "--working-memory-disk-budget=2GiB"}
+		if rawRoot == filepath.Join(publicationAdmissionRoot+"-catalog-on", "leg-02-catalog-on") {
+			extraFlags = append(slices.Clone(extraFlags), "--metadata-exact-catalog")
+		}
 		args = append(args, extraFlags...)
 		hasPublicationGroup := false
 		for _, flag := range extraFlags {

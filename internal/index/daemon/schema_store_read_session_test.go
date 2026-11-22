@@ -2,10 +2,16 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
 	"math"
+	"os"
+	"path/filepath"
+	"slices"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -88,6 +94,340 @@ func TestReadSessionBlobSizeMultiGetModes(t *testing.T) {
 				t.Fatalf("catalog escaped the pinned session: %+v", catalog)
 			}
 		})
+	}
+}
+
+func TestEncryptedBlobSizeReadAttribution(t *testing.T) {
+	if os.Getenv("VAULTICDB_TEST_BLOB_SIZE_READS") != "1" {
+		t.Skip("set VAULTICDB_TEST_BLOB_SIZE_READS=1 to run the encrypted fixture")
+	}
+	ctx := t.Context()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	passphrase := filepath.Join(root, "passphrase")
+	if err := os.WriteFile(passphrase, []byte("vaultic blob size fixture\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(passphrase, 0600); err != nil {
+		t.Fatal(err)
+	}
+	options := Options{
+		Socket: testSocket(t), DaemonPath: daemonBinary(t), RepositoryID: "encrypted-blob-size-reads",
+		DataDir: root, EncryptionMode: "initialize", PassphraseFile: passphrase,
+		EngineMultiGet: true, WALFlushInterval: 25 * time.Millisecond,
+		BlockCacheBytes: 512 << 20, MetaCacheBytes: 2 << 30,
+	}
+	if os.Getenv("VAULTICDB_TEST_BLOB_WORK") == "1" {
+		options.testEnvironment = []string{"VAULTICDB_DIAGNOSTIC_BLOB_WORK=1"}
+	}
+	open := func(t *testing.T, options Options) (*Client, func()) {
+		t.Helper()
+		client, err := Ensure(ctx, options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		closed := false
+		closeClient := func() {
+			if !closed {
+				closed = true
+				if err := client.Close(context.Background()); err != nil {
+					t.Error(err)
+				}
+			}
+		}
+		t.Cleanup(closeClient)
+		return client, closeClient
+	}
+	dispersed := os.Getenv("VAULTICDB_TEST_BLOB_SIZE_DISPERSED") == "1"
+	filtered := dispersed && os.Getenv("VAULTICDB_TEST_BLOB_SIZE_FILTERED") == "1"
+	if filtered {
+		options.L0SSTSizeBytes = 192 << 10
+	} else if dispersed && os.Getenv("VAULTICDB_TEST_BLOB_SIZE_MULTI_SST") == "1" {
+		options.L0SSTSizeBytes = 64 << 10
+	}
+	writer, closeWriter := open(t, options)
+	store := NewSchemaStore(writer)
+	if dispersed {
+		width := 5
+		switch value := os.Getenv("VAULTICDB_TEST_BLOB_SIZE_WIDTH"); value {
+		case "", "5":
+		case "20":
+			width = 20
+		default:
+			t.Fatalf("unsupported dispersed blob size width %q", value)
+		}
+		const packCount, blobsPerPack = 40, 100
+		keys := make([][]byte, 0, packCount*blobsPerPack)
+		blobLength := uint32(crypto.CiphertextLength(7))
+		for packOrdinal := range packCount {
+			packID := daemonTestID(byte(packOrdinal + 128))
+			published := PublishedPack{
+				PackID: packID,
+				Record: schema.PackRecord{Type: schema.PackData, PayloadSize: uint64(blobsPerPack * blobLength),
+					BlobCount: blobsPerPack, Lifecycle: schema.PackExportPending},
+				Blobs: make(map[schema.ID]schema.BlobRecord, blobsPerPack),
+			}
+			for ordinal := range blobsPerPack {
+				blobID := sha256.Sum256(fmt.Appendf(nil, "dispersed-blob-%d", len(keys)))
+				published.Blobs[blobID] = schema.BlobRecord{Locations: []schema.BlobLocation{{
+					PackID: packID, Offset: uint64(ordinal) * uint64(blobLength), Length: blobLength, Type: schema.BlobData,
+				}}}
+				keys = append(keys, schema.BlobKey(blobID))
+			}
+			if err := store.PublishPack(ctx, published); err != nil {
+				t.Fatal(err)
+			}
+		}
+		closeWriter()
+		options.EncryptionMode = "required"
+		t.Setenv("VAULTICDB_CHUNK_CACHE_BYTES", "16777216")
+		for leg, depth := range []int{1, 32, 32, 1} {
+			t.Run(fmt.Sprintf("leg=%d/depth=%d", leg+1, depth), func(t *testing.T) {
+				options.Socket = testSocket(t)
+				reader, _ := open(t, options)
+				measureDispersedBlobReads(t, reader, keys, width, depth, options.L0SSTSizeBytes > 0, filtered)
+			})
+		}
+		return
+	}
+	var keys [][]byte
+	for index := range 96 {
+		blobID := daemonTestID(byte(index + 1))
+		if err := store.PublishPack(ctx, readSessionTestPack(daemonTestID(byte(index+128)), blobID)); err != nil {
+			t.Fatal(err)
+		}
+		if index%6 == 0 {
+			keys = append(keys, schema.BlobKey(blobID))
+		}
+	}
+	closeWriter()
+	options.EncryptionMode = "required"
+	for _, width := range []int{1, 5, 16} {
+		for _, chunkBytes := range []int{16 << 20, 0} {
+			t.Run(fmt.Sprintf("width=%d/chunk-bytes=%d", width, chunkBytes), func(t *testing.T) {
+				options.Socket = testSocket(t)
+				t.Setenv("VAULTICDB_CHUNK_CACHE_BYTES", fmt.Sprint(chunkBytes))
+				reader, _ := open(t, options)
+				store := NewSchemaStore(reader)
+				snapshot := func() WriterStatus {
+					status, err := reader.WriterStatus(ctx)
+					if err != nil || status.ActiveTransactions != 0 || status.ActiveWriteIntents != 0 ||
+						!status.Attribution.EngineMultiGetMetricsAvailable || status.Attribution.CacheReads == nil ||
+						status.Attribution.EncryptionReads == nil || status.Attribution.EncryptionReads.CiphertextOriginFileRangeRead == nil {
+						t.Fatalf("isolated read counters unavailable: %v", err)
+					}
+					return status
+				}
+				read := func(phase string) ReadTiming {
+					t.Helper()
+					var timing ReadTiming
+					values, found, err := store.MultiGet(WithReadTiming(ctx, &timing), keys[:width])
+					if err != nil || !timing.Valid || !timing.DatabaseTimingValid || timing.EngineNS == 0 ||
+						len(values) != width || len(found) != width {
+						t.Fatalf("%s did not isolate one timed engine batch: timing=%+v err=%v", phase, timing, err)
+					}
+					for ordinal, value := range values {
+						sizes, err := decodeBlobSizes(value.Value)
+						if !found[ordinal] || string(value.Key) != string(keys[ordinal]) || err != nil ||
+							sizes[vaultic.DataBlob] != (vaultic.BlobSize{Size: 7, Found: true}) {
+							t.Fatalf("%s unexpected blob record at %d: %v", phase, ordinal, err)
+						}
+					}
+					return timing
+				}
+				measure := func(phase string, calls int) {
+					t.Helper()
+					before := snapshot()
+					var total ReadTiming
+					for range calls {
+						timing := read(phase)
+						total.ClientNS += timing.ClientNS
+						total.HandlerNS += timing.HandlerNS
+						total.StorageNS += timing.StorageNS
+						total.DatabaseLockNS += timing.DatabaseLockNS
+						total.EngineNS += timing.EngineNS
+					}
+					after := snapshot()
+					if before.InstanceID != after.InstanceID ||
+						after.Attribution.EngineMultiGetCalls-before.Attribution.EngineMultiGetCalls != uint64(calls) ||
+						after.Attribution.EngineMultiGetInputKeys-before.Attribution.EngineMultiGetInputKeys != uint64(calls*width) {
+						t.Fatalf("%s did not isolate %d engine batches of %d keys", phase, calls, width)
+					}
+					oldBlock, newBlock := (*before.Attribution.CacheReads)["block"], (*after.Attribution.CacheReads)["block"]
+					oldEncryption, newEncryption := before.Attribution.EncryptionReads, after.Attribution.EncryptionReads
+					oldFile, newFile := oldEncryption.CiphertextOriginFileRangeRead, newEncryption.CiphertextOriginFileRangeRead
+					if newBlock.Hits < oldBlock.Hits || newBlock.Misses < oldBlock.Misses ||
+						newEncryption.ChunkCacheHits < oldEncryption.ChunkCacheHits || newEncryption.ChunkCacheMisses < oldEncryption.ChunkCacheMisses ||
+						newFile.ReadCalls < oldFile.ReadCalls || newFile.ReadBytes < oldFile.ReadBytes {
+						t.Fatalf("%s counters reset", phase)
+					}
+					t.Logf("phase=%s calls=%d keys_per_call=%d block_hits=%d block_misses=%d chunk_hits=%d chunk_misses=%d file_reads=%d file_bytes=%d rpc_ns=%d handler_ns=%d storage_ns=%d lock_ns=%d engine_ns=%d",
+						phase, calls, width, newBlock.Hits-oldBlock.Hits, newBlock.Misses-oldBlock.Misses,
+						newEncryption.ChunkCacheHits-oldEncryption.ChunkCacheHits, newEncryption.ChunkCacheMisses-oldEncryption.ChunkCacheMisses,
+						newFile.ReadCalls-oldFile.ReadCalls, newFile.ReadBytes-oldFile.ReadBytes,
+						total.ClientNS, total.HandlerNS, total.StorageNS, total.DatabaseLockNS, total.EngineNS)
+				}
+				measure("first", 1)
+				measure("repeat", 1)
+				if os.Getenv("VAULTICDB_TEST_BLOB_SIZE_PROFILE") == "1" {
+					started := time.Now()
+					measure("profile-warm", 20000)
+					t.Logf("profile_realtime_start_ns=%d profile_realtime_end_ns=%d", started.UnixNano(), time.Now().UnixNano())
+				}
+			})
+		}
+	}
+}
+
+func measureDispersedBlobReads(t *testing.T, client *Client, keys [][]byte, width, depth int, multiSST, filtered bool) {
+	t.Helper()
+	ctx := t.Context()
+	if len(keys)%width != 0 {
+		t.Fatalf("%d keys cannot be covered exactly at width %d", len(keys), width)
+	}
+	calls := len(keys) / width
+	store := NewSchemaStore(client)
+	requestWork := os.Getenv("VAULTICDB_TEST_BLOB_WORK") == "1"
+	multiGet := store.MultiGet
+	var activeTransactions uint64
+	if requestWork {
+		session, err := store.BeginReadSession(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer session.Close(context.Background())
+		multiGet = session.MultiGet
+		activeTransactions = 1
+	}
+	snapshot := func() WriterStatus {
+		status, err := client.WriterStatus(ctx)
+		if err != nil || uint64(status.ActiveTransactions) != activeTransactions || status.ActiveWriteIntents != 0 ||
+			!status.Attribution.EngineMultiGetMetricsAvailable || status.Attribution.CacheReads == nil ||
+			status.Attribution.EncryptionReads == nil || status.Attribution.EncryptionReads.CiphertextOriginFileRangeRead == nil {
+			t.Fatalf("isolated read counters unavailable: %v", err)
+		}
+		return status
+	}
+	for _, phase := range []string{"first-pass", "repeat"} {
+		before := snapshot()
+		var next, active, peak atomic.Int64
+		started := make(chan struct{})
+		var workers sync.WaitGroup
+		latencies := make([]time.Duration, calls)
+		timings := make([]ReadTiming, calls)
+		for range depth {
+			workers.Go(func() {
+				<-started
+				for {
+					index := int(next.Add(1) - 1)
+					if index >= calls {
+						return
+					}
+					batch := keys[index*width : (index+1)*width]
+					inFlight := active.Add(1)
+					for previous := peak.Load(); inFlight > previous && !peak.CompareAndSwap(previous, inFlight); previous = peak.Load() {
+					}
+					callStart := time.Now()
+					callCtx := WithReadTiming(ctx, &timings[index])
+					var work BlobReadWorkTotals
+					if requestWork {
+						callCtx = WithBlobReadWork(callCtx, &work)
+					}
+					values, found, err := multiGet(callCtx, batch)
+					latencies[index] = time.Since(callStart)
+					active.Add(-1)
+					if err != nil || !timings[index].Valid || timings[index].DatabaseTimingValid == requestWork || len(values) != width || len(found) != width {
+						t.Errorf("%s batch %d invalid timing or response: %v", phase, index, err)
+						return
+					}
+					if requestWork {
+						sample := timings[index].BlobWork
+						if !sample.Valid || work != (BlobReadWorkTotals{Samples: 1, SSTVisits: sample.SSTVisits,
+							FilterNegatives: sample.FilterNegatives, PlannedBlocks: sample.PlannedBlocks}) {
+							t.Errorf("%s batch %d work sample and accumulator disagree: %+v / %+v", phase, index, sample, work)
+							return
+						}
+					}
+					for ordinal, value := range values {
+						sizes, err := decodeBlobSizes(value.Value)
+						if !found[ordinal] || string(value.Key) != string(batch[ordinal]) || err != nil ||
+							sizes[vaultic.DataBlob] != (vaultic.BlobSize{Size: 7, Found: true}) {
+							t.Errorf("%s batch %d unexpected blob record at %d: %v", phase, index, ordinal, err)
+							return
+						}
+					}
+				}
+			})
+		}
+		wallStart := time.Now()
+		close(started)
+		workers.Wait()
+		elapsed := time.Since(wallStart)
+		after := snapshot()
+		old, current := before.Attribution, after.Attribution
+		if before.InstanceID != after.InstanceID || peak.Load() != int64(depth) ||
+			current.EngineMultiGetCalls-old.EngineMultiGetCalls != uint64(calls) ||
+			current.EngineMultiGetInputKeys-old.EngineMultiGetInputKeys != uint64(len(keys)) ||
+			current.EngineMultiGetUniqueKeys-old.EngineMultiGetUniqueKeys != uint64(len(keys)) ||
+			current.EngineWriteOps != old.EngineWriteOps || current.CommitRequest.Attempts != old.CommitRequest.Attempts {
+			t.Fatalf("%s did not isolate %d complete batches at peak %d: peak=%d", phase, calls, depth, peak.Load())
+		}
+		oldBlock, newBlock := (*old.CacheReads)["block"], (*current.CacheReads)["block"]
+		oldFile, newFile := old.EncryptionReads.CiphertextOriginFileRangeRead, current.EncryptionReads.CiphertextOriginFileRangeRead
+		if current.EngineMultiGetSSTVisits < old.EngineMultiGetSSTVisits ||
+			current.EngineMultiGetCandidateKeys < old.EngineMultiGetCandidateKeys ||
+			current.EngineMultiGetNeededBlocks < old.EngineMultiGetNeededBlocks ||
+			current.EngineMultiGetNeededBlockBytes < old.EngineMultiGetNeededBlockBytes ||
+			current.EngineMultiGetCoalescedReads < old.EngineMultiGetCoalescedReads ||
+			current.EngineFilterPointNegative < old.EngineFilterPointNegative ||
+			newBlock.Hits < oldBlock.Hits || newBlock.Misses < oldBlock.Misses ||
+			newFile.ReadCalls < oldFile.ReadCalls || newFile.ReadBytes < oldFile.ReadBytes {
+			t.Fatalf("%s counters reset", phase)
+		}
+		visits := current.EngineMultiGetSSTVisits - old.EngineMultiGetSSTVisits
+		if multiSST && visits <= uint64(calls) {
+			t.Fatalf("%s multi-SST fixture did not exercise fan-out: visits=%d calls=%d", phase, visits, calls)
+		}
+		negatives := current.EngineFilterPointNegative - old.EngineFilterPointNegative
+		if filtered && negatives == 0 {
+			t.Fatalf("%s filtered fixture did not reject any candidate keys", phase)
+		}
+		var rpcNS, storageNS, lockNS, engineNS uint64
+		var inFlightTime time.Duration
+		var samples uint64
+		var work BlobReadWork
+		for index, timing := range timings {
+			inFlightTime += latencies[index]
+			rpcNS += timing.ClientNS
+			storageNS += timing.StorageNS
+			lockNS += timing.DatabaseLockNS
+			engineNS += timing.EngineNS
+			if timing.BlobWork.Valid {
+				samples++
+				work.SSTVisits += timing.BlobWork.SSTVisits
+				work.FilterNegatives += timing.BlobWork.FilterNegatives
+				work.PlannedBlocks += timing.BlobWork.PlannedBlocks
+			}
+		}
+		if requestWork {
+			if samples != uint64(calls) || work.SSTVisits != visits || work.FilterNegatives != negatives ||
+				work.PlannedBlocks != current.EngineMultiGetNeededBlocks-old.EngineMultiGetNeededBlocks {
+				t.Fatalf("%s per-request work does not reconcile: samples=%d counts=%+v", phase, samples, work)
+			}
+			t.Logf("phase=%s authenticated_blob_samples=%d sst_visits=%d filter_negatives=%d planned_blocks=%d",
+				phase, samples, work.SSTVisits, work.FilterNegatives, work.PlannedBlocks)
+		}
+		slices.Sort(latencies)
+		t.Logf("phase=%s calls=%d keys=%d peak=%d mean_inflight=%.3f wall_ns=%d p50_ns=%d p99_ns=%d rpc_ns=%d storage_ns=%d lock_ns=%d engine_ns=%d sst_visits=%d filter_negatives=%d candidates=%d needed_blocks=%d needed_bytes=%d coalesced_reads=%d block_hits=%d block_misses=%d file_reads=%d file_bytes=%d",
+			phase, calls, len(keys), peak.Load(), float64(inFlightTime)/float64(elapsed), elapsed.Nanoseconds(),
+			latencies[(calls-1)/2].Nanoseconds(), latencies[(calls*99-1)/100].Nanoseconds(),
+			rpcNS, storageNS, lockNS, engineNS,
+			visits, negatives, current.EngineMultiGetCandidateKeys-old.EngineMultiGetCandidateKeys,
+			current.EngineMultiGetNeededBlocks-old.EngineMultiGetNeededBlocks, current.EngineMultiGetNeededBlockBytes-old.EngineMultiGetNeededBlockBytes,
+			current.EngineMultiGetCoalescedReads-old.EngineMultiGetCoalescedReads, newBlock.Hits-oldBlock.Hits, newBlock.Misses-oldBlock.Misses,
+			newFile.ReadCalls-oldFile.ReadCalls, newFile.ReadBytes-oldFile.ReadBytes)
 	}
 }
 

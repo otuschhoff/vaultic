@@ -22,6 +22,41 @@ type ReadTiming struct {
 	Valid                          bool
 	DatabaseLockNS, EngineNS       uint64
 	DatabaseTimingValid            bool
+	BlobWork                       BlobReadWork
+}
+
+type BlobReadWork struct {
+	SSTVisits, FilterNegatives, PlannedBlocks uint64
+	Valid                                     bool
+}
+
+type BlobReadWorkTotals struct {
+	Samples         uint64 `json:"samples,omitempty"`
+	SSTVisits       uint64 `json:"sst_visits,omitempty"`
+	FilterNegatives uint64 `json:"filter_negatives,omitempty"`
+	PlannedBlocks   uint64 `json:"planned_blocks,omitempty"`
+}
+
+type blobReadWorkKey struct{}
+
+func WithBlobReadWork(ctx context.Context, totals *BlobReadWorkTotals) context.Context {
+	return context.WithValue(ctx, blobReadWorkKey{}, totals)
+}
+
+func blobReadWork(headers metadata.MD) BlobReadWork {
+	var counts [3]uint64
+	for index, name := range [...]string{"x-vaulticdb-blob-sst-visits", "x-vaulticdb-blob-filter-negatives", "x-vaulticdb-blob-planned-blocks"} {
+		values := headers.Get(name)
+		if len(values) != 1 {
+			return BlobReadWork{}
+		}
+		count, err := strconv.ParseUint(values[0], 10, 64)
+		if err != nil {
+			return BlobReadWork{}
+		}
+		counts[index] = count
+	}
+	return BlobReadWork{SSTVisits: counts[0], FilterNegatives: counts[1], PlannedBlocks: counts[2], Valid: true}
 }
 
 func WithReadTiming(ctx context.Context, timing *ReadTiming) context.Context {
@@ -152,6 +187,15 @@ func (counters *rpcWaitCounters) intercept(ctx context.Context, method string, r
 				if timing, ok := ctx.Value(readTimingKey{}).(*ReadTiming); ok && timing != nil {
 					*timing = ReadTiming{ClientNS: elapsed, HandlerNS: handler, StorageNS: storage, Valid: true}
 					timing.DatabaseLockNS, timing.EngineNS, timing.DatabaseTimingValid = databaseReadTiming(headers, storage)
+					timing.BlobWork = blobReadWork(headers)
+				}
+				if totals, ok := ctx.Value(blobReadWorkKey{}).(*BlobReadWorkTotals); ok && totals != nil {
+					if work := blobReadWork(headers); work.Valid {
+						totals.Samples++
+						totals.SSTVisits += work.SSTVisits
+						totals.FilterNegatives += work.FilterNegatives
+						totals.PlannedBlocks += work.PlannedBlocks
+					}
 				}
 				value.ServerTimingCalls++
 				value.ServerTimingClientNS += elapsed

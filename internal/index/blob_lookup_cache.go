@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"runtime/trace"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/otuschhoff/vaultic/internal/index/daemon"
 	legacyindex "github.com/otuschhoff/vaultic/internal/repository/index"
 	"github.com/otuschhoff/vaultic/internal/repository/pack"
 	"github.com/otuschhoff/vaultic/internal/telemetry"
@@ -42,6 +44,7 @@ type CachedBlobLookup struct {
 	catalogEntries         uint64
 	catalogLoadNanoseconds uint64
 	coalesceDelay          time.Duration
+	measureBlobWork        bool
 	collecting             *coalescedBlobLookup
 	ctx                    context.Context
 	cancel                 context.CancelCauseFunc
@@ -81,6 +84,10 @@ type blobLookupCounters struct {
 	evictions                   atomic.Uint64
 	peakEntries                 atomic.Uint64
 	sizeRPCs                    atomic.Uint64
+	sizeWorkSamples             atomic.Uint64
+	sizeWorkSSTVisits           atomic.Uint64
+	sizeWorkFilterNegatives     atomic.Uint64
+	sizeWorkPlannedBlocks       atomic.Uint64
 	sizeHandles                 atomic.Uint64
 	sizeRPCNanoseconds          atomic.Uint64
 	sizeRPCActive               atomic.Uint64
@@ -114,6 +121,7 @@ type BlobLookupStats struct {
 	Capacity                              int                             `json:"capacity"`
 	AccountedCapacityBytes                int                             `json:"accounted_capacity_bytes"`
 	SizeRPCs                              uint64                          `json:"size_rpcs"`
+	SizeRPCWork                           *daemon.BlobReadWorkTotals      `json:"size_rpc_work,omitempty"`
 	SizeHandles                           uint64                          `json:"size_handles"`
 	SizeRPCNanoseconds                    uint64                          `json:"size_rpc_nanoseconds"`
 	SizeRPCActive                         uint64                          `json:"size_rpc_active"`
@@ -142,6 +150,14 @@ func (stats BlobLookupStats) Delta(baseline BlobLookupStats) BlobLookupStats {
 	stats.CacheMisses -= baseline.CacheMisses
 	stats.Evictions -= baseline.Evictions
 	stats.SizeRPCs -= baseline.SizeRPCs
+	if stats.SizeRPCWork != nil && baseline.SizeRPCWork != nil {
+		work, initial := *stats.SizeRPCWork, *baseline.SizeRPCWork
+		work.Samples -= initial.Samples
+		work.SSTVisits -= initial.SSTVisits
+		work.FilterNegatives -= initial.FilterNegatives
+		work.PlannedBlocks -= initial.PlannedBlocks
+		stats.SizeRPCWork = &work
+	}
 	stats.SizeHandles -= baseline.SizeHandles
 	stats.SizeRPCNanoseconds -= baseline.SizeRPCNanoseconds
 	stats.LookupCalls -= baseline.LookupCalls
@@ -182,6 +198,12 @@ func (lookup *CachedBlobLookup) Stats() BlobLookupStats {
 		SlotWaitNanoseconds: lookup.stats.slotWaitNanoseconds.Load(), ResultWaitNanoseconds: lookup.stats.resultWaitNanoseconds.Load(),
 		RPCConcurrencyLimit:                   cap(lookup.slots),
 		SizeRPCDurationBucketUpperNanoseconds: [8]uint64{1000000, 5000000, 10000000, 25000000, 50000000, 100000000, 500000000, ^uint64(0)},
+	}
+	if lookup.measureBlobWork {
+		stats.SizeRPCWork = &daemon.BlobReadWorkTotals{
+			Samples: lookup.stats.sizeWorkSamples.Load(), SSTVisits: lookup.stats.sizeWorkSSTVisits.Load(),
+			FilterNegatives: lookup.stats.sizeWorkFilterNegatives.Load(), PlannedBlocks: lookup.stats.sizeWorkPlannedBlocks.Load(),
+		}
 	}
 	for ordinal := range stats.SizeRPCDurationBuckets {
 		stats.SizeRPCDurationBuckets[ordinal] = lookup.stats.sizeRPCDurationBuckets[ordinal].Load()
@@ -494,8 +516,8 @@ func NewCachedBlobLookupContext(parent context.Context, session blobLookupSessio
 	}
 	ctx, cancel := context.WithCancelCause(owner)
 	lookup := &CachedBlobLookup{ctx: ctx, cancel: cancel, session: session, local: local, cache: cache,
-		coalesceDelay: delay,
-		slots:         make(chan struct{}, concurrency), pending: make(map[vaultic.BlobHandle]blobLookupResult),
+		coalesceDelay: delay, measureBlobWork: os.Getenv("VAULTICDB_DIAGNOSTIC_BLOB_WORK") == "1",
+		slots: make(chan struct{}, concurrency), pending: make(map[vaultic.BlobHandle]blobLookupResult),
 		capacity: budgetBytes / blobLookupCacheEntryBytes, policy: policy, charge: charge}
 	if policy != nil {
 		lookup.cacheCharge = uint64(lookup.capacity) * blobLookupCacheEntryBytes
@@ -808,8 +830,19 @@ func (lookup *CachedBlobLookup) querySizes(handles []vaultic.BlobHandle) ([]vaul
 		}
 	}
 	region := trace.StartRegion(lookup.ctx, "vaultic.metadata.size.rpc")
-	sizes, err := lookup.session.LookupBlobSizesContext(lookup.ctx, handles)
+	ctx := lookup.ctx
+	var work daemon.BlobReadWorkTotals
+	if lookup.measureBlobWork {
+		ctx = daemon.WithBlobReadWork(ctx, &work)
+	}
+	sizes, err := lookup.session.LookupBlobSizesContext(ctx, handles)
 	region.End()
+	if work.Samples != 0 {
+		lookup.stats.sizeWorkSamples.Add(work.Samples)
+		lookup.stats.sizeWorkSSTVisits.Add(work.SSTVisits)
+		lookup.stats.sizeWorkFilterNegatives.Add(work.FilterNegatives)
+		lookup.stats.sizeWorkPlannedBlocks.Add(work.PlannedBlocks)
+	}
 	elapsed := time.Since(started)
 	lookup.stats.sizeRPCActive.Add(^uint64(0))
 	lookup.stats.sizeRPCNanoseconds.Add(uint64(elapsed))

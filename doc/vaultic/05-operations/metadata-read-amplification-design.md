@@ -4115,6 +4115,105 @@ The sealed capture is under
 Local receipts, including `source-db-summary.json` and
 `three-way-overlap.json`, are in `/run/vaultic-source-db-inputs-20261121`.
 
+The sealed leg's perf events contain positional syscall and NFS tracepoints,
+not CPU samples. They cannot explain the 17.010 s with neither observed
+read type. An opt-in local encrypted blob-record fixture instead isolates
+authenticated nontransactional MultiGets at widths 1, 5, and 16. The sealed
+leg averaged 5.02 handles per size RPC; the fixture does not reproduce its
+key distribution, storage layout, or concurrent load.
+
+Across two fixture runs, first-touch batches at every width missed the
+SlateDB block cache but made no positional read with the 16 MiB encrypted
+chunk cache. Disabling only that cache yielded one positional read of
+about 38.6 kB at each width. Repeats had no block misses or file reads in
+either configuration. Daemon reopen is not an OS-cache reset.
+
+A capped userspace cycles profile of 20,000 warm five-key batches verified
+100,000 keys, 20,000 block hits, and no block misses or file reads. The
+warm window covered 5.725 s; authenticated samples summed 1.253 s inside
+SlateDB and 4.211 ms waiting for the outer read lock. Sampled execution
+included SlateDB key routing and in-block seeks as well as buffer and
+allocation work. These are CPU observations on a local cache-resident
+fixture; neither the cycle profile nor the engine elapsed split measures
+off-CPU waits in the NCL1 run. The profile and clock calibration are in
+`/run/vaultic-blob-size-profile.8K5xbV`.
+
+Do not advance a cache, lock, or concurrency change on this evidence.
+A follow-up local encrypted fixture (`VAULTICDB_TEST_BLOB_SIZE_READS=1`
+and `VAULTICDB_TEST_BLOB_SIZE_DISPERSED=1`) issued the same 800 five-key
+batches in each first-pass and repeat window. It reopened the daemon for
+each leg in depth order 1, 32, 32, 1, with the 16 MiB chunk cache enabled.
+Each window verified 4,000 ordered results and authenticated timings, one
+engine batch per RPC, and no committed writes. Across the three layouts,
+mean client RPC overlap was 0.99 at peak 1 and 30.89-31.62 at peak 32.
+The higher depth completed more batches per second despite higher p99
+call latency. This is RPC overlap, not NASDA2 positional read depth.
+
+| Private layout | Visits per batch | Filter negatives per window | Candidate keys per window | Planned blocks per window | Repeat wall at depth 1 / 32 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Default SST target | 1 | Not recorded | 4,000 | 3,929 | 224-275 / 60 ms |
+| 64 KiB target, multi-SST (`VAULTICDB_TEST_BLOB_SIZE_MULTI_SST=1`) | 7 | Not recorded | 28,000 | 24,516 | 340-360 / 54-60 ms |
+| 192 KiB target, filter-active (`VAULTICDB_TEST_BLOB_SIZE_FILTERED=1`) | 3 | 4,763 | 7,237 | 6,739 | 274-282 / 57-66 ms |
+
+Within each layout, depth and cache warmth did not change visits, candidate
+keys, or planned blocks. First-pass file reads were one 262,160-byte read
+per default-layout leg and none in the other two layouts; all repeats
+had zero misses and file reads. The seven-SST layout exercised substantial
+speculative block work even with no observed file reads. Filter rejection
+in the three-SST layout is real, but these layouts vary the number and
+contents of tables, so their difference is not a filter speedup estimate.
+
+The sealed direct-NCL1 command averaged 23.24 visits over 109,043 engine
+MultiGets and recorded 19.55 million filter negatives. Those totals cover
+all read types, not just blob sizes. Use request-scoped counts to separate
+SSTs probed, filter rejections, and blocks planned for blob-size requests
+before choosing a candidate. A matched direct NCL1 qualification still
+needs a candidate that reduces measured work without changing results or
+publication behavior.
+
+The request-scoped diagnostic overlay is built from private copies of the
+pinned SlateDB and native daemon sources; it does not change the production
+engine pin. With `VAULTICDB_DIAGNOSTIC_BLOB_WORK=1`, successful native blob
+MultiGets return numeric counts for SST visits, filter negatives, and
+planned blocks. The counters follow the inline MultiGet future, not the
+worker thread. Backup size lookups accumulate only their own authenticated
+samples in `critical_path.blob_lookup.size_rpc_work`; missing metadata
+does not invalidate a read or synthesize a sample. The sample count must
+be checked before interpreting the totals. Planned blocks are not reads.
+
+In the private filter-active fixture, all eight windows through the pinned
+transactional read session returned 800 samples each. Every window's
+sample sums exactly matched the independent engine status deltas: 2,400
+SST visits, 4,762 filter negatives, and 6,740 planned blocks in this run.
+That reconciliation held at peak RPC depths 1 and 32. The diagnostic
+executable is `/run/vaultic-blob-work.lR4Xwe/vaulticdb-pinned-session`.
+
+The guarded direct-NCL1 retry (`leg-02-blob-work`) returned 85,670 work
+samples, exactly matching the size RPC trace count. Those RPCs accounted
+for 2,263,596 SST visits (88.33% of the command delta), 3,705,064 filter
+negatives (18.95%), and 451,056 planned blocks (39.30%). The exact NASDA2
+replay matched 152,307 reads and 40,754,503,140 bytes. The first attempt
+was rejected because the launcher scrubbed the diagnostic opt-in; it is
+not a zero-work observation.
+
+Wider batches reduced visits per key in the private fixture, but longer
+coalescing delays and ready-only dispatch did not reliably improve local
+CLI time. The exact catalog eliminated size RPCs and reduced mean full
+command time from 4.130 s to 3.890 s in the checksummed 32,768-file local
+screen. All four legs restored exactly and wrote no new data blobs.
+
+The direct-NCL1 catalog control passed at 294.137 s command wall with
+87,183 size RPCs. The catalog candidate hit the unchanged 1,200 s limit
+without an accepted result. The trace places the CLI in startup catalog
+construction: it scans the entire blob keyspace and inserts each decoded
+page into the encrypted RAM working store before the crawl. Process
+counters show about 9.6 GB transferred from daemon to CLI; the working
+policy reported no disk spill. They do not isolate daemon iteration,
+client decoding, and insertion costs. Retain on-demand lookup at this
+scale. A bounded catalog-only probe can report these costs separately;
+an on-demand read-ahead experiment should prioritize discovered blob IDs
+and report useful hits and foreground wait rather than target full coverage.
+
 All 46 legs, the read-depth replay, and the sweep inputs are retained under
 `/volume2/NASDA2/vaultic-test-m6/nasda2-headroom-20261118-v0ruxc9f`. Verify
 `SHA256SUMS` from that directory. The disposable write payloads were removed;
