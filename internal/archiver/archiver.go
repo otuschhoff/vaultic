@@ -1144,7 +1144,7 @@ func (arch *Archiver) loadParentTree(ctx context.Context, sn *data.Snapshot) (da
 		if errors.Is(err, vaultic.ErrMetadataLookup) || ctx.Err() != nil {
 			return nil, err
 		}
-		_ = arch.error("/", err)
+		_ = arch.error("/", err) // Report the failure without replacing the caller's result.
 		return nil, nil
 	}
 	return tree, nil
@@ -1377,7 +1377,7 @@ func (arch *Archiver) prepareCWalkManifest(ctx context.Context, targets []string
 		}
 		arch.cwalkManifest = stream
 		return func() {
-			_ = stream.Close()
+			_ = stream.Close() // Preserve the stream setup failure.
 			arch.cwalkManifest = nil
 		}, nil
 	}

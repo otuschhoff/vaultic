@@ -43,7 +43,7 @@ func openNative(ctx context.Context, config Config) (driver, error) {
 	failed := true
 	defer func() {
 		if failed {
-			_ = client.Close()
+			_ = client.Close() // Preserve the connection setup failure.
 		}
 	}()
 	if err := client.Connect(ctx); err != nil {
@@ -214,7 +214,7 @@ func (iterator *radosObjectIterator) setContext(ctx context.Context) {
 
 func (store *radosObjectStore) close() {
 	store.cursors.close()
-	_ = store.client.Close()
+	_ = store.client.Close() // Teardown is best effort on this shutdown path.
 }
 
 func (store *radosObjectStore) capacity(ctx context.Context, pool string) (backend.CapacityTelemetrySample, error) {

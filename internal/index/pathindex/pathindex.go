@@ -120,16 +120,17 @@ func (iterator *prefixIterator) next() (daemon.KeyValue, bool, error) {
 }
 
 type expectedPathIterator struct {
-	ctx       context.Context
-	store     Store
-	target    string
-	prefix    []byte
-	commits   uint64
-	commit    *prefixIterator
-	previous  indexhistory.Binding
-	hasPrior  bool
-	overflow  bool
-	overflowV []byte
+	ctx         context.Context
+	store       Store
+	target      string
+	prefix      []byte
+	commits     uint64
+	commit      *prefixIterator
+	previous    indexhistory.Binding
+	hasPrior    bool
+	overflow    bool
+	overflowV   []byte
+	overflowErr error
 }
 
 func newExpectedPathIterator(ctx context.Context, store Store, target string) *expectedPathIterator {
@@ -142,12 +143,15 @@ func newExpectedPathIterator(ctx context.Context, store Store, target string) *e
 	if overflow {
 		overflowKey := schema.PathOverflowKey(0, target, 0)
 		iterator.prefix = overflowKey[:len(overflowKey)-8]
-		iterator.overflowV, _ = (schema.PathVersionRecord{State: schema.PathOverflow, Path: target}).MarshalBinary()
+		iterator.overflowV, iterator.overflowErr = (schema.PathVersionRecord{State: schema.PathOverflow, Path: target}).MarshalBinary()
 	}
 	return iterator
 }
 
 func (iterator *expectedPathIterator) next() (daemon.KeyValue, bool, error) {
+	if iterator.overflowErr != nil {
+		return daemon.KeyValue{}, false, iterator.overflowErr
+	}
 	for {
 		entry, found, err := iterator.commit.next()
 		if err != nil || !found {

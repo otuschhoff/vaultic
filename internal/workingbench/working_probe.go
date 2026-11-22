@@ -173,7 +173,7 @@ func (probe *WorkingProbe) readOS() WorkingProbeOS {
 			if scanner.Err() != nil || found != 2 {
 				result.Unavailable = append(result.Unavailable, "storage_io")
 			}
-			_ = file.Close()
+			_ = file.Close() // Preserve the probe setup failure.
 		}
 	} else {
 		result.Unavailable = append(result.Unavailable, "storage_io")

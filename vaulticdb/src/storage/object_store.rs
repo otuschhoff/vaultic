@@ -628,7 +628,7 @@ impl RoleAwareObjectStore {
             .iter()
             .find_map(|path| {
                 Self::is_wal_path(path)
-                    .then(|| self.tagged_wal_metrics.as_ref())
+                    .then_some(self.tagged_wal_metrics.as_ref())
                     .flatten()
             })
             .map_or_else(|| Arc::clone(&self.metrics), Arc::clone)

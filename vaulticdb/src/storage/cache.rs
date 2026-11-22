@@ -4339,10 +4339,10 @@ async fn recover_quota_coordination(
             .unwrap_or_else(|lock| lock.into_inner())
             .values()
             .any(|pending| pending.index == index);
-        if !tier_has_pending_deletions {
-            if !tier.inventory_reconciliation_failed.load(Ordering::Acquire) {
-                tier.reconciliation_lag.store(0, Ordering::Release);
-            }
+        if !tier_has_pending_deletions
+            && !tier.inventory_reconciliation_failed.load(Ordering::Acquire)
+        {
+            tier.reconciliation_lag.store(0, Ordering::Release);
         }
     }
     quota

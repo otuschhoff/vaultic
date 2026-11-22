@@ -837,7 +837,7 @@ func (spool *locationSpool) mergePass() error {
 			}
 			if err := spool.scratch.reserve(reserved); err != nil {
 				if started == 0 {
-					_ = group.Wait()
+					_ = group.Wait() // Join workers without replacing the error already selected by the caller.
 					return err
 				}
 				break
@@ -1198,7 +1198,7 @@ func openLocationRun(run checkRun, scratch *checkScratch) (_ *locationRunReader,
 		return nil, err
 	}
 	if run.size < checkRunHeaderSize {
-		_ = file.Close()
+		_ = file.Close() // Preserve the preceding file operation failure.
 		return nil, fmt.Errorf("invalid checker run size")
 	}
 	result := &locationRunReader{file: file, reader: reader, aead: aead, remaining: run.size - checkRunHeaderSize, release: release}

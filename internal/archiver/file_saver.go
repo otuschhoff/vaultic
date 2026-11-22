@@ -448,7 +448,7 @@ func (s *fileSaver) saveFile(ctx context.Context, params saveFileParams) {
 	if s.PrepareFile != nil {
 		pipeline.workerOpenCalls.Add(1)
 		if err := s.PrepareFile(ctx, params.target, params.file); err != nil {
-			_ = params.file.Close()
+			_ = params.file.Close() // Preserve the file setup failure.
 			completion.completeError(err)
 			return
 		}

@@ -265,7 +265,7 @@ func runMonitorInfluxExport(ctx context.Context, globalOptions *global.Options, 
 	if err != nil {
 		return err
 	}
-	worker := telemetry.NewAsyncExporterWithConfig(exporter, telemetry.AsyncExporterConfig{
+	worker := telemetry.NewAsyncExporterWithConfig(exporter, telemetry.AsyncExporterConfig{ //nolint:contextcheck // The exporter owns its context so it can drain after cancellation.
 		Capacity: options.Queue, RetryLimit: options.RetryLimit, RetryBackoff: options.RetryBackoff, Timeout: options.Timeout,
 	})
 	defer worker.CloseWithin(options.Timeout)
@@ -372,13 +372,13 @@ func collectMonitorSnapshotWithMetricLimit(ctx context.Context, globalOptions *g
 	_, repo, unlock, err := openWithReadLock(ctx, *globalOptions, globalOptions.NoLock, printer)
 	if err != nil {
 		return telemetry.NewMonitorSnapshot(now,
-			repositoryMonitorComponentWithMetricLimit(nil, now, metricLimit),
+			repositoryMonitorComponentWithMetricLimit(nil, now, metricLimit), //nolint:contextcheck // A nil repository cannot start a cache worker.
 			awaitMonitorComponent(ctx, "key_broker", now, brokerResult),
 			unavailableMonitorComponent("vaulticdb", now),
 		), nil
 	}
 	defer unlock()
-	components := []telemetry.ComponentSnapshot{repositoryMonitorComponentWithMetricLimit(repo, now, metricLimit)}
+	components := []telemetry.ComponentSnapshot{repositoryMonitorComponentWithMetricLimit(repo, now, metricLimit)} //nolint:contextcheck // Repository.Close owns the cache worker lifetime.
 	daemonEngine, ok := repo.Engine().(*metadataindex.DaemonEngine)
 	if !ok {
 		components = append(components, awaitMonitorComponent(ctx, "key_broker", now, brokerResult))

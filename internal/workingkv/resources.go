@@ -159,7 +159,7 @@ func Resolve(configuration Configuration, resources Resources) (*Policy, error) 
 	if err != nil {
 		return nil, err
 	}
-	policy.disk, _ = NewBudget(disk)
+	policy.disk, _ = NewBudget(disk) // The validated disk limit is positive here.
 	policy.configured = requested
 	policy.resolution = Resolution{Configured: requested, Effective: effective, Envelope: capacity, Reserve: reserve, Headroom: headroom, Resources: resources, Unmanaged: unmanaged}
 	return policy, nil
@@ -327,7 +327,7 @@ func (policy *Policy) Start(ctx context.Context, probe func() (Resources, error)
 					continue
 				}
 				resources.OwnedFileCache = policy.ownedFileCacheBytes()
-				_ = policy.Observe(resources)
+				_ = policy.Observe(resources) // Observe records failures on the policy for its owner.
 			}
 		}
 	}()

@@ -9,11 +9,13 @@ use tokio::runtime::Runtime;
 
 use super::{
     store::{
-        Driver, DriverError, StoredMeta, StoredObject, WriteMode, ATTRIBUTES_XATTR,
+        Driver, DriverError, StoredMeta, StoredObject, WriteMode,
         MAX_ATTRIBUTES_SIZE,
     },
     Config,
 };
+
+const ATTRIBUTES_XATTR: &str = "vaultic.attributes";
 
 #[derive(Debug)]
 struct Native {

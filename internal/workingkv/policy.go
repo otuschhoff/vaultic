@@ -127,7 +127,7 @@ func (mutex *contextMutex) LockContext(ctx context.Context) error {
 		return ctx.Err()
 	}
 }
-func (mutex *contextMutex) Lock()   { _ = mutex.LockContext(context.Background()) }
+func (mutex *contextMutex) Lock()   { _ = mutex.LockContext(context.Background()) } // An uncancellable lock cannot fail.
 func (mutex *contextMutex) Unlock() { <-mutex.gate }
 
 func (store *WorkingStore) unlockOperation() {
@@ -465,7 +465,7 @@ func (store *WorkingStore) putLocked(ctx context.Context, entries []Entry, size 
 
 func (store *WorkingStore) growForWriteLocked(allocated, growth uint64) {
 	if store.mapLimit >= 1<<30 && (allocated >= store.mapLimit || growth >= store.mapLimit-allocated) {
-		_ = store.growLocked()
+		_ = store.growLocked() // Capacity growth is optional after a successful write.
 	}
 }
 

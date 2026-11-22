@@ -406,7 +406,8 @@ func runProfileBackupJob(
 		return err
 	}
 	defer stop()
-	err = global.WorkingMemoryError(runBackup(ctx, jobOptions, globalOptions, term, job.Sources), ctx)
+	err = runBackup(ctx, jobOptions, globalOptions, term, job.Sources)
+	err = global.WorkingMemoryError(err, ctx) //nolint:contextcheck // The context is already passed through the variadic argument.
 	phase := hooks.After
 	if err != nil {
 		phase = hooks.Failed

@@ -269,9 +269,11 @@ impl TimingMetric {
                 oldest = oldest.min(stamp);
             }
         }
-        let oldest_active_us = (oldest != u64::MAX)
-            .then(|| now.saturating_sub(oldest))
-            .unwrap_or(0);
+        let oldest_active_us = if oldest == u64::MAX {
+            0
+        } else {
+            now.saturating_sub(oldest)
+        };
         let completed = self.completed.load(Ordering::Relaxed);
         TimingSnapshot {
             attempts: self.attempts.load(Ordering::Relaxed),

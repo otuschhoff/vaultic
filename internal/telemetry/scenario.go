@@ -98,12 +98,12 @@ func (controller *ExperimentController) Sample(event ExperimentEvent) time.Durat
 	var encoded [12]byte
 	binary.BigEndian.PutUint64(encoded[:8], controller.profile.Seed)
 	binary.BigEndian.PutUint32(encoded[8:], event.Attempt)
-	_, _ = digest.Write(encoded[:])
-	_, _ = digest.Write([]byte(controller.profile.ProfileID))
-	_, _ = digest.Write([]byte{0})
-	_, _ = digest.Write([]byte(controller.profile.ResourceID))
-	_, _ = digest.Write([]byte{0})
-	_, _ = digest.Write([]byte(event.Identity))
+	_, _ = digest.Write(encoded[:])                            // hash.Hash.Write cannot fail.
+	_, _ = digest.Write([]byte(controller.profile.ProfileID))  // hash.Hash.Write cannot fail.
+	_, _ = digest.Write([]byte{0})                             // hash.Hash.Write cannot fail.
+	_, _ = digest.Write([]byte(controller.profile.ResourceID)) // hash.Hash.Write cannot fail.
+	_, _ = digest.Write([]byte{0})                             // hash.Hash.Write cannot fail.
+	_, _ = digest.Write([]byte(event.Identity))                // hash.Hash.Write cannot fail.
 	sum := digest.Sum(nil)
 	delay := controller.profile.DelayUS
 	if controller.profile.JitterUS != 0 {

@@ -189,6 +189,7 @@ func runBackupPipeline(ctx context.Context, options backupOptions, globalOptions
 	return runBackupPipelineWithSession(ctx, options, globalOptions, term, args, nil)
 }
 
+//nolint:contextcheck // Reuse the lock context from the same parent backup across targets.
 func runBackupPipelineWithSession(ctx context.Context, options backupOptions, globalOptions global.Options, term ui.Terminal, args []string, session *backupRepositorySession) (resultErr error) {
 	if session != nil && session.ctx != nil {
 		ctx = session.ctx
@@ -220,7 +221,7 @@ func (run *backupRun) close() {
 		run.cancel()
 	}
 	if run.reconciler != nil {
-		_ = run.reconciler.Close()
+		_ = run.reconciler.Close() // The backup failure remains authoritative.
 		run.reportReconciliationStats(run.reconciler.Metrics())
 	}
 	if run.closeSource != nil {
@@ -620,11 +621,12 @@ func (run *backupRun) startCriticalPathReporting() func() {
 	}
 	if run.repo != nil {
 		blobBaseline = run.repo.BlobSaveMetrics()
+		// Engines without lookup telemetry leave the provider nil.
 		lookupProvider, _ = run.repo.Engine().(interface {
 			BlobLookupStats() (enginepkg.BlobLookupStats, bool)
 		})
 		if lookupProvider != nil {
-			lookupBaseline, _ = lookupProvider.BlobLookupStats()
+			lookupBaseline, _ = lookupProvider.BlobLookupStats() // Zero is the baseline when the lookup has no statistics yet.
 		}
 	}
 	started := time.Now()
@@ -952,7 +954,7 @@ func openBackupFilesystem(run *backupRun) (resultErr error) {
 		}
 		run.targetFS = direct
 		run.closeSource = func() {
-			_ = direct.Close()
+			_ = direct.Close() // Preserve the preceding operation failure.
 			run.reportNFSStats(direct.Stats())
 		}
 		for _, target := range run.targets {
@@ -1304,7 +1306,7 @@ func configureArchiver(ctx context.Context, run *backupRun) error {
 	if err := configurePathdiff(run); err != nil {
 		return err
 	}
-	selectByName, selectItem, mandatory, err := configureBackupSelection(run)
+	selectByName, selectItem, mandatory, err := configureBackupSelection(run) //nolint:contextcheck // Selection builds context-free filesystem callbacks.
 	if err != nil {
 		return err
 	}

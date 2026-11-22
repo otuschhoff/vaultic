@@ -12,7 +12,6 @@ use slatedb::object_store::{
 use tokio::sync::Notify;
 
 const STALE_MULTIPART_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
-pub(super) const ATTRIBUTES_XATTR: &str = "vaultic.attributes";
 pub(super) const MAX_ATTRIBUTES_SIZE: usize = 4096;
 
 #[derive(Clone, Debug)]

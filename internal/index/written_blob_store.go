@@ -120,7 +120,7 @@ func (store *writtenBlobStore) lookupSize(ctx context.Context, handle vaultic.Bl
 
 func (store *writtenBlobStore) token(value []byte) []byte {
 	mac := hmac.New(sha256.New, store.tokenKey)
-	_, _ = mac.Write(value)
+	_, _ = mac.Write(value) // hash.Hash.Write never returns an error.
 	return mac.Sum(nil)
 }
 

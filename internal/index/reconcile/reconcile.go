@@ -2048,7 +2048,7 @@ func (reconciler *Reconciler) reuseExistingRecord(
 			return
 		}
 		if previous, err := schema.UnmarshalInodeRevision(existing[0].Value); err == nil {
-			*priorContent, _ = loadContent(previous)
+			*priorContent, _ = loadContent(previous) // A missing prior content list disables the reuse comparison.
 		}
 	}
 	if !bytes.Equal(existing[0].Value, value) {

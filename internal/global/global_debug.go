@@ -202,7 +202,7 @@ func (bounded *boundedRuntimeTrace) Stop() {
 			err = closeErr
 		}
 		if err != nil {
-			_ = os.Remove(path)
+			_ = os.Remove(path) // Cleanup must not replace the debug capture failure.
 		}
 	}
 	if err != nil {

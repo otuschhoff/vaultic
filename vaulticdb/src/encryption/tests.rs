@@ -2191,8 +2191,10 @@ mod tests {
             .await
             .unwrap();
         for range in [128..192, 65504..65568, 131008..131072] {
-            let mut options = GetOptions::default();
-            options.range = Some(GetRange::Bounded(range.start as u64..range.end as u64));
+            let options = GetOptions {
+                range: Some(GetRange::Bounded(range.start as u64..range.end as u64)),
+                ..Default::default()
+            };
             let result = encrypted.get_opts(&location, options).await.unwrap();
             assert_eq!(result.range, range.start as u64..range.end as u64);
             let bytes = result.bytes().await.unwrap();

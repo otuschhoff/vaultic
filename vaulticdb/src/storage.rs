@@ -2213,17 +2213,17 @@ impl Storage {
             backpressure_count: value(slatedb::db_stats::BACKPRESSURE_COUNT),
             l0_stalls_sst_count: labeled(
                 slatedb::db_stats::L0_STALL_COUNT,
-                &[((
+                &[(
                     slatedb::db_stats::L0_STALL_TYPE_LABEL,
                     slatedb::db_stats::L0_STALL_TYPE_NUM_SSTS,
-                ))],
+                )],
             ),
             l0_stalls_ssts_per_key: labeled(
                 slatedb::db_stats::L0_STALL_COUNT,
-                &[((
+                &[(
                     slatedb::db_stats::L0_STALL_TYPE_LABEL,
                     slatedb::db_stats::L0_STALL_TYPE_NUM_SSTS_PER_KEY,
-                ))],
+                )],
             ),
             immutable_memtable_flushes: value(slatedb::db_stats::IMMUTABLE_MEMTABLE_FLUSHES),
             memtable_bytes: value(slatedb::db_stats::TOTAL_MEM_SIZE_BYTES),
@@ -3394,15 +3394,11 @@ impl Storage {
                 let engine_started = Instant::now();
                 let values = match &*database {
                     Database::Writer(db) => db.multi_get(keys).await.map_err(storage_error),
-                    Database::Reader(reader) => {
-                        reader.multi_get(keys).await.map_err(storage_error)
+                    Database::Reader(reader) => reader.multi_get(keys).await.map_err(storage_error),
+                    Database::Unavailable => Err(VaulticDbError::StorageUnavailable {
+                        message: "vaulticdb storage is transitioning".to_owned(),
                     }
-                    Database::Unavailable => {
-                        Err(VaulticDbError::StorageUnavailable {
-                            message: "vaulticdb storage is transitioning".to_owned(),
-                        }
-                        .into())
-                    }
+                    .into()),
                 };
                 *database_timing = Some((engine_started - lock_started, engine_started.elapsed()));
                 read_timer.record_status_result(&values);

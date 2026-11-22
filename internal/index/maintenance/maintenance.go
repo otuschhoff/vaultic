@@ -1278,10 +1278,10 @@ func loadLegacyLocations(
 	defer func() {
 		for worker := range locations {
 			if locations[worker] != nil {
-				_ = locations[worker].close()
+				_ = locations[worker].close() // Scratch cleanup must not replace the check result.
 			}
 			if contributions[worker] != nil {
-				_ = contributions[worker].close()
+				_ = contributions[worker].close() // Scratch cleanup must not replace the check result.
 			}
 		}
 	}()
@@ -1822,10 +1822,10 @@ func loadSlateDBLocationsWithCount(ctx context.Context, store Store, result, pac
 	defer func() {
 		for partition := range locationPartitions {
 			if locationPartitions[partition] != nil {
-				_ = locationPartitions[partition].close()
+				_ = locationPartitions[partition].close() // Scratch cleanup must not replace the check result.
 			}
 			if packPartitions[partition] != nil {
-				_ = packPartitions[partition].close()
+				_ = packPartitions[partition].close() // Scratch cleanup must not replace the check result.
 			}
 		}
 	}()

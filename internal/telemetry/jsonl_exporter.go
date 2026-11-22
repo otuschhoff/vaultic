@@ -32,11 +32,11 @@ func NewJSONLExporter(path string) (*JSONLExporter, error) {
 	}
 	info, err := file.Stat()
 	if err != nil {
-		_ = file.Close()
+		_ = file.Close() // Preserve the file validation failure.
 		return nil, fmt.Errorf("inspect monitor JSONL file: %w", err)
 	}
 	if !info.Mode().IsRegular() {
-		_ = file.Close()
+		_ = file.Close() // Preserve the permission validation failure.
 		return nil, fmt.Errorf("monitor JSONL output must be a regular file")
 	}
 	return &JSONLExporter{file: file}, nil

@@ -733,7 +733,7 @@ func runIndexImport(
 	if monitorErr != nil {
 		return result, monitorErr
 	}
-	defer func() {
+	defer func() { //nolint:contextcheck // Session-owned resources must close even after command cancellation.
 		monitorExport.StopCollection()
 		monitorSource.SetClient(nil)
 		if storeSession != nil {
@@ -1151,7 +1151,7 @@ func activateImportedIndex(
 			return fmt.Errorf("pin catalog-first activation: %w", err)
 		}
 		defer session.Close(context.WithoutCancel(ctx))
-		ctx = session.Context()
+		ctx = session.Context() //nolint:contextcheck // BeginReadSession derives this renewable context from ctx.
 		if session.Identity.Generation != options.ActivationGeneration || session.Identity.Sequence != options.ActivationSequence {
 			return fmt.Errorf("catalog-first activation generation or sequence changed since validation")
 		}
@@ -1509,7 +1509,7 @@ func runIndexCheck(ctx context.Context, options indexCheckOptions, globalOptions
 			return result, err
 		}
 		checkStore = readSession
-		ctx = readSession.Context()
+		ctx = readSession.Context() //nolint:contextcheck // BeginReadSession derives this renewable context from ctx.
 	}
 	if storeSession != nil {
 		defer storeSession.CloseAndLog()

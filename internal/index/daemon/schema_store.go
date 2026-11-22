@@ -177,7 +177,7 @@ func (store *SchemaStore) BeginReadSession(ctx context.Context) (*ReadSession, e
 		return nil, fmt.Errorf("begin check read session: %w", err)
 	}
 	closeOnError := func(cause error) (*ReadSession, error) {
-		_ = transaction.Rollback(context.WithoutCancel(ctx))
+		_ = transaction.Rollback(context.WithoutCancel(ctx)) // Preserve the read-session setup failure.
 		return nil, cause
 	}
 	value, found, err := transaction.Get(ctx, schema.NextRevisionKey())

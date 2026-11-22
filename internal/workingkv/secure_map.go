@@ -47,7 +47,7 @@ func OpenSecureMap(ctx context.Context, parent, prefix string) (*SecureMap, erro
 
 func (store *SecureMap) token(key []byte) []byte {
 	mac := hmac.New(sha256.New, store.key)
-	_, _ = mac.Write(key)
+	_, _ = mac.Write(key) // hash.Hash.Write never returns an error.
 	return mac.Sum(nil)
 }
 

@@ -43,7 +43,7 @@ func newAnalyticsCheckWorkspace(
 		workspace.gdpr, err = newCheckKVSpool(ctx, scratch, spoolMemory, 32)
 	}
 	if err != nil {
-		_ = workspace.close()
+		_ = workspace.close() // Preserve the workspace setup failure.
 		return nil, err
 	}
 	return workspace, nil

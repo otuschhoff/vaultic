@@ -35,7 +35,9 @@ fn set_database_read_timing<T>(response: &mut Response<T>, timing: Option<(Durat
             ("x-vaulticdb-read-db-lock-ns", lock),
             ("x-vaulticdb-read-engine-ns", engine),
         ] {
-            response.metadata_mut().insert(header, elapsed.as_nanos().to_string().parse().unwrap());
+            response
+                .metadata_mut()
+                .insert(header, elapsed.as_nanos().to_string().parse().unwrap());
         }
     }
 }
@@ -229,9 +231,27 @@ mod tests {
             .unwrap();
         assert!(handler >= 1_000_000);
         assert_eq!(storage, 250);
-        assert!(response.metadata().get("x-vaulticdb-read-db-lock-ns").is_none());
-        set_database_read_timing(&mut response, Some((Duration::from_nanos(10), Duration::from_nanos(200))));
-        assert_eq!(response.metadata().get("x-vaulticdb-read-db-lock-ns").unwrap(), "10");
-        assert_eq!(response.metadata().get("x-vaulticdb-read-engine-ns").unwrap(), "200");
+        assert!(response
+            .metadata()
+            .get("x-vaulticdb-read-db-lock-ns")
+            .is_none());
+        set_database_read_timing(
+            &mut response,
+            Some((Duration::from_nanos(10), Duration::from_nanos(200))),
+        );
+        assert_eq!(
+            response
+                .metadata()
+                .get("x-vaulticdb-read-db-lock-ns")
+                .unwrap(),
+            "10"
+        );
+        assert_eq!(
+            response
+                .metadata()
+                .get("x-vaulticdb-read-engine-ns")
+                .unwrap(),
+            "200"
+        );
     }
 }

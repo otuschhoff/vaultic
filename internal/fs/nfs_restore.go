@@ -35,7 +35,7 @@ func NewNFSRestore(ctx context.Context, destination string, options NFSOptions) 
 		err = filesystem.initialize(endpoint)
 	}
 	if err != nil {
-		_ = filesystem.Close()
+		_ = filesystem.Close() // Preserve the restore setup failure.
 		return nil, err
 	}
 	return &NFSRestore{filesystem: filesystem, endpoint: endpoint, target: endpoint.targets[0],
@@ -219,7 +219,7 @@ func (destination *NFSRestore) Create(name string, node *data.Node, hardlink str
 	if len(file.handle) == 0 {
 		_, file.handle, err = destination.target.LookupAt(parent, file.temporary)
 		if err != nil {
-			_ = file.Close()
+			_ = file.Close() // Preserve the earlier file operation failure.
 			return nil, err
 		}
 	}

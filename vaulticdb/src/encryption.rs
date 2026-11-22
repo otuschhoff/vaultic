@@ -448,8 +448,10 @@ impl EncryptionReadMetrics {
             .ciphertext_origin_request_ns
             .load(Ordering::Relaxed)
             .into();
-        snapshot["ciphertext_origin_body_ns"] =
-            self.ciphertext_origin_body_ns.load(Ordering::Relaxed).into();
+        snapshot["ciphertext_origin_body_ns"] = self
+            .ciphertext_origin_body_ns
+            .load(Ordering::Relaxed)
+            .into();
         snapshot["ciphertext_origin_body_payloads"] = serde_json::json!({
             "file_calls": self.ciphertext_origin_file_body_calls.load(Ordering::Relaxed),
             "file_ns": self.ciphertext_origin_file_body_ns.load(Ordering::Relaxed),
@@ -543,7 +545,8 @@ impl EncryptionReadMetrics {
             .clone();
         errors.insert(
             "dropped".to_owned(),
-            self.ciphertext_origin_request_error_counts_dropped.load(Ordering::Relaxed),
+            self.ciphertext_origin_request_error_counts_dropped
+                .load(Ordering::Relaxed),
         );
         snapshot["ciphertext_origin_request_error_counts"] = serde_json::json!(errors);
         snapshot
@@ -1721,11 +1724,19 @@ impl EncryptedObjectStore {
         })
     }
 
-    async fn origin_request(&self, location: &Path, options: GetOptions, site: OriginReadSite) -> Result<GetResult> {
+    async fn origin_request(
+        &self,
+        location: &Path,
+        options: GetOptions,
+        site: OriginReadSite,
+    ) -> Result<GetResult> {
         let metrics = &self.read_metrics;
-        let conditional = options.if_match.is_some() || options.if_none_match.is_some()
-            || options.if_modified_since.is_some() || options.if_unmodified_since.is_some();
-        let permits_not_modified = options.if_none_match.is_some() || options.if_modified_since.is_some();
+        let conditional = options.if_match.is_some()
+            || options.if_none_match.is_some()
+            || options.if_modified_since.is_some()
+            || options.if_unmodified_since.is_some();
+        let permits_not_modified =
+            options.if_none_match.is_some() || options.if_modified_since.is_some();
         let mut outcome = ReadOutcome::new(
             &metrics.ciphertext_origin_request_active,
             &metrics.ciphertext_origin_request_cancellations,
@@ -1734,8 +1745,12 @@ impl EncryptedObjectStore {
         let result = self.inner.get_opts(location, options).await;
         if let Err(error) = &result {
             metrics.record_origin_request_error(site, conditional, error);
-            if permits_not_modified && matches!(error, slatedb::object_store::Error::NotModified { .. }) {
-                metrics.ciphertext_origin_request_not_modified.fetch_add(1, Ordering::Relaxed);
+            if permits_not_modified
+                && matches!(error, slatedb::object_store::Error::NotModified { .. })
+            {
+                metrics
+                    .ciphertext_origin_request_not_modified
+                    .fetch_add(1, Ordering::Relaxed);
             }
         }
         outcome.finish(match &result {
@@ -1772,7 +1787,11 @@ impl EncryptedObjectStore {
         #[cfg(feature = "diagnostic-body-timing")]
         let result = {
             let mut observed = result;
-            observed.extensions.insert(vaultic_body_timing::FileReadObservation(self.read_metrics.file_read_metrics.clone()));
+            observed
+                .extensions
+                .insert(vaultic_body_timing::FileReadObservation(
+                    self.read_metrics.file_read_metrics.clone(),
+                ));
             observed
         };
         let result = result.bytes().await;
@@ -1806,7 +1825,9 @@ impl EncryptedObjectStore {
             .fetch_add(1, Ordering::Relaxed);
         let timing = ReadTiming::new(&self.read_metrics.ciphertext_origin_ns)
             .with_histogram(&self.read_metrics.ciphertext_origin_latency);
-        let encrypted = self.origin_request(location, options, OriginReadSite::Chunk).await?;
+        let encrypted = self
+            .origin_request(location, options, OriginReadSite::Chunk)
+            .await?;
         if encrypted.meta != expected {
             self.read_metrics
                 .ciphertext_origin_identity_rejections
@@ -1968,7 +1989,9 @@ impl EncryptedObjectStore {
             .fetch_add(1, Ordering::Relaxed);
         let fetch = ReadTiming::new(&self.read_metrics.ciphertext_origin_ns)
             .with_histogram(&self.read_metrics.ciphertext_origin_latency);
-        let result = self.origin_request(location, options, OriginReadSite::Header).await?;
+        let result = self
+            .origin_request(location, options, OriginReadSite::Header)
+            .await?;
         let meta = result.meta.clone();
         let attributes = result.attributes.clone();
         let extensions = result.extensions.clone();
@@ -2181,7 +2204,9 @@ impl ObjectStore for EncryptedObjectStore {
                 .fetch_add(1, Ordering::Relaxed);
             let fetch = ReadTiming::new(&self.read_metrics.ciphertext_origin_ns)
                 .with_histogram(&self.read_metrics.ciphertext_origin_latency);
-            let encrypted = self.origin_request(location, options, OriginReadSite::Range).await?;
+            let encrypted = self
+                .origin_request(location, options, OriginReadSite::Range)
+                .await?;
             if cached_meta
                 .as_ref()
                 .is_some_and(|cached| cached != &encrypted.meta)

@@ -1835,6 +1835,18 @@
           "availability": "unavailable"
         },
         {
+          "name": "engine_block_cache_bytes",
+          "kind": "gauge",
+          "unit": "bytes",
+          "availability": "unavailable"
+        },
+        {
+          "name": "engine_meta_cache_bytes",
+          "kind": "gauge",
+          "unit": "bytes",
+          "availability": "unavailable"
+        },
+        {
           "name": "process_cpu_user",
           "kind": "counter",
           "unit": "microseconds",

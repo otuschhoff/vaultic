@@ -129,6 +129,7 @@ impl BeginReconciliations {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod finalization_tests {
     use super::{BeginReconciliations, FinalizationLocks, MAX_BEGIN_RECONCILIATIONS};
     use std::{sync::Arc, time::Duration};
