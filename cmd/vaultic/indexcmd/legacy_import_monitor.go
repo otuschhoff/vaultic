@@ -221,7 +221,7 @@ func startLegacyImportMonitorExport(ctx context.Context, options importMonitorEx
 		}
 		exporter = influxExporter
 	}
-	worker := telemetry.NewAsyncExporterWithConfig(exporter, telemetry.AsyncExporterConfig{ //nolint:contextcheck // The exporter owns its context so it can drain after cancellation.
+	worker := telemetry.NewAsyncExporterWithConfig(exporter, telemetry.AsyncExporterConfig{ //nolint:contextcheck // Exporter drains after cancellation.
 		Capacity: options.Queue, RetryLimit: options.RetryLimit, RetryBackoff: options.RetryBackoff, Timeout: options.Timeout,
 	})
 	monitor := startLegacyImportMonitorLoop(ctx, options.Interval, options.Timeout, worker, func(collectCtx context.Context, now time.Time) (telemetry.MonitorSnapshot, error) {

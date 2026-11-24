@@ -1306,6 +1306,7 @@ func publicationProducerLeg(root, label string) (int, error) {
 }
 
 func TestPublicationOriginFilePolicy(t *testing.T) {
+	python, pythonErr := exec.LookPath("python3.12")
 	for _, route := range []struct{ root, label string }{
 		{publicationOriginFile800kRoot, "leg-01-file"},
 		{publicationOriginFileLive800kRoot, "leg-01-file-live"},
@@ -1331,14 +1332,25 @@ func TestPublicationOriginFilePolicy(t *testing.T) {
 			root, label := filepath.Join(route.root, route.label), route.label
 			t.Setenv("VAULTIC_PHASE35_PRODUCER_LEG", label)
 			t.Setenv("VAULTIC_PHASE35_THROUGHPUT_ROOT", root)
-			runtimeOutput, err := exec.CommandContext(t.Context(), "python3.12", "-B", "-c", "import sys; sys.path.insert(0, '/root/proj/vaultic/helpers/phase35-m6'); import metadata_read; print(metadata_read.producer_leg(sys.argv[1])[1])", label).Output()
-			rtest.OK(t, err)
-			if !strings.HasPrefix(strings.TrimSpace(string(runtimeOutput)), "/run/vaultic-unchanged-") {
-				t.Fatal("Python file-read route violates the qualifier runtime ownership prefix")
-			}
-			if len(filepath.Join(strings.TrimSpace(string(runtimeOutput)), "fc-1234567890", "db.sock")) >= 108 {
-				t.Fatal("Python file-read route exceeds the native socket path bound")
-			}
+			t.Run("python", func(t *testing.T) {
+				if pythonErr != nil {
+					t.Skip("Python 3.12 is required to compare the Go and Python file policies")
+				}
+				script := "import sys; import metadata_read; print(metadata_read.producer_leg(sys.argv[1])[1])"
+				command := exec.CommandContext(t.Context(), python, "-B", "-c", script, label)
+				command.Dir = filepath.Join("..", "..", "helpers", "phase35-m6")
+				runtimeOutput, err := command.CombinedOutput()
+				if err != nil {
+					t.Fatalf("read Python producer policy: %v\n%s", err, runtimeOutput)
+				}
+				runtimeRoot := strings.TrimSpace(string(runtimeOutput))
+				if !strings.HasPrefix(runtimeRoot, "/run/vaultic-unchanged-") {
+					t.Fatal("Python file-read route violates the qualifier runtime ownership prefix")
+				}
+				if len(filepath.Join(runtimeRoot, "fc-1234567890", "db.sock")) >= 108 {
+					t.Fatal("Python file-read route exceeds the native socket path bound")
+				}
+			})
 			tasks, err := publicationProducerLeg(root, label)
 			rtest.OK(t, err)
 			tuning, err := publicationDBProfile("db-scale800k")

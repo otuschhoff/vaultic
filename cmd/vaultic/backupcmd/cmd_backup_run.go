@@ -190,7 +190,10 @@ func runBackupPipeline(ctx context.Context, options backupOptions, globalOptions
 }
 
 //nolint:contextcheck // Reuse the lock context from the same parent backup across targets.
-func runBackupPipelineWithSession(ctx context.Context, options backupOptions, globalOptions global.Options, term ui.Terminal, args []string, session *backupRepositorySession) (resultErr error) {
+func runBackupPipelineWithSession(
+	ctx context.Context, options backupOptions, globalOptions global.Options,
+	term ui.Terminal, args []string, session *backupRepositorySession,
+) (resultErr error) {
 	if session != nil && session.ctx != nil {
 		ctx = session.ctx
 	}
@@ -1306,7 +1309,7 @@ func configureArchiver(ctx context.Context, run *backupRun) error {
 	if err := configurePathdiff(run); err != nil {
 		return err
 	}
-	selectByName, selectItem, mandatory, err := configureBackupSelection(run) //nolint:contextcheck // Selection builds context-free filesystem callbacks.
+	selectByName, selectItem, mandatory, err := configureBackupSelection(run)
 	if err != nil {
 		return err
 	}

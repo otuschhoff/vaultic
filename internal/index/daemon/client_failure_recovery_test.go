@@ -1357,7 +1357,11 @@ func TestProcessDrainRejectsEveryMutationClassAndRestarts(t *testing.T) {
 			return err
 		},
 		"begin-transaction": func() error {
-			_, err := client.Begin(ctx)
+			_, err := client.RPC().BeginOwned(ctx, &vaulticdbv1.BeginOwnedRequest{
+				Context:             requestContext(ctx),
+				BeginRequestId:      strings.Repeat("d", 32),
+				BeginDeadlineUnixMs: time.Now().Add(defaultRPCDeadline).UnixMilli(),
+			})
 			return err
 		},
 		"writer-transition": func() error {
@@ -1386,6 +1390,13 @@ func TestProcessDrainRejectsEveryMutationClassAndRestarts(t *testing.T) {
 			}
 		})
 	}
+	t.Run("begin-ownership-reconciliation", func(t *testing.T) {
+		transaction, err := client.Begin(ctx)
+		if transaction != nil || status.Code(err) != codes.FailedPrecondition ||
+			!strings.Contains(err.Error(), "reconcile uncertain Begin") {
+			t.Fatalf("Begin while reconciliation is unavailable: transaction=%v, err=%v", transaction, err)
+		}
+	})
 	after := daemonHealth(t, client)
 	if after.GetStateSinceUnixMs() != drained.GetStateSinceUnixMs() || after.GetState() != drained.GetState() {
 		t.Fatalf("drain lifecycle changed while rejecting mutations: before=%+v after=%+v", drained, after)

@@ -426,6 +426,14 @@ func (completion *fileSaveCompletion) completeError(err error) {
 	completion.params.finish(*completion.result)
 }
 
+func (s *fileSaver) prepareSourceFile(ctx context.Context, params saveFileParams) error {
+	if s.PrepareFile == nil {
+		return nil
+	}
+	s.sourceReads.pipeline.workerOpenCalls.Add(1)
+	return s.PrepareFile(ctx, params.target, params.file)
+}
+
 // saveFile stores the file f in the repo, then closes it.
 func (s *fileSaver) saveFile(ctx context.Context, params saveFileParams) {
 	started := time.Now()
@@ -445,13 +453,10 @@ func (s *fileSaver) saveFile(ctx context.Context, params saveFileParams) {
 	completion := fileSaveCompletion{result: &fnr, params: params, pipeline: pipeline}
 
 	debug.Log("%v", params.snapshotPath)
-	if s.PrepareFile != nil {
-		pipeline.workerOpenCalls.Add(1)
-		if err := s.PrepareFile(ctx, params.target, params.file); err != nil {
-			_ = params.file.Close() // Preserve the file setup failure.
-			completion.completeError(err)
-			return
-		}
+	if err := s.prepareSourceFile(ctx, params); err != nil {
+		_ = params.file.Close() // Preserve the file setup failure.
+		completion.completeError(err)
+		return
 	}
 
 	node, err := s.NodeFromFileInfo(params.snapshotPath, params.target, params.file, false)
