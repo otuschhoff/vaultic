@@ -303,7 +303,7 @@ impl TimingMetric {
             TimingOutcome::Failure => saturating_increment(&self.failures, 1),
             TimingOutcome::Cancellation => saturating_increment(&self.cancellations, 1),
             TimingOutcome::Timeout => saturating_increment(&self.timeouts, 1),
-        }
+        };
         saturating_increment(&self.total_us, elapsed_us);
         self.max_us.fetch_max(elapsed_us, Ordering::Relaxed);
         let bucket = LATENCY_BUCKET_UPPER_US.partition_point(|upper| *upper < elapsed_us);
@@ -320,16 +320,27 @@ fn monotonic_us() -> u64 {
     duration_us(EPOCH.get_or_init(Instant::now).elapsed()).saturating_add(1)
 }
 
-fn saturating_increment(value: &AtomicU64, increment: u64) {
-    let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-        Some(current.saturating_add(increment))
-    });
+fn update_relaxed(value: &AtomicU64, update: impl Fn(u64) -> u64) -> u64 {
+    let mut current = value.load(Ordering::Relaxed);
+    loop {
+        match value.compare_exchange_weak(
+            current,
+            update(current),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(previous) => return previous,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+pub(crate) fn saturating_increment(value: &AtomicU64, increment: u64) -> u64 {
+    update_relaxed(value, |current| current.saturating_add(increment))
 }
 
 fn saturating_decrement(value: &AtomicU64) {
-    let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-        Some(current.saturating_sub(1))
-    });
+    update_relaxed(value, |current| current.saturating_sub(1));
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -461,11 +472,7 @@ impl CommitFailureAttribution {
             return None;
         }
         let index = stage as usize * GRPC_CODE_COUNT + code as usize;
-        let previous = self.counts[index]
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                Some(value.saturating_add(1))
-            })
-            .unwrap_or_else(|value| value);
+        let previous = saturating_increment(&self.counts[index], 1);
         let occurrence = previous.saturating_add(1);
         if occurrence > 8 && !occurrence.is_power_of_two() {
             return None;

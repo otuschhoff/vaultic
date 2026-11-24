@@ -301,11 +301,7 @@ impl ObjectOperationMetric {
     }
 
     fn add_bytes(&self, bytes: u64) {
-        let _ =
-            self.transferred_bytes
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                    Some(current.saturating_add(bytes))
-                });
+        crate::attribution::saturating_increment(&self.transferred_bytes, bytes);
     }
 }
 
